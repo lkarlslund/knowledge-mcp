@@ -1,0 +1,5 @@
+/wikipedia-multistream-mcp
+/data/*
+!/data/.gitkeep
+coverage.out
+*.prof
