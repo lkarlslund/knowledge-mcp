@@ -42,7 +42,8 @@ Open `http://127.0.0.1:8765/` for the lightweight local dashboard. It shows
 downloaded wikis, available upgrades, current/recent job progress, and aggregate
 page/storage statistics. A Download button opens the complete Wikimedia dump
 catalog in a searchable modal, including human-readable project, language, and
-content-purpose metadata. The backend caches the complete catalog for one day
+content-purpose metadata. The modal can filter by language and hide already
+installed wikis. The backend caches the complete catalog for one day
 and searches that local copy. Upgrade controls appear with the other local-wiki
 actions. A confirmed trash action permanently removes an idle local wiki and
 its staged remnants; active work must be canceled first.
