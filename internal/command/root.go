@@ -15,7 +15,6 @@ import (
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/store"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikiindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
 	"github.com/spf13/cobra"
 )
@@ -206,6 +205,9 @@ func newReadCommand(opts *options) *cobra.Command {
 		Short: "Read a local wiki page",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if maxChars < 1 || maxChars > 50_000 {
+				return errors.New("max-chars must be between 1 and 50000 for MCP reads")
+			}
 			title := ""
 			if len(args) == 2 {
 				title = args[1]
@@ -223,7 +225,7 @@ func newReadCommand(opts *options) *cobra.Command {
 	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or wikitext")
 	command.Flags().StringVar(&section, "section", "", "read one article section by heading or anchor")
 	command.Flags().IntVar(&offset, "offset", 0, "character offset")
-	command.Flags().IntVar(&maxChars, "max-chars", wikiindex.DefaultReadMaxChars, "maximum returned characters (up to 1000000)")
+	command.Flags().IntVar(&maxChars, "max-chars", 12_000, "maximum returned characters (up to 50000)")
 	command.Flags().BoolVar(&followRedirects, "follow-redirects", true, "follow redirects and extract targeted sections")
 	command.Flags().BoolVar(&outline, "outline", false, "include the article section outline")
 	return command
