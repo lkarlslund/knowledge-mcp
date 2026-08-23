@@ -6,8 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/github-repos/wikipedia-multistream-mcp
-ExecStart=%h/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp serve --listen 127.0.0.1:8765 --data-dir %h/github-repos/wikipedia-multistream-mcp/data --download-workers 3 --index-workers 2 --download-connections 3
+WorkingDirectory=%h/.local/share/wikipedia-multistream-mcp
+ExecStart=%h/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp serve --listen 127.0.0.1:8765 --data-dir %h/.local/share/wikipedia-multistream-mcp/data --download-workers 3 --index-workers 2 --download-connections 3
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30

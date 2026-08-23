@@ -6,6 +6,8 @@ Large page bodies stay in Wikimedia's compressed bzip2 files. A compact title
 index is published first, so title search and page reads become available while
 the full-text body index continues building in the background.
 
+![Wikipedia Multistream MCP dashboard in dark mode](docs/dashboard-dark.png)
+
 > Wikimedia marks the XML dump family as deprecated. This project deliberately
 > targets `pages-articles-multistream` because its companion offset index enables
 > efficient random access to compressed page groups.
@@ -115,11 +117,13 @@ backend:
 
 ## User service
 
-The included systemd user unit follows the local installation layout used by
-this repository:
+The included systemd user unit uses standard per-user application and data
+directories:
 
 ```sh
-mkdir -p ~/.local/lib/wikipedia-multistream-mcp ~/.config/systemd/user
+mkdir -p ~/.local/lib/wikipedia-multistream-mcp \
+  ~/.local/share/wikipedia-multistream-mcp/data \
+  ~/.config/systemd/user
 go build -o ~/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp .
 cp contrib/systemd/wikipedia-multistream-mcp.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -128,7 +132,64 @@ systemctl --user enable --now wikipedia-multistream-mcp.service
 
 Inspect it with `systemctl --user status wikipedia-multistream-mcp.service` or
 `journalctl --user -u wikipedia-multistream-mcp.service`. Runtime wiki data
-stays in this checkout's ignored `data/` directory.
+is stored under `~/.local/share/wikipedia-multistream-mcp/data`.
+
+## Agent installation
+
+An AI coding agent can perform a verified Linux installation without building
+from source. The following commands support AMD64 and ARM64 systems with a
+systemd user session and require `curl`, `jq`, and `sha256sum`. They download
+the latest rolling release, verify its published SHA-256 checksum, install the
+user service, and perform an MCP call:
+
+```sh
+set -euo pipefail
+
+case "$(uname -m)" in
+  x86_64) release_arch="amd64" ;;
+  aarch64|arm64) release_arch="arm64" ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+release_repo="lkarlslund/wikipedia-multistream-mcp"
+release_tag="$(curl -fsSL "https://api.github.com/repos/${release_repo}/releases/latest" | jq -r .tag_name)"
+release_asset="wikipedia-multistream-mcp-${release_tag}-linux-${release_arch}"
+install_tmp="$(mktemp -d)"
+trap 'rm -rf -- "$install_tmp"' EXIT
+
+curl -fL "https://github.com/${release_repo}/releases/download/${release_tag}/${release_asset}" \
+  -o "${install_tmp}/${release_asset}"
+curl -fL "https://github.com/${release_repo}/releases/download/${release_tag}/${release_asset}.sha256" \
+  -o "${install_tmp}/${release_asset}.sha256"
+(cd "$install_tmp" && sha256sum -c "${release_asset}.sha256")
+
+install -d "$HOME/.local/lib/wikipedia-multistream-mcp" \
+  "$HOME/.local/share/wikipedia-multistream-mcp/data" \
+  "$HOME/.config/systemd/user"
+install -m 0755 "${install_tmp}/${release_asset}" \
+  "$HOME/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp"
+curl -fsSL "https://raw.githubusercontent.com/${release_repo}/${release_tag}/contrib/systemd/wikipedia-multistream-mcp.service" \
+  -o "${install_tmp}/wikipedia-multistream-mcp.service"
+install -m 0644 "${install_tmp}/wikipedia-multistream-mcp.service" \
+  "$HOME/.config/systemd/user/wikipedia-multistream-mcp.service"
+
+systemctl --user daemon-reload
+systemctl --user enable --now wikipedia-multistream-mcp.service
+curl --retry 10 --retry-delay 1 --retry-connrefused -fsS \
+  http://127.0.0.1:8765/healthz
+"$HOME/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp" wiki list
+```
+
+The agent should then register the Streamable HTTP MCP endpoint exactly as
+`http://127.0.0.1:8765/mcp`. The dashboard URL is
+`http://127.0.0.1:8765/`; it is not the MCP endpoint. Clients that only support
+stdio should run
+`~/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp mcp stdio`
+after the service is active.
+
+On macOS or Windows, download the matching release asset and run
+`wikipedia-multistream-mcp serve`; persistent service registration is
+platform-specific.
 
 The server offers these action-specific tools:
 
@@ -206,3 +267,9 @@ govulncheck ./...
 
 Tests generate small concatenated bzip2 fixtures and do not download a
 production wiki.
+
+## License
+
+Wikipedia Multistream MCP is released under the [MIT License](LICENSE).
+Bundled Alpine.js, Bootstrap, and Bootstrap Icons retain their respective
+license notices under `internal/dashboard/assets/`.
