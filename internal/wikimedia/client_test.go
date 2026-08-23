@@ -1,6 +1,7 @@
 package wikimedia
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -9,7 +10,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
 
 func TestCatalogMetadataAndDownload(t *testing.T) {
@@ -115,5 +119,49 @@ func TestMultipartMetadataIsOrderedAndSummed(t *testing.T) {
 	}
 	if metadata.Parts[0].Key != "1/p1p19" || metadata.Parts[1].Key != "2/p20p29" {
 		t.Fatalf("parts are not ordered: %#v", metadata.Parts)
+	}
+}
+
+func TestParallelDownloadResumesExistingPrefix(t *testing.T) {
+	t.Parallel()
+	payload := bytes.Repeat([]byte("parallel-range-fixture-"), 50_000)
+	hash := sha1.Sum(payload)
+	sha := hex.EncodeToString(hash[:])
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var start, end int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil || start < 0 || end < start || end >= int64(len(payload)) {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		requests.Add(1)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[start : end+1])
+	}))
+	defer server.Close()
+
+	destination := filepath.Join(t.TempDir(), "parallel")
+	prefix := int64(12_345)
+	if err := os.WriteFile(destination, payload[:prefix], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file := model.FileMetadata{URL: server.URL + "/file", Size: int64(len(payload)), SHA1: sha}
+	client := NewClientWithBaseURL(server.URL, 3)
+	if err := client.downloadParallel(context.Background(), file, destination, destination+".resume.json", prefix, func(int64, int64, float64) {}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("parallel download content differs")
+	}
+	if requests.Load() != 3 {
+		t.Fatalf("range requests = %d, want 3", requests.Load())
+	}
+	if _, err := os.Stat(destination + ".resume.json"); !os.IsNotExist(err) {
+		t.Fatalf("resume state remains after verification: %v", err)
 	}
 }

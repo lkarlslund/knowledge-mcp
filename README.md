@@ -26,6 +26,14 @@ The backend listens on `http://127.0.0.1:8765/mcp` and stores runtime data in
 ./wikipedia-multistream-mcp serve --listen 127.0.0.1:9000 --data-dir /srv/wiki-data
 ```
 
+Downloads and indexing use independent worker pools, so indexing one wiki does
+not block downloads of others. The defaults allow three download/update jobs
+and two indexing jobs at once; tune them with `--download-workers` and
+`--index-workers`. Files of at least 64 MiB use up to four parallel HTTP ranges,
+shared globally across active downloads; tune that limit independently with
+`--download-connections`. HTTP 429/503 responses back off and retry. Range
+progress is persisted beside the staging file and safely resumes after restarts.
+
 The listener is intentionally restricted to an explicit loopback IP. There is
 no authentication layer.
 
@@ -108,10 +116,13 @@ The server offers these action-specific tools:
 | `wiki_search` | Search titles, then full text when ready. |
 | `wiki_read` | Read an exact page as text or wikitext. |
 
-Jobs progress through discovery, download, title indexing, title readiness, and
-body indexing. A new generation replaces an old one only after its dump and
-title index have been verified. If body indexing fails, title search and page
-reads remain available, and a later update submission retries that stage.
+A download job ends after all compressed files pass size and checksum
+verification. The server then creates a separate indexing job. Fresh downloads
+appear under local wikis immediately with search mode `none`; title search and
+page reads become available after the first indexing stage, while full-text
+indexing continues. During an update the new generation remains staged, and
+replaces the old one only after its title index is ready. Retrying failed
+indexing does not download the dump again.
 
 ## Storage
 

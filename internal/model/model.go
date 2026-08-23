@@ -7,6 +7,7 @@ const (
 	StateDiscovering   = "discovering"
 	StateDownloading   = "downloading"
 	StateVerifying     = "verifying"
+	StateDownloaded    = "downloaded"
 	StateTitleIndexing = "title_indexing"
 	StateTitleReady    = "title_ready"
 	StateBodyIndexing  = "body_indexing"
@@ -94,6 +95,7 @@ type Job struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	TitleAvailable bool      `json:"title_available"`
+	SourceJobID    string    `json:"source_job_id,omitempty"`
 }
 
 type SearchHit struct {

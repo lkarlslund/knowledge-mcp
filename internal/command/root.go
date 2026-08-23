@@ -44,6 +44,7 @@ func Execute() error {
 
 func newServeCommand() *cobra.Command {
 	var listen, dataDir string
+	var downloadWorkers, indexWorkers, downloadConnections int
 	command := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the persistent Streamable HTTP MCP backend",
@@ -51,7 +52,7 @@ func newServeCommand() *cobra.Command {
 			if err := requireLoopback(listen); err != nil {
 				return err
 			}
-			backend, err := store.Open(dataDir, wikimedia.NewClient())
+			backend, err := store.Open(dataDir, wikimedia.NewClient(downloadConnections), store.Options{DownloadWorkers: downloadWorkers, IndexWorkers: indexWorkers})
 			if err != nil {
 				return err
 			}
@@ -64,6 +65,9 @@ func newServeCommand() *cobra.Command {
 	}
 	command.Flags().StringVar(&listen, "listen", "127.0.0.1:8765", "loopback listen address")
 	command.Flags().StringVar(&dataDir, "data-dir", "./data", "runtime data directory")
+	command.Flags().IntVar(&downloadWorkers, "download-workers", 3, "concurrent download/update jobs")
+	command.Flags().IntVar(&indexWorkers, "index-workers", 2, "concurrent indexing jobs")
+	command.Flags().IntVar(&downloadConnections, "download-connections", 4, "parallel HTTP ranges per large file")
 	return command
 }
 

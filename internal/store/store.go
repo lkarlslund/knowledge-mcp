@@ -21,17 +21,23 @@ import (
 )
 
 type Store struct {
-	root   string
-	remote *wikimedia.Client
-	mu     sync.RWMutex
-	jobs   map[string]*model.Job
-	active map[string]string
-	queue  chan string
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	root          string
+	remote        *wikimedia.Client
+	mu            sync.RWMutex
+	jobs          map[string]*model.Job
+	active        map[string]string
+	downloadQueue chan string
+	indexQueue    chan string
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 }
 
-func Open(root string, remote *wikimedia.Client) (*Store, error) {
+type Options struct {
+	DownloadWorkers int
+	IndexWorkers    int
+}
+
+func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, error) {
 	if root == "" {
 		return nil, errors.New("data directory cannot be empty")
 	}
@@ -40,14 +46,26 @@ func Open(root string, remote *wikimedia.Client) (*Store, error) {
 			return nil, fmt.Errorf("create data directory: %w", err)
 		}
 	}
-	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), queue: make(chan string, 256)}
+	config := Options{DownloadWorkers: 3, IndexWorkers: 2}
+	if len(options) > 0 {
+		config = options[0]
+	}
+	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
+		return nil, errors.New("download and index worker counts must be positive")
+	}
+	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256)}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
-	s.wg.Add(1)
-	go s.worker(ctx)
+	s.wg.Add(config.DownloadWorkers + config.IndexWorkers)
+	for range config.DownloadWorkers {
+		go s.worker(ctx, s.downloadQueue)
+	}
+	for range config.IndexWorkers {
+		go s.worker(ctx, s.indexQueue)
+	}
 	return s, nil
 }
 
@@ -96,7 +114,10 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 		if err != nil {
 			continue
 		}
-		local := model.LocalWiki{Manifest: manifest, State: model.StateTitleReady, SearchMode: "title"}
+		local := model.LocalWiki{Manifest: manifest, State: model.StateDownloaded, SearchMode: "none"}
+		if manifest.TitleReady {
+			local.State, local.SearchMode = model.StateTitleReady, "title"
+		}
 		if manifest.BodyReady {
 			local.State, local.SearchMode = model.StateReady, "full_text"
 		}
@@ -199,6 +220,24 @@ func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 	if id := s.active[wiki]; id != "" {
 		return *s.jobs[id], nil
 	}
+	if kind == "update" {
+		var failedIndex *model.Job
+		for _, existing := range s.jobs {
+			if existing.Wiki == wiki && existing.Kind == "index" && existing.State == model.StateFailed && (failedIndex == nil || existing.UpdatedAt.After(failedIndex.UpdatedAt)) {
+				failedIndex = existing
+			}
+		}
+		if failedIndex != nil {
+			failedIndex.State, failedIndex.Phase, failedIndex.Error, failedIndex.Message, failedIndex.UpdatedAt = model.StateQueued, "queued", "", "retrying indexing without another download", time.Now().UTC()
+			s.active[wiki] = failedIndex.ID
+			if err := s.saveJobsLocked(); err != nil {
+				delete(s.active, wiki)
+				return model.Job{}, err
+			}
+			s.enqueue(failedIndex)
+			return *failedIndex, nil
+		}
+	}
 	var retry *model.Job
 	for _, existing := range s.jobs {
 		if existing.Wiki == wiki && existing.Kind == kind && existing.State == model.StateFailed && (retry == nil || existing.UpdatedAt.After(retry.UpdatedAt)) {
@@ -212,7 +251,7 @@ func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 			delete(s.active, wiki)
 			return model.Job{}, err
 		}
-		s.queue <- retry.ID
+		s.enqueue(retry)
 		return *retry, nil
 	}
 	id, err := newID()
@@ -227,7 +266,7 @@ func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 		delete(s.active, wiki)
 		return model.Job{}, err
 	}
-	s.queue <- id
+	s.enqueue(job)
 	return *job, nil
 }
 
@@ -284,19 +323,31 @@ func (s *Store) Read(wiki, title string, pageID uint64, format string, start, ma
 	return page, err
 }
 
-func (s *Store) worker(ctx context.Context) {
+func (s *Store) worker(ctx context.Context, queue <-chan string) {
 	defer s.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case id := <-s.queue:
+		case id := <-queue:
 			s.runJob(ctx, id)
 		}
 	}
 }
 
 func (s *Store) runJob(ctx context.Context, id string) {
+	job, err := s.Job(id, "")
+	if err != nil {
+		return
+	}
+	if job.Kind == "index" {
+		s.runIndexJob(ctx, id)
+		return
+	}
+	s.runDownloadJob(ctx, id)
+}
+
+func (s *Store) runDownloadJob(ctx context.Context, id string) {
 	s.setJob(id, model.StateDiscovering, "discovering", 0, 0, "", 0, "checking Wikimedia dump metadata", "")
 	job, err := s.Job(id, "")
 	if err != nil {
@@ -313,7 +364,7 @@ func (s *Store) runJob(ctx context.Context, id string) {
 			s.finishJob(id, model.StateUpToDate, "local dump and indexes are current")
 			return
 		}
-		s.buildBody(ctx, id, job.Wiki, current)
+		s.finishDownloadAndQueueIndex(id, job.Wiki, "", "dump is already local; indexing queued")
 		return
 	}
 	stage := filepath.Join(s.root, ".staging", id)
@@ -343,7 +394,6 @@ func (s *Store) runJob(ctx context.Context, id string) {
 			s.setJob(id, model.StateDownloading, "downloading_"+label, completedBytes+done, totalBytes, "bytes", rate, "downloading "+label, "")
 		})
 	}
-	localParts := make([]wikiindex.Part, 0, len(metadata.Parts))
 	for i, part := range metadata.Parts {
 		indexPath := filepath.Join(partsDir, fmt.Sprintf("%03d.index.bz2", i))
 		dumpPath := filepath.Join(partsDir, fmt.Sprintf("%03d.dump.bz2", i))
@@ -359,17 +409,8 @@ func (s *Store) runJob(ctx context.Context, id string) {
 			return
 		}
 		completedBytes += part.Dump.Size
-		localParts = append(localParts, wikiindex.Part{Number: i, DumpPath: dumpPath, IndexPath: indexPath})
 	}
-	s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
-	count, err := wikiindex.BuildTitle(ctx, localParts, filepath.Join(stage, wikiindex.TitleIndexDir), func(done, total int64) {
-		s.setJob(id, model.StateTitleIndexing, "title_indexing", done, total, "pages", 0, "building title index", "")
-	})
-	if err != nil {
-		s.failJob(id, err)
-		return
-	}
-	manifest := model.Manifest{Wiki: job.Wiki, DumpDate: metadata.DumpDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PageCount: count, TitleReady: true, PublishedAt: time.Now().UTC()}
+	manifest := model.Manifest{Wiki: job.Wiki, DumpDate: metadata.DumpDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PublishedAt: time.Now().UTC()}
 	for _, part := range metadata.Parts {
 		manifest.DumpSize += part.Dump.Size
 		manifest.IndexSize += part.Index.Size
@@ -381,15 +422,110 @@ func (s *Store) runJob(ctx context.Context, id string) {
 		s.failJob(id, err)
 		return
 	}
-	if err := s.publish(job.Wiki, stage); err != nil {
+	sourceJobID := id
+	if job.Kind == "download" {
+		if err := s.publish(job.Wiki, stage); err != nil {
+			s.failJob(id, err)
+			return
+		}
+		sourceJobID = ""
+	}
+	s.finishDownloadAndQueueIndex(id, job.Wiki, sourceJobID, "download verified; indexing queued")
+}
+
+func (s *Store) finishDownloadAndQueueIndex(id, wiki, sourceJobID, message string) {
+	indexID, err := newID()
+	if err != nil {
 		s.failJob(id, err)
 		return
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	downloadJob := s.jobs[id]
+	if downloadJob == nil {
+		return
+	}
+	now := time.Now().UTC()
+	downloadJob.State, downloadJob.Phase, downloadJob.Message, downloadJob.Error, downloadJob.UpdatedAt = model.StateDownloaded, "complete", message, "", now
+	delete(s.active, wiki)
+	indexJob := &model.Job{ID: indexID, Wiki: wiki, Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued after download", CreatedAt: now, UpdatedAt: now, SourceJobID: sourceJobID}
+	s.jobs[indexID], s.active[wiki] = indexJob, indexID
+	if err := s.saveJobsLocked(); err != nil {
+		downloadJob.State, downloadJob.Phase, downloadJob.Error = model.StateFailed, "failed", err.Error()
+		delete(s.jobs, indexID)
+		delete(s.active, wiki)
+		return
+	}
+	s.enqueue(indexJob)
+}
+
+func (s *Store) enqueue(job *model.Job) {
+	if job.Kind == "index" {
+		s.indexQueue <- job.ID
+		return
+	}
+	s.downloadQueue <- job.ID
+}
+
+func (s *Store) runIndexJob(ctx context.Context, id string) {
+	job, err := s.Job(id, "")
+	if err != nil {
+		return
+	}
+	path := s.wikiPath(job.Wiki)
+	publishAfterTitle := false
+	if job.SourceJobID != "" {
+		staged := filepath.Join(s.root, ".staging", job.SourceJobID)
+		if _, statErr := os.Stat(filepath.Join(staged, "manifest.json")); statErr == nil {
+			path, publishAfterTitle = staged, true
+		}
+	}
+	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
+	if err != nil {
+		s.failJob(id, err)
+		return
+	}
+	if !manifest.TitleReady {
+		temporary := filepath.Join(path, wikiindex.TitleIndexDir+".building")
+		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
+		count, buildErr := wikiindex.BuildTitle(ctx, generationParts(path, manifest.PartCount), temporary, func(done, total int64) {
+			s.setJob(id, model.StateTitleIndexing, "title_indexing", done, total, "pages", 0, "building title index", "")
+		})
+		if buildErr != nil {
+			s.failJob(id, buildErr)
+			return
+		}
+		final := filepath.Join(path, wikiindex.TitleIndexDir)
+		if err := os.RemoveAll(final); err != nil {
+			s.failJob(id, err)
+			return
+		}
+		if err := os.Rename(temporary, final); err != nil {
+			s.failJob(id, err)
+			return
+		}
+		manifest.PageCount, manifest.TitleReady, manifest.PublishedAt = count, true, time.Now().UTC()
+		if err := writeJSON(filepath.Join(path, "manifest.json"), manifest); err != nil {
+			s.failJob(id, err)
+			return
+		}
+	}
+	if publishAfterTitle {
+		if err := s.publish(job.Wiki, path); err != nil {
+			s.failJob(id, err)
+			return
+		}
+	}
+	s.mu.Lock()
 	if currentJob := s.jobs[id]; currentJob != nil {
 		currentJob.TitleAvailable = true
+		_ = s.saveJobsLocked()
 	}
 	s.mu.Unlock()
+	if manifest.BodyReady {
+		s.finishJob(id, model.StateReady, "title and full-text indexes are ready")
+		return
+	}
 	s.buildBody(ctx, id, job.Wiki, manifest)
 }
 
@@ -540,10 +676,10 @@ func (s *Store) loadJobs() error {
 		return fmt.Errorf("decode jobs: %w", err)
 	}
 	for _, job := range jobs {
-		if job.State != model.StateReady && job.State != model.StateUpToDate && job.State != model.StateFailed {
+		if job.State != model.StateDownloaded && job.State != model.StateReady && job.State != model.StateUpToDate && job.State != model.StateFailed {
 			job.State, job.Phase, job.Message = model.StateQueued, "queued", "resuming after server restart"
 			s.active[job.Wiki] = job.ID
-			s.queue <- job.ID
+			s.enqueue(job)
 		}
 		s.jobs[job.ID] = job
 	}

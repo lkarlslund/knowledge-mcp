@@ -61,7 +61,7 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 		if statusErr != nil {
 			t.Fatal(statusErr)
 		}
-		if status.State == model.StateReady {
+		if status.State == model.StateDownloaded {
 			break
 		}
 		if status.State == model.StateFailed {
@@ -69,6 +69,29 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("job did not complete; last status: %#v", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	indexJob, err := backend.Job("", "testwiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexJob.Kind != "index" || indexJob.ID == job.ID {
+		t.Fatalf("automatic index job = %#v", indexJob)
+	}
+	for {
+		status, statusErr := backend.Job(indexJob.ID, "")
+		if statusErr != nil {
+			t.Fatal(statusErr)
+		}
+		if status.State == model.StateReady {
+			break
+		}
+		if status.State == model.StateFailed {
+			t.Fatalf("index job failed: %s", status.Error)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("index job did not complete; last status: %#v", status)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
