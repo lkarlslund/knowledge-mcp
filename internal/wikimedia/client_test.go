@@ -52,7 +52,7 @@ func TestCatalogMetadataAndDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Download(context.Background(), metadata.Dump, destination, func(int64, int64, float64) {}); err != nil {
+	if err := client.Download(context.Background(), metadata.Parts[0].Dump, destination, func(int64, int64, float64) {}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(destination)
@@ -75,5 +75,45 @@ func TestValidWikiName(t *testing.T) {
 		if ValidWikiName(name) {
 			t.Errorf("ValidWikiName(%q) = true", name)
 		}
+	}
+}
+
+func TestMultipartMetadataIsOrderedAndSummed(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backup-index-bydb.html":
+			_, _ = fmt.Fprint(w, `<li>2026-08-04 00:00:00 <a href="enwiki/20260801">enwiki</a>: <span class='done'>Dump complete</span></li>`)
+		case "/enwiki/20260801/dumpstatus.json":
+			_, _ = fmt.Fprint(w, `{"jobs":{"articlesmultistreamdump":{"status":"done","files":{`+
+				`"enwiki-20260801-pages-articles-multistream2.xml-p20p29.bz2":{"size":200,"url":"/part2","sha1":"dump2"},`+
+				`"enwiki-20260801-pages-articles-multistream-index2.txt-p20p29.bz2":{"size":20,"url":"/index2","sha1":"index2"},`+
+				`"enwiki-20260801-pages-articles-multistream1.xml-p1p19.bz2":{"size":100,"url":"/part1","sha1":"dump1"},`+
+				`"enwiki-20260801-pages-articles-multistream-index1.txt-p1p19.bz2":{"size":10,"url":"/index1","sha1":"index1"}`+
+				`}}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.URL)
+	result, err := client.ListAvailable(context.Background(), "enwiki", 0, 20, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Wikis) != 1 {
+		t.Fatalf("wikis = %#v", result.Wikis)
+	}
+	wiki := result.Wikis[0]
+	if !wiki.Available || wiki.PartCount != 2 || wiki.DumpSize != 300 || wiki.IndexSize != 30 || wiki.Fingerprint == "" {
+		t.Fatalf("unexpected multipart wiki: %#v", wiki)
+	}
+	metadata, err := client.LatestMetadata(context.Background(), "enwiki")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Parts[0].Key != "1/p1p19" || metadata.Parts[1].Key != "2/p20p29" {
+		t.Fatalf("parts are not ordered: %#v", metadata.Parts)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,8 +27,10 @@ const defaultBaseURL = "https://dumps.wikimedia.org"
 const userAgent = "wikipedia-multistream-mcp/0.1 (+https://github.com/lkarlslund/wikipedia-multistream-mcp)"
 
 var (
-	wikiNameRE = regexp.MustCompile(`^[a-z0-9_]+(?:wiki|wikibooks|wikinews|wikiquote|wikisource|wikispecies|wikiversity|wikivoyage|wiktionary)$`)
-	catalogRE  = regexp.MustCompile(`<li>([^<]+)<a href="([a-z0-9_]+)/([0-9]{8})">([^<]+)</a>(?: \(closed\))?: <span class='([^']+)'>([^<]+)</span></li>`)
+	wikiNameRE  = regexp.MustCompile(`^[a-z0-9_]+(?:wiki|wikibooks|wikinews|wikiquote|wikisource|wikispecies|wikiversity|wikivoyage|wiktionary)$`)
+	catalogRE   = regexp.MustCompile(`<li>([^<]+)<a href="([a-z0-9_]+)/([0-9]{8})">([^<]+)</a>(?: \(closed\))?: <span class='([^']+)'>([^<]+)</span></li>`)
+	dumpPartRE  = regexp.MustCompile(`-pages-articles-multistream([0-9]*)\.xml(?:-(p[0-9]+p[0-9]+))?\.bz2$`)
+	indexPartRE = regexp.MustCompile(`-pages-articles-multistream-index([0-9]*)\.txt(?:-(p[0-9]+p[0-9]+))?\.bz2$`)
 )
 
 type catalogEntry struct {
@@ -55,7 +58,13 @@ func NewClient() *Client {
 }
 
 func NewClientWithBaseURL(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}, metadata: make(map[string]cachedMetadata)}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	return &Client{
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		http:     &http.Client{Transport: transport},
+		metadata: make(map[string]cachedMetadata),
+	}
 }
 
 func ValidWikiName(name string) bool {
@@ -100,10 +109,16 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 			metadata, metadataErr := c.Metadata(ctx, entry.Name, entry.DumpDate)
 			if metadataErr == nil {
 				wiki.Available = true
-				wiki.DumpSize = metadata.Dump.Size
-				wiki.IndexSize = metadata.Index.Size
-				wiki.DumpSHA1 = metadata.Dump.SHA1
-				wiki.IndexSHA1 = metadata.Index.SHA1
+				wiki.Fingerprint = metadata.Fingerprint
+				wiki.PartCount = len(metadata.Parts)
+				for _, part := range metadata.Parts {
+					wiki.DumpSize += part.Dump.Size
+					wiki.IndexSize += part.Index.Size
+				}
+				if len(metadata.Parts) == 1 {
+					wiki.DumpSHA1 = metadata.Parts[0].Dump.SHA1
+					wiki.IndexSHA1 = metadata.Parts[0].Index.SHA1
+				}
 			}
 			result.Wikis[i] = wiki
 		}()
@@ -142,8 +157,10 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 		return cached.value, nil
 	}
 	c.mu.Unlock()
+	metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	url := fmt.Sprintf("%s/%s/%s/dumpstatus.json", c.baseURL, wiki, dumpDate)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(metadataCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return model.DumpMetadata{}, err
 	}
@@ -173,19 +190,52 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 	if !ok || job.Status != "done" {
 		return model.DumpMetadata{}, errors.New("completed multistream article dump is unavailable")
 	}
-	metadata := model.DumpMetadata{Wiki: wiki, DumpDate: dumpDate}
+	type partialPart struct {
+		key   string
+		dump  model.FileMetadata
+		index model.FileMetadata
+		order int64
+	}
+	parts := make(map[string]*partialPart)
 	for name, file := range job.Files {
 		item := model.FileMetadata{URL: c.baseURL + file.URL, Size: file.Size, SHA1: file.SHA1}
-		switch {
-		case strings.HasSuffix(name, "-pages-articles-multistream.xml.bz2"):
-			metadata.Dump = item
-		case strings.HasSuffix(name, "-pages-articles-multistream-index.txt.bz2"):
-			metadata.Index = item
+		if match := dumpPartRE.FindStringSubmatch(name); match != nil {
+			key, order := partKey(match[1], match[2])
+			part := parts[key]
+			if part == nil {
+				part = &partialPart{key: key, order: order}
+				parts[key] = part
+			}
+			part.dump = item
+		}
+		if match := indexPartRE.FindStringSubmatch(name); match != nil {
+			key, order := partKey(match[1], match[2])
+			part := parts[key]
+			if part == nil {
+				part = &partialPart{key: key, order: order}
+				parts[key] = part
+			}
+			part.index = item
 		}
 	}
-	if metadata.Dump.URL == "" || metadata.Index.URL == "" {
+	ordered := make([]*partialPart, 0, len(parts))
+	for _, part := range parts {
+		if part.dump.URL == "" || part.index.URL == "" {
+			return model.DumpMetadata{}, fmt.Errorf("multistream part %q is missing its dump or index", part.key)
+		}
+		ordered = append(ordered, part)
+	}
+	if len(ordered) == 0 {
 		return model.DumpMetadata{}, errors.New("multistream dump metadata is incomplete")
 	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].order < ordered[j].order })
+	metadata := model.DumpMetadata{Wiki: wiki, DumpDate: dumpDate, Parts: make([]model.DumpPart, 0, len(ordered))}
+	fingerprint := sha256.New()
+	for _, part := range ordered {
+		metadata.Parts = append(metadata.Parts, model.DumpPart{Key: part.key, Dump: part.dump, Index: part.index})
+		_, _ = fmt.Fprintf(fingerprint, "%s\x00%s\x00%s\x00", part.key, part.dump.SHA1, part.index.SHA1)
+	}
+	metadata.Fingerprint = hex.EncodeToString(fingerprint.Sum(nil))
 	c.mu.Lock()
 	c.metadata[cacheKey] = cachedMetadata{value: metadata, cached: time.Now()}
 	c.mu.Unlock()
@@ -201,7 +251,9 @@ func (c *Client) loadCatalog(ctx context.Context, refresh bool) ([]catalogEntry,
 	}
 	c.mu.Unlock()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/backup-index-bydb.html", nil)
+	metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(metadataCtx, http.MethodGet, c.baseURL+"/backup-index-bydb.html", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +289,15 @@ func (c *Client) loadCatalog(ctx context.Context, refresh bool) ([]catalogEntry,
 	return append([]catalogEntry(nil), entries...), nil
 }
 
+func partKey(number, pageRange string) (string, int64) {
+	if pageRange == "" {
+		return "single", 0
+	}
+	startText := strings.TrimPrefix(strings.SplitN(pageRange, "p", 3)[1], "p")
+	start, _ := strconv.ParseInt(startText, 10, 64)
+	return number + "/" + pageRange, start
+}
+
 type ProgressFunc func(completed, total int64, rate float64)
 
 func (c *Client) Download(ctx context.Context, file model.FileMetadata, destination string, progress ProgressFunc) error {
@@ -254,7 +315,14 @@ func (c *Client) Download(ctx context.Context, file model.FileMetadata, destinat
 		}
 	}
 	if start == file.Size {
-		return verifySHA1(destination, file.SHA1)
+		if err := verifySHA1(destination, file.SHA1); err == nil {
+			progress(start, file.Size, 0)
+			return nil
+		}
+		if err := os.Truncate(destination, 0); err != nil {
+			return fmt.Errorf("reset invalid completed download: %w", err)
+		}
+		start = 0
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, file.URL, nil)
 	if err != nil {

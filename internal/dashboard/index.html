@@ -42,7 +42,18 @@
 <script>
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const bytes = n => n ? new Intl.NumberFormat(undefined,{style:'unit',unit:'byte',notation:'compact'}).format(n) : '—';
+function bytes(value) {
+  const n = Number(value || 0), units = ['B','KiB','MiB','GiB','TiB'];
+  if (!n) return '0 B';
+  const unit = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+  return `${(n / Math.pow(1024, unit)).toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+function duration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds/60)}m ${Math.ceil(seconds%60)}s`;
+  return `${Math.floor(seconds/3600)}h ${Math.ceil((seconds%3600)/60)}m`;
+}
 const terminal = s => ['ready','up_to_date','failed'].includes(s);
 
 async function api(path, options) {
@@ -78,8 +89,14 @@ async function loadState() {
       return `<tr><td><strong>${esc(w.wiki)}</strong></td><td>${esc(w.dump_date)}</td><td>${Number(w.page_count).toLocaleString()}</td><td>${esc(w.search_mode)}</td><td>${bytes(w.disk_bytes)}</td><td>${up?.update_available ? esc(up.dump_date) : '—'}</td><td>${action}</td></tr>`;
     }));
     $('jobs').innerHTML = table(['Wiki','Kind','State','Progress','Message','Updated'], jobs.slice(0,25).map(j => {
-      const max = j.total || 1, value = Math.min(j.completed || 0, max);
-      const progress = terminal(j.state) ? '' : `<progress value="${value}" max="${max}"></progress> ${esc(j.units || '')}`;
+      const max = Number(j.total || 0), value = Math.min(Number(j.completed || 0), max || Number(j.completed || 0));
+      let detail = '';
+      if (j.units === 'bytes' && max) {
+        const speed = Number(j.rate || 0);
+        detail = `${bytes(value)} / ${bytes(max)}${speed ? ` · ${bytes(speed)}/s · ETA ${duration((max-value)/speed)}` : ''}`;
+      } else if (max) detail = `${value.toLocaleString()} / ${max.toLocaleString()} ${esc(j.units || '')}`;
+      else if (value) detail = `${value.toLocaleString()} ${esc(j.units || '')}`;
+      const progress = terminal(j.state) ? detail : `${max ? `<progress value="${value}" max="${max}"></progress> ` : ''}${detail}`;
       const cls = j.state === 'failed' ? 'failed' : terminal(j.state) ? 'ready' : 'working';
       return `<tr><td>${esc(j.wiki)}</td><td>${esc(j.kind)}</td><td class="${cls}">${esc(j.state)}</td><td>${progress}</td><td>${esc(j.error || j.message)}</td><td>${esc(new Date(j.updated_at).toLocaleString())}</td></tr>`;
     }));
@@ -91,9 +108,9 @@ async function loadAvailable(refresh=false, offset=0) {
   try {
     const filter = $('filter').value.trim();
     const data = await api(`/api/dashboard/available?filter=${encodeURIComponent(filter)}&offset=${offset}&limit=25&refresh=${refresh}`);
-    $('available').innerHTML = table(['Wiki','Dump','Download','Index','Installed','Action'], data.wikis.filter(w=>w.multistream_available).map(w => {
+    $('available').innerHTML = table(['Wiki','Dump','Download','Index','Parts','Installed','Action'], data.wikis.filter(w=>w.multistream_available).map(w => {
       let action = w.installed ? (w.update_available ? `<button data-wiki="${esc(w.name)}" data-action="update">Update</button>` : 'Current') : `<button data-wiki="${esc(w.name)}" data-action="download">Download</button>`;
-      return `<tr><td><strong>${esc(w.name)}</strong>${w.closed?' <span class="muted">closed</span>':''}</td><td>${esc(w.dump_date)}</td><td>${bytes(w.dump_size)}</td><td>${bytes(w.index_size)}</td><td>${w.installed?'yes':'no'}</td><td>${action}</td></tr>`;
+      return `<tr><td><strong>${esc(w.name)}</strong>${w.closed?' <span class="muted" title="Historical Wikimedia project; public content is preserved but normal editing is locked">closed/read-only</span>':''}</td><td>${esc(w.dump_date)}</td><td>${bytes(w.dump_size)}</td><td>${bytes(w.index_size)}</td><td>${Number(w.part_count || 1).toLocaleString()}</td><td>${w.installed?'yes':'no'}</td><td>${action}</td></tr>`;
     })) + (data.next_offset ? `<p><button id="next">Next page</button></p>` : '');
     bindButtons();
     if (data.next_offset) $('next').onclick = () => loadAvailable(false, data.next_offset);

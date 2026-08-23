@@ -24,6 +24,8 @@ type OnlineWiki struct {
 	IndexSize       int64  `json:"index_size,omitempty"`
 	DumpSHA1        string `json:"dump_sha1,omitempty"`
 	IndexSHA1       string `json:"index_sha1,omitempty"`
+	Fingerprint     string `json:"fingerprint,omitempty"`
+	PartCount       int    `json:"part_count"`
 	Installed       bool   `json:"installed"`
 	UpdateAvailable bool   `json:"update_available"`
 }
@@ -42,10 +44,16 @@ type FileMetadata struct {
 }
 
 type DumpMetadata struct {
-	Wiki     string       `json:"wiki"`
-	DumpDate string       `json:"dump_date"`
-	Dump     FileMetadata `json:"dump"`
-	Index    FileMetadata `json:"index"`
+	Wiki        string     `json:"wiki"`
+	DumpDate    string     `json:"dump_date"`
+	Parts       []DumpPart `json:"parts"`
+	Fingerprint string     `json:"fingerprint"`
+}
+
+type DumpPart struct {
+	Key   string       `json:"key"`
+	Dump  FileMetadata `json:"dump"`
+	Index FileMetadata `json:"index"`
 }
 
 type Manifest struct {
@@ -53,6 +61,8 @@ type Manifest struct {
 	DumpDate    string    `json:"dump_date"`
 	DumpSHA1    string    `json:"dump_sha1"`
 	IndexSHA1   string    `json:"index_sha1"`
+	Fingerprint string    `json:"fingerprint,omitempty"`
+	PartCount   int       `json:"part_count"`
 	DumpSize    int64     `json:"dump_size"`
 	IndexSize   int64     `json:"index_size"`
 	PageCount   uint64    `json:"page_count"`

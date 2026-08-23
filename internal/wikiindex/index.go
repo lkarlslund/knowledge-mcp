@@ -36,6 +36,7 @@ type titleDocument struct {
 	TitleExact string `json:"title_exact"`
 	PageID     uint64 `json:"page_id"`
 	Offset     int64  `json:"offset"`
+	Part       int    `json:"part"`
 }
 
 type bodyDocument struct {
@@ -47,6 +48,14 @@ type bodyDocument struct {
 type stream struct {
 	Offset int64
 	End    int64
+	Part   int
+	Path   string
+}
+
+type Part struct {
+	Number    int
+	DumpPath  string
+	IndexPath string
 }
 
 type xmlPage struct {
@@ -61,7 +70,7 @@ type xmlPage struct {
 
 type BuildProgress func(done, total int64)
 
-func BuildTitle(ctx context.Context, compressedIndex, destination string, progress BuildProgress) (uint64, error) {
+func BuildTitle(ctx context.Context, parts []Part, destination string, progress BuildProgress) (uint64, error) {
 	if err := os.RemoveAll(destination); err != nil {
 		return 0, err
 	}
@@ -75,40 +84,49 @@ func BuildTitle(ctx context.Context, compressedIndex, destination string, progre
 			_ = idx.Close()
 		}
 	}()
-	f, err := os.Open(compressedIndex)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = f.Close() }()
-	scanner := bufio.NewScanner(pbzip2.NewReader(ctx, f))
-	scanner.Buffer(make([]byte, 64<<10), 4<<20)
 	batch := idx.NewBatch()
 	var count uint64
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		default:
-		}
-		offset, pageID, title, err := parseIndexLine(scanner.Text())
+	for _, part := range parts {
+		f, err := os.Open(part.IndexPath)
 		if err != nil {
 			return 0, err
 		}
-		doc := titleDocument{Title: title, TitleExact: normalizeTitle(title), PageID: pageID, Offset: offset}
-		if err := batch.Index(strconv.FormatUint(pageID, 10), doc); err != nil {
+		scanner := bufio.NewScanner(pbzip2.NewReader(ctx, f))
+		scanner.Buffer(make([]byte, 64<<10), 4<<20)
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				_ = f.Close()
+				return 0, ctx.Err()
+			default:
+			}
+			offset, pageID, title, parseErr := parseIndexLine(scanner.Text())
+			if parseErr != nil {
+				_ = f.Close()
+				return 0, parseErr
+			}
+			doc := titleDocument{Title: title, TitleExact: normalizeTitle(title), PageID: pageID, Offset: offset, Part: part.Number}
+			if err := batch.Index(strconv.FormatUint(pageID, 10), doc); err != nil {
+				_ = f.Close()
+				return 0, err
+			}
+			count++
+			if count%5000 == 0 {
+				if err := idx.Batch(batch); err != nil {
+					_ = f.Close()
+					return 0, fmt.Errorf("write title index: %w", err)
+				}
+				batch = idx.NewBatch()
+				progress(int64(count), 0)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			_ = f.Close()
+			return 0, fmt.Errorf("read multistream index: %w", err)
+		}
+		if err := f.Close(); err != nil {
 			return 0, err
 		}
-		count++
-		if count%5000 == 0 {
-			if err := idx.Batch(batch); err != nil {
-				return 0, fmt.Errorf("write title index: %w", err)
-			}
-			batch = idx.NewBatch()
-			progress(int64(count), 0)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("read multistream index: %w", err)
 	}
 	if err := idx.Batch(batch); err != nil {
 		return 0, fmt.Errorf("write final title batch: %w", err)
@@ -121,13 +139,17 @@ func BuildTitle(ctx context.Context, compressedIndex, destination string, progre
 	return count, nil
 }
 
-func BuildBody(ctx context.Context, dumpPath, compressedIndex, destination string, progress BuildProgress) error {
+func BuildBody(ctx context.Context, parts []Part, destination string, progress BuildProgress) error {
 	if err := os.RemoveAll(destination); err != nil {
 		return err
 	}
-	streams, err := readStreams(ctx, compressedIndex, dumpPath)
-	if err != nil {
-		return err
+	var streams []stream
+	for _, part := range parts {
+		partStreams, err := readStreams(ctx, part)
+		if err != nil {
+			return err
+		}
+		streams = append(streams, partStreams...)
 	}
 	idx, err := bleve.New(destination, bodyMapping())
 	if err != nil {
@@ -139,11 +161,19 @@ func BuildBody(ctx context.Context, dumpPath, compressedIndex, destination strin
 			_ = idx.Close()
 		}
 	}()
-	dump, err := os.Open(dumpPath)
-	if err != nil {
-		return err
+	dumps := make(map[string]*os.File, len(parts))
+	for _, part := range parts {
+		dump, err := os.Open(part.DumpPath)
+		if err != nil {
+			return err
+		}
+		dumps[part.DumpPath] = dump
 	}
-	defer func() { _ = dump.Close() }()
+	defer func() {
+		for _, dump := range dumps {
+			_ = dump.Close()
+		}
+	}()
 	type decoded struct {
 		part  stream
 		pages []xmlPage
@@ -160,7 +190,7 @@ func BuildBody(ctx context.Context, dumpPath, compressedIndex, destination strin
 		go func() {
 			defer workers.Done()
 			for part := range jobs {
-				pages, decodeErr := decodeStream(io.NewSectionReader(dump, part.Offset, part.End-part.Offset))
+				pages, decodeErr := decodeStream(io.NewSectionReader(dumps[part.Path], part.Offset, part.End-part.Offset))
 				select {
 				case results <- decoded{part: part, pages: pages, err: decodeErr}:
 				case <-workerCtx.Done():
@@ -284,7 +314,7 @@ func ReadPage(generationPath, title string, pageID uint64, format string, start,
 		q = term
 	}
 	req := bleve.NewSearchRequestOptions(q, 1, 0, false)
-	req.Fields = []string{"title", "page_id", "offset"}
+	req.Fields = []string{"title", "page_id", "offset", "part"}
 	res, err := idx.Search(req)
 	closeErr := idx.Close()
 	if err != nil {
@@ -299,7 +329,8 @@ func ReadPage(generationPath, title string, pageID uint64, format string, start,
 	hit := res.Hits[0]
 	wantedID, _ := strconv.ParseUint(hit.ID, 10, 64)
 	streamOffset := int64(hit.Fields["offset"].(float64))
-	dump, err := os.Open(filepath.Join(generationPath, "dump.xml.bz2"))
+	partNumber := int(hit.Fields["part"].(float64))
+	dump, err := os.Open(filepath.Join(generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", partNumber)))
 	if err != nil {
 		return model.Page{}, err
 	}
@@ -350,13 +381,13 @@ func parseIndexLine(line string) (int64, uint64, string, error) {
 	return offset, pageID, parts[2], nil
 }
 
-func readStreams(ctx context.Context, indexPath, dumpPath string) ([]stream, error) {
-	f, err := os.Open(indexPath)
+func readStreams(ctx context.Context, part Part) ([]stream, error) {
+	f, err := os.Open(part.IndexPath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	info, err := os.Stat(dumpPath)
+	info, err := os.Stat(part.DumpPath)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +414,7 @@ func readStreams(ctx context.Context, indexPath, dumpPath string) ([]stream, err
 		if i+1 < len(offsets) {
 			end = offsets[i+1]
 		}
-		streams[i] = stream{Offset: offset, End: end}
+		streams[i] = stream{Offset: offset, End: end, Part: part.Number, Path: part.DumpPath}
 	}
 	return streams, nil
 }
@@ -436,6 +467,7 @@ func titleMapping() mapping.IndexMapping {
 	doc.AddFieldMappingsAt("title_exact", exact)
 	doc.AddFieldMappingsAt("page_id", number)
 	doc.AddFieldMappingsAt("offset", number)
+	doc.AddFieldMappingsAt("part", number)
 	m.DefaultMapping = doc
 	return m
 }

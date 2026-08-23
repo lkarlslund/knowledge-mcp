@@ -13,21 +13,34 @@ import (
 func TestTitleAndBodyIndexes(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.</text></revision></page>`))
-	second := compressForTest(t, []byte(`<page><title>Beta: Details</title><id>2</id><revision><id>22</id><timestamp>2026-01-02T00:00:00Z</timestamp><text>Beta contains a distinctive platypus phrase.</text></revision></page></mediawiki>`))
-	dump := append(append([]byte(nil), first...), second...)
-	indexText := []byte("0:1:Alpha Page\n" + intString(len(first)) + ":2:Beta: Details\n")
-	index := compressForTest(t, indexText)
-	dumpPath := filepath.Join(dir, "dump.xml.bz2")
-	indexPath := filepath.Join(dir, "multistream-index.txt.bz2")
-	if err := os.WriteFile(dumpPath, dump, 0o644); err != nil {
+	partsDir := filepath.Join(dir, "parts")
+	if err := os.MkdirAll(partsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(indexPath, index, 0o644); err != nil {
+	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.</text></revision></page>`))
+	second := compressForTest(t, []byte(`<page><title>Beta: Details</title><id>2</id><revision><id>22</id><timestamp>2026-01-02T00:00:00Z</timestamp><text>Beta contains a distinctive platypus phrase.</text></revision></page></mediawiki>`))
+	firstDumpPath := filepath.Join(partsDir, "000.dump.bz2")
+	firstIndexPath := filepath.Join(partsDir, "000.index.bz2")
+	secondDumpPath := filepath.Join(partsDir, "001.dump.bz2")
+	secondIndexPath := filepath.Join(partsDir, "001.index.bz2")
+	if err := os.WriteFile(firstDumpPath, first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstIndexPath, compressForTest(t, []byte("0:1:Alpha Page\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondDumpPath, second, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondIndexPath, compressForTest(t, []byte("0:2:Beta: Details\n")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	count, err := BuildTitle(context.Background(), indexPath, filepath.Join(dir, TitleIndexDir), func(int64, int64) {})
+	parts := []Part{
+		{Number: 0, DumpPath: firstDumpPath, IndexPath: firstIndexPath},
+		{Number: 1, DumpPath: secondDumpPath, IndexPath: secondIndexPath},
+	}
+	count, err := BuildTitle(context.Background(), parts, filepath.Join(dir, TitleIndexDir), func(int64, int64) {})
 	if err != nil {
 		t.Fatalf("BuildTitle: %v", err)
 	}
@@ -49,7 +62,7 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 		t.Fatalf("unexpected page: %#v", page)
 	}
 
-	if err := BuildBody(context.Background(), dumpPath, indexPath, filepath.Join(dir, BodyIndexDir), func(int64, int64) {}); err != nil {
+	if err := BuildBody(context.Background(), parts, filepath.Join(dir, BodyIndexDir), func(int64, int64) {}); err != nil {
 		t.Fatalf("BuildBody: %v", err)
 	}
 	bodyResult, err := Search(dir, "platypus", 0, 10, true)
@@ -95,18 +108,4 @@ func compressForTest(t *testing.T, data []byte) []byte {
 		t.Fatal(err)
 	}
 	return out.Bytes()
-}
-
-func intString(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	var digits [32]byte
-	i := len(digits)
-	for value > 0 {
-		i--
-		digits[i] = byte('0' + value%10)
-		value /= 10
-	}
-	return string(digits[i:])
 }

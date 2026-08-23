@@ -75,7 +75,7 @@ func (s *Store) ListAvailable(ctx context.Context, filter string, offset, limit 
 			continue
 		}
 		result.Wikis[i].Installed = true
-		result.Wikis[i].UpdateAvailable = result.Wikis[i].DumpSHA1 != "" && result.Wikis[i].DumpSHA1 != local.DumpSHA1
+		result.Wikis[i].UpdateAvailable = result.Wikis[i].Fingerprint != "" && result.Wikis[i].Fingerprint != local.Fingerprint
 	}
 	return result, nil
 }
@@ -150,7 +150,15 @@ func (s *Store) ListUpgrades(ctx context.Context) ([]model.OnlineWiki, error) {
 				results <- result{err: metadataErr}
 				return
 			}
-			results <- result{wiki: model.OnlineWiki{Name: local.Wiki, DumpDate: metadata.DumpDate, Available: true, DumpSize: metadata.Dump.Size, IndexSize: metadata.Index.Size, DumpSHA1: metadata.Dump.SHA1, IndexSHA1: metadata.Index.SHA1, Installed: true, UpdateAvailable: metadata.Dump.SHA1 != local.DumpSHA1}}
+			online := model.OnlineWiki{Name: local.Wiki, DumpDate: metadata.DumpDate, Available: true, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), Installed: true, UpdateAvailable: metadata.Fingerprint != local.Fingerprint}
+			for _, part := range metadata.Parts {
+				online.DumpSize += part.Dump.Size
+				online.IndexSize += part.Index.Size
+			}
+			if len(metadata.Parts) == 1 {
+				online.DumpSHA1, online.IndexSHA1 = metadata.Parts[0].Dump.SHA1, metadata.Parts[0].Index.SHA1
+			}
+			results <- result{wiki: online}
 		}()
 	}
 	go func() {
@@ -190,6 +198,22 @@ func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 	}
 	if id := s.active[wiki]; id != "" {
 		return *s.jobs[id], nil
+	}
+	var retry *model.Job
+	for _, existing := range s.jobs {
+		if existing.Wiki == wiki && existing.Kind == kind && existing.State == model.StateFailed && (retry == nil || existing.UpdatedAt.After(retry.UpdatedAt)) {
+			retry = existing
+		}
+	}
+	if retry != nil {
+		retry.State, retry.Phase, retry.Error, retry.Message, retry.UpdatedAt = model.StateQueued, "queued", "", "retrying with existing partial downloads", time.Now().UTC()
+		s.active[wiki] = retry.ID
+		if err := s.saveJobsLocked(); err != nil {
+			delete(s.active, wiki)
+			return model.Job{}, err
+		}
+		s.queue <- retry.ID
+		return *retry, nil
 	}
 	id, err := newID()
 	if err != nil {
@@ -284,7 +308,7 @@ func (s *Store) runJob(ctx context.Context, id string) {
 		return
 	}
 	current, currentErr := readManifest(filepath.Join(s.wikiPath(job.Wiki), "manifest.json"))
-	if currentErr == nil && current.DumpSHA1 == metadata.Dump.SHA1 && current.IndexSHA1 == metadata.Index.SHA1 {
+	if currentErr == nil && current.Fingerprint == metadata.Fingerprint {
 		if current.BodyReady {
 			s.finishJob(id, model.StateUpToDate, "local dump and indexes are current")
 			return
@@ -297,31 +321,62 @@ func (s *Store) runJob(ctx context.Context, id string) {
 		s.failJob(id, err)
 		return
 	}
-	indexPath := filepath.Join(stage, "multistream-index.txt.bz2")
-	dumpPath := filepath.Join(stage, "dump.xml.bz2")
+	partsDir := filepath.Join(stage, "parts")
+	if err := os.MkdirAll(partsDir, 0o755); err != nil {
+		s.failJob(id, err)
+		return
+	}
+	if len(metadata.Parts) == 1 {
+		if err := migrateLegacyStage(stage, partsDir); err != nil {
+			s.failJob(id, err)
+			return
+		}
+	}
+	var totalBytes int64
+	for _, part := range metadata.Parts {
+		totalBytes += part.Index.Size + part.Dump.Size
+	}
+	completedBytes := int64(0)
 	download := func(label string, file model.FileMetadata, path string) error {
-		s.setJob(id, model.StateDownloading, "downloading_"+label, 0, file.Size, "bytes", 0, "downloading "+label, "")
+		s.setJob(id, model.StateDownloading, "downloading_"+label, completedBytes, totalBytes, "bytes", 0, "downloading "+label, "")
 		return s.remote.Download(ctx, file, path, func(done, total int64, rate float64) {
-			s.setJob(id, model.StateDownloading, "downloading_"+label, done, total, "bytes", rate, "downloading "+label, "")
+			s.setJob(id, model.StateDownloading, "downloading_"+label, completedBytes+done, totalBytes, "bytes", rate, "downloading "+label, "")
 		})
 	}
-	if err := download("index", metadata.Index, indexPath); err != nil {
-		s.failJob(id, err)
-		return
-	}
-	if err := download("dump", metadata.Dump, dumpPath); err != nil {
-		s.failJob(id, err)
-		return
+	localParts := make([]wikiindex.Part, 0, len(metadata.Parts))
+	for i, part := range metadata.Parts {
+		indexPath := filepath.Join(partsDir, fmt.Sprintf("%03d.index.bz2", i))
+		dumpPath := filepath.Join(partsDir, fmt.Sprintf("%03d.dump.bz2", i))
+		partLabel := fmt.Sprintf("index part %d/%d", i+1, len(metadata.Parts))
+		if err := download(partLabel, part.Index, indexPath); err != nil {
+			s.failJob(id, err)
+			return
+		}
+		completedBytes += part.Index.Size
+		partLabel = fmt.Sprintf("dump part %d/%d", i+1, len(metadata.Parts))
+		if err := download(partLabel, part.Dump, dumpPath); err != nil {
+			s.failJob(id, err)
+			return
+		}
+		completedBytes += part.Dump.Size
+		localParts = append(localParts, wikiindex.Part{Number: i, DumpPath: dumpPath, IndexPath: indexPath})
 	}
 	s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
-	count, err := wikiindex.BuildTitle(ctx, indexPath, filepath.Join(stage, wikiindex.TitleIndexDir), func(done, total int64) {
+	count, err := wikiindex.BuildTitle(ctx, localParts, filepath.Join(stage, wikiindex.TitleIndexDir), func(done, total int64) {
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", done, total, "pages", 0, "building title index", "")
 	})
 	if err != nil {
 		s.failJob(id, err)
 		return
 	}
-	manifest := model.Manifest{Wiki: job.Wiki, DumpDate: metadata.DumpDate, DumpSHA1: metadata.Dump.SHA1, IndexSHA1: metadata.Index.SHA1, DumpSize: metadata.Dump.Size, IndexSize: metadata.Index.Size, PageCount: count, TitleReady: true, PublishedAt: time.Now().UTC()}
+	manifest := model.Manifest{Wiki: job.Wiki, DumpDate: metadata.DumpDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PageCount: count, TitleReady: true, PublishedAt: time.Now().UTC()}
+	for _, part := range metadata.Parts {
+		manifest.DumpSize += part.Dump.Size
+		manifest.IndexSize += part.Index.Size
+	}
+	if len(metadata.Parts) == 1 {
+		manifest.DumpSHA1, manifest.IndexSHA1 = metadata.Parts[0].Dump.SHA1, metadata.Parts[0].Index.SHA1
+	}
 	if err := writeJSON(filepath.Join(stage, "manifest.json"), manifest); err != nil {
 		s.failJob(id, err)
 		return
@@ -342,7 +397,7 @@ func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.M
 	path := s.wikiPath(wiki)
 	temporary := filepath.Join(path, wikiindex.BodyIndexDir+".building")
 	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "title search and page reads are available; building full-text index", "")
-	if err := wikiindex.BuildBody(ctx, filepath.Join(path, "dump.xml.bz2"), filepath.Join(path, "multistream-index.txt.bz2"), temporary, func(done, total int64) {
+	if err := wikiindex.BuildBody(ctx, generationParts(path, manifest.PartCount), temporary, func(done, total int64) {
 		s.setJob(id, model.StateBodyIndexing, "body_indexing", done, total, "streams", 0, "title search and page reads are available; building full-text index", "")
 	}); err != nil {
 		s.failJob(id, err)
@@ -365,6 +420,37 @@ func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.M
 		return
 	}
 	s.finishJobLocked(id, model.StateReady, "full-text index is ready")
+}
+
+func generationParts(path string, count int) []wikiindex.Part {
+	parts := make([]wikiindex.Part, 0, count)
+	for i := range count {
+		parts = append(parts, wikiindex.Part{Number: i, DumpPath: filepath.Join(path, "parts", fmt.Sprintf("%03d.dump.bz2", i)), IndexPath: filepath.Join(path, "parts", fmt.Sprintf("%03d.index.bz2", i))})
+	}
+	return parts
+}
+
+func migrateLegacyStage(stage, partsDir string) error {
+	legacy := map[string]string{
+		filepath.Join(stage, "multistream-index.txt.bz2"): filepath.Join(partsDir, "000.index.bz2"),
+		filepath.Join(stage, "dump.xml.bz2"):              filepath.Join(partsDir, "000.dump.bz2"),
+	}
+	for source, destination := range legacy {
+		if _, err := os.Stat(destination); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := os.Rename(source, destination); err != nil {
+			return fmt.Errorf("migrate partial download: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) publish(wiki, stage string) error {

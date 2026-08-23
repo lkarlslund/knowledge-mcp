@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -91,6 +93,35 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	}
 	if page.PageID != 7 || page.Content != "A remarkable capybara appears here." {
 		t.Fatalf("unexpected page: %#v", page)
+	}
+}
+
+func TestMigrateLegacyStagePreservesPartialDownloads(t *testing.T) {
+	t.Parallel()
+	stage := t.TempDir()
+	partsDir := filepath.Join(stage, "parts")
+	if err := os.Mkdir(partsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantDump := []byte("partial dump")
+	wantIndex := []byte("complete index")
+	if err := os.WriteFile(filepath.Join(stage, "dump.xml.bz2"), wantDump, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "multistream-index.txt.bz2"), wantIndex, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateLegacyStage(stage, partsDir); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string][]byte{"000.dump.bz2": wantDump, "000.index.bz2": wantIndex} {
+		got, err := os.ReadFile(filepath.Join(partsDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
 	}
 }
 

@@ -125,7 +125,12 @@ Runtime data is not committed. Each installed wiki keeps:
 
 Page reads seek to the indexed bzip2 stream and decompress only that page group.
 Downloads are resumable, size-checked, and verified against Wikimedia SHA-1
-metadata before publication.
+metadata before publication. Response bodies are streamed directly to staging
+files in bounded buffers rather than accumulated in memory. Job state and
+partial files persist across server restarts; an interrupted job is requeued on
+startup, and manually retrying a failed job resumes that job's existing files.
+Large wikis such as `enwiki` are discovered and downloaded as ordered multipart
+dump/index pairs.
 
 Large sequential index scans use a parallel bzip2 decoder, and body indexing
 also processes independent multistream chunks concurrently. Exact page reads
