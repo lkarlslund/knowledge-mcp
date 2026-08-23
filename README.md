@@ -135,7 +135,9 @@ appear under local wikis immediately with search mode `none`; title search and
 page reads become available after the first indexing stage, while full-text
 indexing continues. During an update the new generation remains staged, and
 replaces the old one only after its title index is ready. Retrying failed
-indexing does not download the dump again.
+indexing does not download the dump again. Once a title stage is published, its
+full-text stage returns to the end of the index queue so other downloaded wikis
+become searchable before long body builds monopolize the workers.
 
 ## Storage
 

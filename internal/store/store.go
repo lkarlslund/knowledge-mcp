@@ -523,25 +523,34 @@ func (s *Store) worker(ctx context.Context, queue <-chan string) {
 			jobCtx, cancel := context.WithCancel(ctx)
 			s.running[id] = cancel
 			s.mu.Unlock()
-			s.runJob(jobCtx, id)
+			requeueBody := s.runJob(jobCtx, id)
 			cancel()
 			s.mu.Lock()
 			delete(s.running, id)
+			job = s.jobs[id]
+			shouldEnqueue := requeueBody && job != nil && job.State != model.StatePaused && job.State != model.StateCanceled
+			if shouldEnqueue {
+				job.State, job.Phase, job.Message, job.UpdatedAt = model.StateQueued, "body_queued", "title index is available; full-text indexing requeued behind title work", time.Now().UTC()
+				_ = s.saveJobsLocked()
+			}
 			s.mu.Unlock()
+			if shouldEnqueue {
+				s.indexQueue <- id
+			}
 		}
 	}
 }
 
-func (s *Store) runJob(ctx context.Context, id string) {
+func (s *Store) runJob(ctx context.Context, id string) bool {
 	job, err := s.Job(id, "")
 	if err != nil {
-		return
+		return false
 	}
 	if job.Kind == "index" {
-		s.runIndexJob(ctx, id)
-		return
+		return s.runIndexJob(ctx, id)
 	}
 	s.runDownloadJob(ctx, id)
+	return false
 }
 
 func (s *Store) runDownloadJob(ctx context.Context, id string) {
@@ -667,10 +676,10 @@ func (s *Store) enqueue(job *model.Job) {
 	s.downloadQueue <- job.ID
 }
 
-func (s *Store) runIndexJob(ctx context.Context, id string) {
+func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 	job, err := s.Job(id, "")
 	if err != nil {
-		return
+		return false
 	}
 	path := s.wikiPath(job.Wiki)
 	publishAfterTitle := false
@@ -683,8 +692,9 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
 	if err != nil {
 		s.failJob(id, err)
-		return
+		return false
 	}
+	titleBuilt := false
 	if !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
 		temporary := filepath.Join(path, wikiindex.TitleIndexDir+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
@@ -693,7 +703,7 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 		})
 		if buildErr != nil {
 			s.failJob(id, buildErr)
-			return
+			return false
 		}
 		s.mu.Lock()
 		s.closeReaders(path)
@@ -712,13 +722,14 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 		s.mu.Unlock()
 		if replaceErr != nil {
 			s.failJob(id, replaceErr)
-			return
+			return false
 		}
+		titleBuilt = true
 	}
 	if publishAfterTitle {
 		if err := s.publish(job.Wiki, path); err != nil {
 			s.failJob(id, err)
-			return
+			return false
 		}
 	}
 	s.mu.Lock()
@@ -729,9 +740,13 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 	s.mu.Unlock()
 	if manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion {
 		s.finishJob(id, model.StateReady, "title and full-text indexes are ready")
-		return
+		return false
+	}
+	if titleBuilt {
+		return true
 	}
 	s.buildBody(ctx, id, job.Wiki, manifest)
+	return false
 }
 
 func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.Manifest) {
