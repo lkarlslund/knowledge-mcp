@@ -110,6 +110,33 @@ func TestPlainText(t *testing.T) {
 	}
 }
 
+func TestReadPageStopsAtNextMultistreamOffset(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	partsDir := filepath.Join(dir, "parts")
+	if err := os.MkdirAll(partsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := compressForTest(t, []byte(`<page><title>First</title><id>1</id><revision><id>11</id><text>bounded stream</text></revision></page>`))
+	dumpPath := filepath.Join(partsDir, "000.dump.bz2")
+	if err := os.WriteFile(dumpPath, append(first, []byte("BZnot-a-valid-second-stream")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(partsDir, "000.index.bz2")
+	indexSource := fmt.Sprintf("0:1:First\n%d:2:Broken second stream\n", len(first))
+	if err := os.WriteFile(indexPath, compressForTest(t, []byte(indexSource)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parts := []Part{{Number: 0, DumpPath: dumpPath, IndexPath: indexPath}}
+	if _, err := BuildTitle(context.Background(), parts, filepath.Join(dir, TitleIndexDir), func(uint64, int64, int64) {}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := ReadPage(dir, "", 1, "text", 0, 100)
+	if err != nil || page.Content != "bounded stream" {
+		t.Fatalf("bounded ReadPage = %#v, %v", page, err)
+	}
+}
+
 func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -178,7 +205,7 @@ func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
 	var sourceIndex bytes.Buffer
 	const pageCount = titleBatchDocs + 100
 	for pageID := 1; pageID <= pageCount; pageID++ {
-		fmt.Fprintf(&sourceIndex, "0:%d:Checkpoint Page %d\n", pageID, pageID)
+		fmt.Fprintf(&sourceIndex, "%d:%d:Checkpoint Page %d\n", pageID, pageID, pageID)
 	}
 	if err := os.WriteFile(indexPath, compressForTest(t, sourceIndex.Bytes()), 0o644); err != nil {
 		t.Fatal(err)

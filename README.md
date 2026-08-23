@@ -145,11 +145,12 @@ Runtime data is not committed. Each installed wiki keeps:
 
 - the original compressed XML dump;
 - the compressed Wikimedia title/offset index;
-- a compact title index containing searchable/exact titles and stored stream offsets;
+- a compact title index containing searchable/exact titles and stored stream boundaries;
 - a body-term index that does not store duplicate page bodies; and
 - a manifest binding every index to its dump checksums.
 
-Page reads seek to the indexed bzip2 stream and decompress only that page group.
+Page reads seek to the indexed bzip2 stream and use its stored end offset to
+decompress only that page group, rather than following concatenated streams.
 Numeric page IDs are Bleve document IDs instead of duplicated fields. Stream
 offsets are stored but not searchable, while term vectors, catch-all fields,
 and sort/facet doc values are disabled. Search handles are cached read-only, and

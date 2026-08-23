@@ -34,7 +34,7 @@ import (
 const (
 	TitleIndexDir       = "titles.bleve"
 	BodyIndexDir        = "bodies.bleve"
-	CurrentIndexVersion = 3
+	CurrentIndexVersion = 4
 	titleBatchDocs      = 50_000
 	bodyBatchBytes      = 32 << 20
 )
@@ -43,6 +43,7 @@ type titleDocument struct {
 	Title      string `json:"title"`
 	TitleExact string `json:"title_exact"`
 	Offset     int64  `json:"offset"`
+	End        int64  `json:"end"`
 	Part       int    `json:"part"`
 }
 
@@ -166,6 +167,26 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 		batch := idx.NewBatch()
 		batchCount := 0
 		lines := int64(0)
+		indexedLines := checkpoint.Parts[partIndex].Lines
+		type titleEntry struct {
+			pageID uint64
+			title  string
+		}
+		groupOffset := int64(-1)
+		var group []titleEntry
+		flushGroup := func(end int64) error {
+			for _, entry := range group {
+				doc := titleDocument{Title: entry.title, TitleExact: normalizeTitle(entry.title), Offset: groupOffset, End: end, Part: part.Number}
+				if err := batch.Index(strconv.FormatUint(entry.pageID, 10), doc); err != nil {
+					return err
+				}
+				count++
+				batchCount++
+				indexedLines++
+			}
+			group = group[:0]
+			return nil
+		}
 		commit := func(complete bool) error {
 			if batchCount > 0 {
 				if err := idx.Batch(batch); err != nil {
@@ -174,7 +195,7 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 				batch, batchCount = idx.NewBatch(), 0
 			}
 			checkpoint.Pages = count
-			checkpoint.Parts[partIndex] = titlePartCheckpoint{Lines: lines, Complete: complete}
+			checkpoint.Parts[partIndex] = titlePartCheckpoint{Lines: indexedLines, Complete: complete}
 			checkpoint.CompressedDone = max(checkpoint.CompressedDone, compressedBefore+compressed.bytes.Load())
 			if complete {
 				checkpoint.CompressedDone = compressedBefore + partSize
@@ -201,23 +222,36 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 				_ = f.Close()
 				return 0, parseErr
 			}
-			doc := titleDocument{Title: title, TitleExact: normalizeTitle(title), Offset: offset, Part: part.Number}
-			if err := batch.Index(strconv.FormatUint(pageID, 10), doc); err != nil {
-				_ = f.Close()
-				return 0, err
-			}
-			count++
-			batchCount++
-			if batchCount >= titleBatchDocs {
-				if err := commit(false); err != nil {
+			if groupOffset >= 0 && offset != groupOffset {
+				if err := flushGroup(offset); err != nil {
 					_ = f.Close()
 					return 0, err
 				}
+				if batchCount >= titleBatchDocs {
+					if err := commit(false); err != nil {
+						_ = f.Close()
+						return 0, err
+					}
+				}
 			}
+			groupOffset = offset
+			group = append(group, titleEntry{pageID: pageID, title: title})
 		}
 		if err := scanner.Err(); err != nil {
 			_ = f.Close()
 			return 0, fmt.Errorf("read multistream index: %w", err)
+		}
+		dumpSize := int64(1<<63 - 1)
+		if part.DumpPath != "" {
+			dumpSize, err = fileSize(part.DumpPath)
+			if err != nil {
+				_ = f.Close()
+				return 0, err
+			}
+		}
+		if err := flushGroup(dumpSize); err != nil {
+			_ = f.Close()
+			return 0, err
 		}
 		if err := f.Close(); err != nil {
 			return 0, err
@@ -650,7 +684,7 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, form
 		q = term
 	}
 	req := bleve.NewSearchRequestOptions(q, 1, 0, false)
-	req.Fields = []string{"title", "offset", "part"}
+	req.Fields = []string{"title", "offset", "end", "part"}
 	res, err := r.title.SearchInContext(ctx, req)
 	if err != nil {
 		return model.Page{}, err
@@ -661,13 +695,14 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, form
 	hit := res.Hits[0]
 	wantedID, _ := strconv.ParseUint(hit.ID, 10, 64)
 	streamOffset := int64(hit.Fields["offset"].(float64))
+	streamEnd := int64(hit.Fields["end"].(float64))
 	partNumber := int(hit.Fields["part"].(float64))
 	dump, err := os.Open(filepath.Join(r.generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", partNumber)))
 	if err != nil {
 		return model.Page{}, err
 	}
 	defer func() { _ = dump.Close() }()
-	pages, err := decodeStream(ctx, io.NewSectionReader(dump, streamOffset, 1<<63-1-streamOffset))
+	pages, err := decodeStream(ctx, io.NewSectionReader(dump, streamOffset, streamEnd-streamOffset))
 	if err != nil {
 		return model.Page{}, fmt.Errorf("decode page stream: %w", err)
 	}
@@ -815,6 +850,7 @@ func titleMapping() mapping.IndexMapping {
 	doc.AddFieldMappingsAt("title", storedText)
 	doc.AddFieldMappingsAt("title_exact", exact)
 	doc.AddFieldMappingsAt("offset", number)
+	doc.AddFieldMappingsAt("end", number)
 	doc.AddFieldMappingsAt("part", number)
 	m.DefaultMapping = doc
 	return m
