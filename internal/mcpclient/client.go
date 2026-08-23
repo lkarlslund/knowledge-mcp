@@ -56,8 +56,12 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 	return out, err
 }
 
-func (c *Client) ListLocal() ([]model.LocalWiki, error) {
-	var out []model.LocalWiki
+func (c *Client) ListLocal() ([]model.LocalWikiSummary, error) {
+	return c.ListLocalSummary()
+}
+
+func (c *Client) ListLocalSummary() ([]model.LocalWikiSummary, error) {
+	var out []model.LocalWikiSummary
 	err := c.Call(context.Background(), "wiki_list_local", map[string]any{}, &out)
 	return out, err
 }

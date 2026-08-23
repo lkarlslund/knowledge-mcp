@@ -95,7 +95,7 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Wikipedia Multistream MCP") || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || !strings.Contains(page.Body.String(), "bi-trash3") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Wikipedia Multistream MCP") || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || strings.Contains(page.Body.String(), "Search-ready") || !strings.Contains(page.Body.String(), "Total pages") || !strings.Contains(page.Body.String(), "bi-trash3") || !strings.Contains(page.Body.String(), `id="onlineWikisModal"`) || !strings.Contains(page.Body.String(), "limit=-1") {
 		t.Fatalf("unexpected dashboard response: %d %q", page.Code, page.Body.String())
 	}
 

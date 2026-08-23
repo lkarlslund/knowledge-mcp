@@ -74,6 +74,9 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
+	metadataCtx, metadataCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	s.backfillSiteMetadata(metadataCtx)
+	metadataCancel()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.wg.Add(config.DownloadWorkers + config.IndexWorkers)
@@ -192,6 +195,27 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 		result = append(result, local)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Wiki < result[j].Wiki })
+	return result, nil
+}
+
+func (s *Store) ListLocalSummary() ([]model.LocalWikiSummary, error) {
+	locals, err := s.ListLocal()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.LocalWikiSummary, 0, len(locals))
+	for _, local := range locals {
+		name := local.Site.Name
+		if name == "" {
+			name = local.Wiki
+		}
+		result = append(result, model.LocalWikiSummary{
+			Wiki: local.Wiki, Name: name, Project: local.Site.Project, ContentType: local.Site.ContentType,
+			Language: local.Site.Language, OnlineSourceURL: local.Site.OnlineSourceURL,
+			ContentArticles: local.Site.ContentArticles, IndexedPages: local.PageCount,
+			DumpDate: local.DumpDate, SearchMode: local.SearchMode, Closed: local.Site.Closed,
+		})
+	}
 	return result, nil
 }
 
@@ -681,7 +705,9 @@ func (s *Store) runDownloadJob(ctx context.Context, id string) {
 		}
 		completedBytes += part.Dump.Size
 	}
-	manifest := model.Manifest{Wiki: job.Wiki, DumpDate: metadata.DumpDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PublishedAt: time.Now().UTC()}
+	dumpSite := wikimedia.ReadDumpSiteMetadata(ctx, job.Wiki, filepath.Join(partsDir, "000.dump.bz2"))
+	site := mergeSiteMetadata(dumpSite, s.remote.SiteMetadata(ctx, job.Wiki))
+	manifest := model.Manifest{Wiki: job.Wiki, DumpDate: metadata.DumpDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PublishedAt: time.Now().UTC(), Site: site}
 	for _, part := range metadata.Parts {
 		manifest.DumpSize += part.Dump.Size
 		manifest.IndexSize += part.Index.Size
@@ -994,6 +1020,57 @@ func (s *Store) finishJobLocked(id, state, message string) {
 func (s *Store) wikiPath(wiki string) string { return filepath.Join(s.root, "wikis", wiki) }
 
 func (s *Store) jobsPath() string { return filepath.Join(s.root, "jobs.json") }
+
+func (s *Store) backfillSiteMetadata(ctx context.Context) {
+	entries, err := os.ReadDir(filepath.Join(s.root, "wikis"))
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		path := s.wikiPath(entry.Name())
+		manifestPath := filepath.Join(path, "manifest.json")
+		manifest, readErr := readManifest(manifestPath)
+		if readErr != nil || !manifest.Site.MetadataUpdatedAt.IsZero() && time.Since(manifest.Site.MetadataUpdatedAt) < 24*time.Hour {
+			continue
+		}
+		dumpSite := wikimedia.ReadDumpSiteMetadata(ctx, entry.Name(), filepath.Join(path, "parts", "000.dump.bz2"))
+		if s.remote != nil {
+			dumpSite = mergeSiteMetadata(dumpSite, s.remote.SiteMetadata(ctx, entry.Name()))
+		}
+		manifest.Site = dumpSite
+		_ = writeJSON(manifestPath, manifest)
+	}
+}
+
+func mergeSiteMetadata(fallback, preferred model.WikiSiteMetadata) model.WikiSiteMetadata {
+	if preferred.Name != "" {
+		fallback.Name = preferred.Name
+	}
+	if preferred.Project != "" {
+		fallback.Project = preferred.Project
+	}
+	if preferred.ContentType != "" {
+		fallback.ContentType = preferred.ContentType
+	}
+	if preferred.Language.Code != "" {
+		fallback.Language = preferred.Language
+	}
+	if preferred.OnlineSourceURL != "" {
+		fallback.OnlineSourceURL = preferred.OnlineSourceURL
+	}
+	fallback.ContentArticles, fallback.Closed = preferred.ContentArticles, preferred.Closed
+	fallback.License, fallback.LicenseURL = preferred.License, preferred.LicenseURL
+	if !preferred.MetadataUpdatedAt.IsZero() {
+		fallback.MetadataUpdatedAt = preferred.MetadataUpdatedAt
+	}
+	return fallback
+}
 
 func (s *Store) loadJobs() error {
 	data, err := os.ReadFile(s.jobsPath())

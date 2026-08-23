@@ -39,10 +39,13 @@ The listener is intentionally restricted to an explicit loopback IP. There is
 no authentication layer.
 
 Open `http://127.0.0.1:8765/` for the lightweight local dashboard. It shows
-downloaded wikis, available upgrades, current/recent job progress, and online
-dumps, and can submit download or update jobs. Upgrade controls appear with the
-other local-wiki actions. A confirmed trash action permanently removes an idle
-local wiki and its staged remnants; active work must be canceled first.
+downloaded wikis, available upgrades, current/recent job progress, and aggregate
+page/storage statistics. A Download button opens the complete Wikimedia dump
+catalog in a searchable modal, including human-readable project, language, and
+content-purpose metadata. The backend caches the complete catalog for one day
+and searches that local copy. Upgrade controls appear with the other local-wiki
+actions. A confirmed trash action permanently removes an idle local wiki and
+its staged remnants; active work must be canceled first.
 Alpine.js receives live local and job snapshots over a WebSocket; Bootstrap,
 Bootstrap Icons, and Alpine.js are pinned and embedded in the binary, with no
 CDN dependency.
@@ -127,7 +130,7 @@ The server offers these action-specific tools:
 | Tool | Purpose |
 | --- | --- |
 | `wiki_list_available` | Filter and paginate online multistream dumps. |
-| `wiki_list_local` | List installed wikis and index readiness. |
+| `wiki_list_local` | List installed wikis using agent-oriented project, language, content scope, source URL, article/page count, snapshot date, and search capability metadata. |
 | `wiki_download` | Submit a first-time background download. |
 | `wiki_update` | Submit an update or finish a missing body index. |
 | `wiki_job_status` | Poll one job snapshot by ID or wiki. |

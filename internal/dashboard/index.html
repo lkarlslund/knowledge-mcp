@@ -16,7 +16,7 @@
     .app-shell { max-width: 1440px; }
     .brand-mark { width: 2.5rem; height: 2.5rem; display: grid; place-items: center; color: #0d1117; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
     .surface { background: color-mix(in srgb, var(--bs-body-bg) 89%, #fff 11%); border-color: rgba(255,255,255,.08) !important; box-shadow: 0 .5rem 2rem rgba(0,0,0,.16); }
-    .metric { min-height: 5.25rem; }
+    .metric { min-height: 5.25rem; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
     .metric-value { font-size: clamp(1.35rem, 3vw, 2rem); letter-spacing: -.04em; }
     .table { --bs-table-bg: transparent; margin: 0; }
     .table > :not(caption) > * > * { padding: .5rem .75rem; border-color: rgba(255,255,255,.07); vertical-align: middle; }
@@ -50,20 +50,20 @@
 
   <div class="alert alert-danger py-2" role="alert" x-show="error" x-transition><i class="bi bi-exclamation-triangle me-2"></i><span x-text="error"></span></div>
 
-  <section class="row g-2 mb-3">
-    <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Local wikis</div><div class="metric-value fw-semibold" x-text="local.length"></div></div></div>
-    <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Active jobs</div><div class="metric-value fw-semibold" x-text="activeJobs.length"></div></div></div>
-    <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Local storage</div><div class="metric-value fw-semibold" x-text="bytes(totalStorage)"></div></div></div>
-    <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Search-ready</div><div class="metric-value fw-semibold" x-text="local.filter(w => w.title_ready).length"></div></div></div>
+  <section class="row row-cols-2 row-cols-lg-4 g-2 mb-3">
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Local wikis</div><div class="metric-value fw-semibold" x-text="number(local.length)"></div></div></div>
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Active jobs</div><div class="metric-value fw-semibold" x-text="number(activeJobs.length)"></div></div></div>
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Total pages</div><div class="metric-value fw-semibold" x-text="number(totalPages)"></div></div></div>
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Local storage</div><div class="metric-value fw-semibold" x-text="bytes(totalStorage)"></div></div></div>
   </section>
 
   <section class="surface border rounded-4 overflow-hidden mb-3">
-    <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local wikis</h2><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span></div>
+    <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local wikis</h2><div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#onlineWikisModal" @click="loadAvailable()"><i class="bi bi-cloud-arrow-down me-1"></i>Download</button></div></div>
     <div class="table-responsive" x-show="local.length">
       <table class="table table-hover align-middle">
         <thead><tr><th>Wiki</th><th>Status</th><th>Pages</th><th>Search</th><th>Storage</th><th class="text-end">Actions</th></tr></thead>
         <tbody><template x-for="wiki in local" :key="wiki.wiki"><tr>
-          <td><div class="wiki-name fw-semibold" x-text="wiki.wiki"></div><div class="small text-body-secondary" x-text="wiki.dump_date"></div></td>
+          <td><div class="wiki-name fw-semibold" x-text="wiki.site?.name || wiki.wiki"></div><div class="small text-body-secondary"><code x-text="wiki.wiki"></code><span class="mx-1">·</span><span x-text="wiki.dump_date"></span></div></td>
           <td><span class="badge rounded-pill fw-normal" :class="stateClass(wiki.state)" x-text="label(wiki.state)"></span></td>
           <td class="text-nowrap" x-text="number(wiki.page_count)"></td><td><span class="small" x-text="label(wiki.search_mode)"></span></td>
           <td>
@@ -94,22 +94,20 @@
     <div class="empty" x-show="!filteredJobs.length"><span><i class="bi bi-funnel me-2"></i>No matching jobs</span></div>
   </section>
 
-  <section class="surface border rounded-4 overflow-hidden">
-    <div class="d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-bottom">
-      <h2 class="h6 mb-0 me-auto"><i class="bi bi-cloud-arrow-down section-icon me-2"></i>Available online</h2>
-      <div class="input-group input-group-sm" style="max-width:22rem"><span class="input-group-text"><i class="bi bi-search"></i></span><input class="form-control" type="search" placeholder="Filter, e.g. enwiki" x-model="filter" @keydown.enter="loadAvailable(true)" aria-label="Filter online wikis" /><button class="btn btn-outline-secondary" title="Search" aria-label="Search" @click="loadAvailable(true)"><i class="bi bi-arrow-return-left"></i></button><button class="btn btn-outline-secondary" title="Refresh Wikimedia catalog" aria-label="Refresh Wikimedia catalog" @click="loadAvailable(true, true)"><i class="bi bi-arrow-clockwise"></i></button></div>
+<div class="modal fade" id="onlineWikisModal" tabindex="-1" aria-labelledby="onlineWikisTitle" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content surface border rounded-4">
+    <div class="modal-header py-2"><div><h2 class="modal-title h6 mb-0" id="onlineWikisTitle"><i class="bi bi-cloud-arrow-down section-icon me-2"></i>Download a wiki</h2><div class="small text-body-secondary" x-text="`${available.length} matching projects from the cached Wikimedia catalog`"></div></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body p-0">
+      <div class="d-flex gap-2 p-3 border-bottom sticky-top bg-body"><div class="input-group input-group-sm"><span class="input-group-text"><i class="bi bi-search"></i></span><input class="form-control" type="search" placeholder="Search by name, language, project or purpose" x-model="filter" @input.debounce.250ms="loadAvailable()" aria-label="Search online wikis" /></div><button class="btn btn-sm btn-outline-secondary text-nowrap" title="Refresh the one-day catalog cache" @click="loadAvailable(true)"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
+      <div class="table-responsive" x-show="available.length"><table class="table table-hover"><thead><tr><th>Project</th><th>Language</th><th>Content</th><th>Dump date</th><th>Local</th><th class="text-end">Action</th></tr></thead><tbody><template x-for="wiki in available" :key="wiki.name"><tr>
+        <td><div class="fw-semibold" x-text="wiki.display_name || wiki.name"></div><div class="small text-body-secondary"><code x-text="wiki.name"></code><span x-show="wiki.closed" class="badge text-bg-secondary fw-normal ms-2">read-only</span></div></td>
+        <td><div x-text="wiki.language?.name || wiki.language?.local_name || wiki.language?.code || 'Multilingual'"></div><div class="small text-body-secondary" x-show="wiki.language?.local_name && wiki.language.local_name !== wiki.language.name" x-text="wiki.language.local_name"></div></td>
+        <td><span class="badge text-bg-secondary fw-normal me-2" x-text="wiki.project || 'Wikimedia'"></span><span class="small text-body-secondary" x-text="wiki.content_type || 'Wikimedia project'"></span></td><td class="text-nowrap" x-text="wiki.dump_date"></td><td><i class="bi" :class="wiki.installed ? 'bi-check-circle-fill text-success' : 'bi-circle text-body-tertiary'"></i></td>
+        <td class="text-end"><button class="btn btn-sm btn-outline-primary btn-icon rounded-circle" :disabled="busy(wiki.name) || wiki.installed && !onlineUpgrade(wiki)" :title="onlineAction(wiki).label" :aria-label="onlineAction(wiki).label" @click="maintain(wiki.name, onlineAction(wiki).action)"><i :class="onlineAction(wiki).icon"></i></button></td>
+      </tr></template></tbody></table></div><div class="empty" x-show="!available.length"><span><i class="bi bi-search me-2"></i>No matching multistream dumps</span></div>
     </div>
-    <div class="table-responsive" x-show="available.length">
-      <table class="table table-hover"><thead><tr><th>Wiki</th><th>Dump date</th><th>Compressed</th><th>Parts</th><th>Local</th><th class="text-end">Action</th></tr></thead>
-        <tbody><template x-for="wiki in available" :key="wiki.name"><tr>
-          <td><span class="fw-semibold" x-text="wiki.name"></span><span x-show="wiki.closed" class="badge text-bg-secondary fw-normal ms-2" title="Historical, preserved read-only project">read-only</span></td><td x-text="wiki.dump_date"></td>
-          <td><span x-text="bytes((wiki.dump_size || 0) + (wiki.index_size || 0))"></span><div class="small text-body-secondary" x-text="`${bytes(wiki.dump_size)} dump + ${bytes(wiki.index_size)} index`"></div></td><td x-text="number(wiki.part_count || 1)"></td><td><i class="bi" :class="wiki.installed ? 'bi-check-circle-fill text-success' : 'bi-circle text-body-tertiary'"></i></td>
-          <td class="text-end"><button class="btn btn-sm btn-outline-primary btn-icon rounded-circle" :disabled="busy(wiki.name) || wiki.installed && !wiki.update_available" :title="onlineAction(wiki).label" :aria-label="onlineAction(wiki).label" @click="maintain(wiki.name, onlineAction(wiki).action)"><i :class="onlineAction(wiki).icon"></i></button></td>
-        </tr></template></tbody>
-      </table>
-    </div>
-    <div class="empty" x-show="!available.length"><span><i class="bi bi-search me-2"></i>No matching multistream dumps</span></div>
-  </section>
+  </div></div>
+</div>
 </main>
 
 <script>
@@ -117,10 +115,11 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
   local: [], jobs: [], upgrades: [], available: [], filter: '', jobFilter: 'running', connected: false, error: '', socket: null, reconnectDelay: 1000,
   terminal: ['downloaded','ready','up_to_date','failed','canceled'],
 	jobFilterOptions: [{value:'all', label:'All', icon:'bi bi-grid'}, {value:'running', label:'Running', icon:'bi bi-play-circle'}, {value:'queued', label:'Queued', icon:'bi bi-hourglass'}, {value:'failed', label:'Failed', icon:'bi bi-exclamation-circle'}, {value:'completed', label:'Completed', icon:'bi bi-check-circle'}],
-  async init() { await Promise.all([this.loadUpgrades(), this.loadAvailable()]); this.connect(); },
+  async init() { await this.loadUpgrades(); this.connect(); },
   get activeJobs() { return this.jobs.filter(job => !this.terminal.includes(job.state)); },
   get filteredJobs() { return this.jobs.filter(job => this.jobFilterMatches(job, this.jobFilter)); },
   get totalStorage() { return this.local.reduce((total, wiki) => total + Number(wiki.disk_bytes || 0), 0); },
+  get totalPages() { return this.local.reduce((total, wiki) => total + Number(wiki.page_count || 0), 0); },
   async api(path, options) { const response = await fetch(path, options); const data = await response.json(); if (!response.ok) throw new Error(data.error || response.statusText); return data; },
   connect() {
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -130,17 +129,18 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
     this.socket.onerror = () => this.socket.close();
     this.socket.onclose = () => { this.connected = false; setTimeout(() => this.connect(), this.reconnectDelay); this.reconnectDelay = Math.min(this.reconnectDelay * 2, 15000); };
   },
-  refreshCatalogSoon() { clearTimeout(this.catalogTimer); this.catalogTimer = setTimeout(() => Promise.all([this.loadUpgrades(), this.loadAvailable()]), 750); },
+  refreshCatalogSoon() { clearTimeout(this.catalogTimer); this.catalogTimer = setTimeout(() => Promise.all([this.loadUpgrades(), this.available.length ? this.loadAvailable() : Promise.resolve()]), 750); },
   async loadUpgrades() { try { this.upgrades = await this.api('/api/dashboard/upgrades'); } catch (error) { this.error = error.message; } },
-  async loadAvailable(reset = false, refresh = false) { try { const data = await this.api(`/api/dashboard/available?filter=${encodeURIComponent(this.filter.trim())}&offset=0&limit=25&refresh=${refresh}`); this.available = (data.wikis || []).filter(wiki => wiki.multistream_available); if (reset) this.error = ''; } catch (error) { this.error = error.message; } },
-  async maintain(wiki, action) { try { await this.api(`/api/dashboard/wiki/${encodeURIComponent(wiki)}/${action}`, {method:'POST', headers:{'X-Wikipedia-MCP':'1'}}); await this.loadAvailable(); } catch (error) { this.error = error.message; } },
+  async loadAvailable(refresh = false) { try { const data = await this.api(`/api/dashboard/available?filter=${encodeURIComponent(this.filter.trim())}&offset=0&limit=-1&refresh=${refresh}`); this.available = data.wikis || []; this.error = ''; } catch (error) { this.error = error.message; } },
+  async maintain(wiki, action) { try { await this.api(`/api/dashboard/wiki/${encodeURIComponent(wiki)}/${action}`, {method:'POST', headers:{'X-Wikipedia-MCP':'1'}}); if (this.available.length) await this.loadAvailable(); } catch (error) { this.error = error.message; } },
   async deleteWiki(wiki) { if (!window.confirm(`Delete ${wiki.wiki} and permanently remove ${this.bytes(wiki.disk_bytes)} of local data?`)) return; try { await this.api(`/api/dashboard/wiki/${encodeURIComponent(wiki.wiki)}/delete`, {method:'POST', headers:{'X-Wikipedia-MCP':'1'}}); this.local = this.local.filter(item => item.wiki !== wiki.wiki); await Promise.all([this.loadUpgrades(), this.loadAvailable()]); } catch (error) { this.error = error.message; } },
   async controlJob(id, action) { try { await this.api(`/api/dashboard/job/${encodeURIComponent(id)}/${action}`, {method:'POST', headers:{'X-Wikipedia-MCP':'1'}}); } catch (error) { this.error = error.message; } },
   busy(wiki) { return this.activeJobs.some(job => job.wiki === wiki); }, upgradeFor(wiki) { return this.upgrades.find(item => item.name === wiki.wiki); },
 	jobFilterMatches(job, filter) { if (filter === 'all') return true; if (filter === 'queued') return job.state === 'queued'; if (filter === 'failed') return job.state === 'failed'; if (filter === 'completed') return ['downloaded','ready','up_to_date'].includes(job.state); return ['discovering','downloading','verifying','title_indexing','body_indexing'].includes(job.state); },
 	jobFilterCount(filter) { return this.jobs.filter(job => this.jobFilterMatches(job, filter)).length; },
   localAction(wiki) { if (!wiki.title_ready) return {action:'update', label:'Build index', icon:'bi bi-database-gear'}; if (!wiki.body_ready) return {action:'update', label:'Resume indexing', icon:'bi bi-play-fill'}; if (this.upgradeFor(wiki)?.update_available) return {action:'update', label:'Update wiki', icon:'bi bi-arrow-repeat'}; return null; },
-  onlineAction(wiki) { if (this.busy(wiki.name)) return {action:'download', label:'Work already queued', icon:'bi bi-hourglass-split'}; if (wiki.installed) return {action:'update', label: wiki.update_available ? 'Update wiki' : 'Already current', icon: wiki.update_available ? 'bi bi-arrow-repeat' : 'bi bi-check-lg'}; return {action:'download', label:'Download wiki', icon:'bi bi-cloud-arrow-down'}; },
+  onlineUpgrade(wiki) { return Boolean(this.upgrades.find(item => item.name === wiki.name)?.update_available || wiki.update_available); },
+  onlineAction(wiki) { if (this.busy(wiki.name)) return {action:'download', label:'Work already queued', icon:'bi bi-hourglass-split'}; const upgrade = this.onlineUpgrade(wiki); if (wiki.installed) return {action:'update', label: upgrade ? 'Update wiki' : 'Already current', icon: upgrade ? 'bi bi-arrow-repeat' : 'bi bi-check-lg'}; return {action:'download', label:'Download wiki', icon:'bi bi-cloud-arrow-down'}; },
   jobControls(job) { if (['discovering','downloading','title_indexing','body_indexing'].includes(job.state)) return [{action:'pause', label:'Pause job', icon:'bi bi-pause-fill', class:''}, {action:'cancel', label:'Cancel job', icon:'bi bi-x-lg', class:'btn-outline-danger'}]; if (job.state === 'queued') return [{action:'cancel', label:'Cancel queued job', icon:'bi bi-x-lg', class:'btn-outline-danger'}]; if (job.state === 'paused') return [{action:'resume', label:'Resume job', icon:'bi bi-play-fill', class:'btn-outline-success'}, {action:'cancel', label:'Cancel job', icon:'bi bi-x-lg', class:'btn-outline-danger'}]; if (['failed','canceled'].includes(job.state)) return [{action:'retry', label:'Retry job', icon:'bi bi-arrow-clockwise', class:'btn-outline-warning'}]; return []; },
   bytes(value) { const amount = Number(value || 0), units = ['B','KiB','MiB','GiB','TiB']; if (!amount) return '0 B'; const unit = Math.min(Math.floor(Math.log(amount) / Math.log(1024)), units.length - 1); return `${(amount / Math.pow(1024, unit)).toFixed(unit ? 1 : 0)} ${units[unit]}`; },
   number(value) { return Number(value || 0).toLocaleString(); }, label(value) { return String(value || '—').replaceAll('_', ' '); },

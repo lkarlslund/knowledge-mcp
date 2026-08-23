@@ -17,7 +17,7 @@ const Version = "0.1.0"
 
 type Service interface {
 	ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error)
-	ListLocal() ([]model.LocalWiki, error)
+	ListLocalSummary() ([]model.LocalWikiSummary, error)
 	Submit(string, string) (model.Job, error)
 	Job(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
@@ -75,8 +75,8 @@ func New(service Service) *mcp.Server {
 		out, err := service.ListAvailable(ctx, in.Filter, in.Offset, in.Limit, in.Refresh)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_local", Description: "List downloaded local wikis and their title/full-text readiness."}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalWiki, error) {
-		out, err := service.ListLocal()
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_local", Description: "List local wikis with human-readable project, language, content scope, online source, content size, snapshot date, and search capability metadata."}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalWikiSummary, error) {
+		out, err := service.ListLocalSummary()
 		return nil, out, err
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "wiki_download", Description: "Submit a background download for a new wiki and return immediately with a job ID."}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {

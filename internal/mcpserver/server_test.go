@@ -2,6 +2,8 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
@@ -13,8 +15,20 @@ type fakeService struct{}
 func (fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
 	return model.AvailableResult{}, nil
 }
-func (fakeService) ListLocal() ([]model.LocalWiki, error) {
-	return []model.LocalWiki{{Manifest: model.Manifest{Wiki: "testwiki", TitleReady: true}}}, nil
+func (fakeService) ListLocalSummary() ([]model.LocalWikiSummary, error) {
+	return []model.LocalWikiSummary{{Wiki: "testwiki", Name: "Test Wikipedia", Project: "wikipedia", ContentType: "general-purpose encyclopedia", OnlineSourceURL: "https://test.wikipedia.org", Language: model.WikiLanguage{Code: "test", Name: "Test"}, ContentArticles: 40, IndexedPages: 42, SearchMode: "title"}}, nil
+}
+
+func TestLocalWikiSummariesExposeSelectionMetadata(t *testing.T) {
+	t.Parallel()
+	backend := fakeService{}
+	summaries, err := backend.ListLocalSummary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].Name != "Test Wikipedia" || summaries[0].ContentArticles != 40 || summaries[0].IndexedPages != 42 || summaries[0].OnlineSourceURL != "https://test.wikipedia.org" {
+		t.Fatalf("unexpected summaries: %#v", summaries)
+	}
 }
 func (fakeService) Submit(wiki, kind string) (model.Job, error) {
 	return model.Job{ID: "job", Wiki: wiki, Kind: kind}, nil
@@ -76,5 +90,20 @@ func TestToolsAndStructuredCall(t *testing.T) {
 	}
 	if result.IsError || result.StructuredContent == nil {
 		t.Fatalf("unexpected call result: %#v", result)
+	}
+	payload, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, field := range []string{`"content_type"`, `"language"`, `"online_source_url"`, `"content_articles"`, `"indexed_pages"`, `"search_mode"`} {
+		if !strings.Contains(text, field) {
+			t.Errorf("wiki_list_local response lacks %s: %s", field, text)
+		}
+	}
+	for _, field := range []string{`"dump_sha1"`, `"disk_bytes"`, `"body_index_version"`} {
+		if strings.Contains(text, field) {
+			t.Errorf("wiki_list_local exposes operational field %s: %s", field, text)
+		}
 	}
 }

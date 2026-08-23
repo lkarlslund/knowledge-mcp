@@ -41,6 +41,7 @@ type catalogEntry struct {
 
 type Client struct {
 	baseURL       string
+	siteMatrixURL string
 	http          *http.Client
 	parallel      int
 	downloadSlots chan struct{}
@@ -48,6 +49,8 @@ type Client struct {
 	catalog       []catalogEntry
 	cached        time.Time
 	metadata      map[string]cachedMetadata
+	sites         map[string]model.WikiSiteMetadata
+	sitesCached   time.Time
 }
 
 type cachedMetadata struct {
@@ -66,12 +69,18 @@ func NewClientWithBaseURL(baseURL string, parallel ...int) *Client {
 	if len(parallel) > 0 && parallel[0] > 0 {
 		connections = parallel[0]
 	}
+	siteMatrixURL := strings.TrimRight(baseURL, "/") + "/sitematrix"
+	if strings.TrimRight(baseURL, "/") == defaultBaseURL {
+		siteMatrixURL = "https://meta.wikimedia.org/w/api.php?action=sitematrix&format=json&formatversion=2&smlimit=max&smtype=special%7Clanguage&smstate=all"
+	}
 	return &Client{
 		baseURL:       strings.TrimRight(baseURL, "/"),
+		siteMatrixURL: siteMatrixURL,
 		http:          &http.Client{Transport: transport},
 		parallel:      connections,
 		downloadSlots: make(chan struct{}, connections),
 		metadata:      make(map[string]cachedMetadata),
+		sites:         make(map[string]model.WikiSiteMetadata),
 	}
 }
 
@@ -84,37 +93,46 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 	if err != nil {
 		return model.AvailableResult{}, err
 	}
+	sites, _ := c.loadSiteMatrix(ctx)
 	filter = strings.ToLower(strings.TrimSpace(filter))
-	filtered := make([]catalogEntry, 0, len(entries))
+	filtered := make([]model.OnlineWiki, 0, len(entries))
 	for _, entry := range entries {
-		if filter == "" || strings.Contains(entry.Name, filter) {
-			filtered = append(filtered, entry)
+		wiki := onlineWikiFromCatalog(entry, sites[entry.Name])
+		haystack := strings.ToLower(strings.Join([]string{wiki.Name, wiki.DisplayName, wiki.Project, wiki.ContentType, wiki.Language.Code, wiki.Language.Name, wiki.Language.LocalName}, " "))
+		if filter == "" || strings.Contains(haystack, filter) {
+			filtered = append(filtered, wiki)
 		}
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	if limit <= 0 || limit > 50 {
+	fullCatalog := limit == -1
+	if !fullCatalog && (limit <= 0 || limit > 50) {
 		limit = 20
 	}
 	result := model.AvailableResult{Offset: offset, Total: len(filtered)}
 	if offset >= len(filtered) {
 		return result, nil
 	}
-	end := min(offset+limit, len(filtered))
+	end := len(filtered)
+	if !fullCatalog {
+		end = min(offset+limit, len(filtered))
+	}
 	selected := filtered[offset:end]
-	result.Wikis = make([]model.OnlineWiki, len(selected))
+	result.Wikis = append([]model.OnlineWiki(nil), selected...)
+	if fullCatalog {
+		return result, nil
+	}
 
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
-	for i, entry := range selected {
+	for i, wiki := range selected {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			wiki := model.OnlineWiki{Name: entry.Name, DumpDate: entry.DumpDate, Closed: entry.Closed}
-			metadata, metadataErr := c.Metadata(ctx, entry.Name, entry.DumpDate)
+			metadata, metadataErr := c.Metadata(ctx, wiki.Name, wiki.DumpDate)
 			if metadataErr == nil {
 				wiki.Available = true
 				wiki.Fingerprint = metadata.Fingerprint
@@ -136,6 +154,17 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 		result.NextOffset = end
 	}
 	return result, nil
+}
+
+func onlineWikiFromCatalog(entry catalogEntry, site model.WikiSiteMetadata) model.OnlineWiki {
+	if site.Project == "" {
+		site = inferSiteMetadata(entry.Name)
+	}
+	return model.OnlineWiki{
+		Name: entry.Name, DisplayName: site.Name, Project: site.Project, ContentType: site.ContentType,
+		Language: site.Language, OnlineSourceURL: site.OnlineSourceURL, DumpDate: entry.DumpDate,
+		Closed: entry.Closed || site.Closed, Available: true,
+	}
 }
 
 func (c *Client) LatestMetadata(ctx context.Context, wiki string) (model.DumpMetadata, error) {
@@ -253,7 +282,7 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 
 func (c *Client) loadCatalog(ctx context.Context, refresh bool) ([]catalogEntry, error) {
 	c.mu.Lock()
-	if !refresh && len(c.catalog) > 0 && time.Since(c.cached) < time.Hour {
+	if !refresh && len(c.catalog) > 0 && time.Since(c.cached) < 24*time.Hour {
 		entries := append([]catalogEntry(nil), c.catalog...)
 		c.mu.Unlock()
 		return entries, nil

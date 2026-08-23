@@ -19,18 +19,23 @@ const (
 )
 
 type OnlineWiki struct {
-	Name            string `json:"name"`
-	DumpDate        string `json:"dump_date"`
-	Closed          bool   `json:"closed"`
-	Available       bool   `json:"multistream_available"`
-	DumpSize        int64  `json:"dump_size,omitempty"`
-	IndexSize       int64  `json:"index_size,omitempty"`
-	DumpSHA1        string `json:"dump_sha1,omitempty"`
-	IndexSHA1       string `json:"index_sha1,omitempty"`
-	Fingerprint     string `json:"fingerprint,omitempty"`
-	PartCount       int    `json:"part_count"`
-	Installed       bool   `json:"installed"`
-	UpdateAvailable bool   `json:"update_available"`
+	Name            string       `json:"name"`
+	DisplayName     string       `json:"display_name,omitempty"`
+	Project         string       `json:"project,omitempty"`
+	ContentType     string       `json:"content_type,omitempty"`
+	Language        WikiLanguage `json:"language,omitempty"`
+	OnlineSourceURL string       `json:"online_source_url,omitempty"`
+	DumpDate        string       `json:"dump_date"`
+	Closed          bool         `json:"closed"`
+	Available       bool         `json:"multistream_available"`
+	DumpSize        int64        `json:"dump_size,omitempty"`
+	IndexSize       int64        `json:"index_size,omitempty"`
+	DumpSHA1        string       `json:"dump_sha1,omitempty"`
+	IndexSHA1       string       `json:"index_sha1,omitempty"`
+	Fingerprint     string       `json:"fingerprint,omitempty"`
+	PartCount       int          `json:"part_count"`
+	Installed       bool         `json:"installed"`
+	UpdateAvailable bool         `json:"update_available"`
 }
 
 type AvailableResult struct {
@@ -59,21 +64,42 @@ type DumpPart struct {
 	Index FileMetadata `json:"index"`
 }
 
+type WikiLanguage struct {
+	Code      string `json:"code"`
+	Name      string `json:"name"`
+	LocalName string `json:"local_name"`
+	Direction string `json:"direction,omitempty"`
+}
+
+type WikiSiteMetadata struct {
+	Name              string       `json:"name"`
+	Project           string       `json:"project"`
+	ContentType       string       `json:"content_type"`
+	Language          WikiLanguage `json:"language"`
+	OnlineSourceURL   string       `json:"online_source_url"`
+	ContentArticles   uint64       `json:"content_articles"`
+	Closed            bool         `json:"closed"`
+	License           string       `json:"license,omitempty"`
+	LicenseURL        string       `json:"license_url,omitempty"`
+	MetadataUpdatedAt time.Time    `json:"metadata_updated_at,omitempty"`
+}
+
 type Manifest struct {
-	Wiki              string    `json:"wiki"`
-	DumpDate          string    `json:"dump_date"`
-	DumpSHA1          string    `json:"dump_sha1"`
-	IndexSHA1         string    `json:"index_sha1"`
-	Fingerprint       string    `json:"fingerprint,omitempty"`
-	PartCount         int       `json:"part_count"`
-	DumpSize          int64     `json:"dump_size"`
-	IndexSize         int64     `json:"index_size"`
-	PageCount         uint64    `json:"page_count"`
-	TitleReady        bool      `json:"title_ready"`
-	BodyReady         bool      `json:"body_ready"`
-	TitleIndexVersion int       `json:"title_index_version,omitempty"`
-	BodyIndexVersion  int       `json:"body_index_version,omitempty"`
-	PublishedAt       time.Time `json:"published_at"`
+	Wiki              string           `json:"wiki"`
+	DumpDate          string           `json:"dump_date"`
+	DumpSHA1          string           `json:"dump_sha1"`
+	IndexSHA1         string           `json:"index_sha1"`
+	Fingerprint       string           `json:"fingerprint,omitempty"`
+	PartCount         int              `json:"part_count"`
+	DumpSize          int64            `json:"dump_size"`
+	IndexSize         int64            `json:"index_size"`
+	PageCount         uint64           `json:"page_count"`
+	TitleReady        bool             `json:"title_ready"`
+	BodyReady         bool             `json:"body_ready"`
+	TitleIndexVersion int              `json:"title_index_version,omitempty"`
+	BodyIndexVersion  int              `json:"body_index_version,omitempty"`
+	PublishedAt       time.Time        `json:"published_at"`
+	Site              WikiSiteMetadata `json:"site"`
 }
 
 type LocalWiki struct {
@@ -87,6 +113,20 @@ type LocalWiki struct {
 	BodyIndexBytes        int64  `json:"body_index_bytes"`
 	OtherBytes            int64  `json:"other_bytes"`
 	ActiveJob             string `json:"active_job_id,omitempty"`
+}
+
+type LocalWikiSummary struct {
+	Wiki            string       `json:"wiki"`
+	Name            string       `json:"name"`
+	Project         string       `json:"project"`
+	ContentType     string       `json:"content_type"`
+	Language        WikiLanguage `json:"language"`
+	OnlineSourceURL string       `json:"online_source_url"`
+	ContentArticles uint64       `json:"content_articles"`
+	IndexedPages    uint64       `json:"indexed_pages"`
+	DumpDate        string       `json:"dump_date"`
+	SearchMode      string       `json:"search_mode"`
+	Closed          bool         `json:"closed"`
 }
 
 type Job struct {

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	dsbzip2 "github.com/dsnet/compress/bzip2"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
 
@@ -25,6 +27,8 @@ func TestCatalogMetadataAndDownload(t *testing.T) {
 		switch r.URL.Path {
 		case "/backup-index-bydb.html":
 			_, _ = fmt.Fprint(w, `<li>2026-08-04 00:00:00 <a href="testwiki/20260801">testwiki</a>: <span class='done'>Dump complete</span></li>`)
+		case "/sitematrix":
+			_, _ = fmt.Fprint(w, `{"sitematrix":{"count":1,"0":{"code":"test","name":"Testish","localname":"Test","dir":"ltr","site":[{"url":"https://test.wikipedia.org","dbname":"testwiki","code":"wiki","sitename":"Wikipedia"}]}}}`)
 		case "/testwiki/20260801/dumpstatus.json":
 			_, _ = fmt.Fprintf(w, `{"jobs":{"articlesmultistreamdump":{"status":"done","files":{"testwiki-20260801-pages-articles-multistream.xml.bz2":{"size":%d,"url":"/files/dump","sha1":"%s"},"testwiki-20260801-pages-articles-multistream-index.txt.bz2":{"size":%d,"url":"/files/index","sha1":"%s"}}}}}`, len(payload), sha, len(payload), sha)
 		case "/files/dump", "/files/index":
@@ -45,7 +49,7 @@ func TestCatalogMetadataAndDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Wikis) != 1 || !result.Wikis[0].Available || result.Wikis[0].DumpSHA1 != sha {
+	if len(result.Wikis) != 1 || !result.Wikis[0].Available || result.Wikis[0].DumpSHA1 != sha || result.Wikis[0].DisplayName != "Test Wikipedia" {
 		t.Fatalf("unexpected catalog: %#v", result)
 	}
 	destination := filepath.Join(t.TempDir(), "partial")
@@ -65,6 +69,96 @@ func TestCatalogMetadataAndDownload(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("download = %q, want %q", got, payload)
+	}
+}
+
+func TestFullCatalogIsCachedAndFilteredLocally(t *testing.T) {
+	t.Parallel()
+	var catalogRequests, matrixRequests, metadataRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backup-index-bydb.html":
+			catalogRequests.Add(1)
+			_, _ = fmt.Fprint(w, `<li>2026-08-04 00:00:00 <a href="abstractwiki/20260801">abstractwiki</a>: <span class='done'>Dump complete</span></li><li>2026-08-04 00:00:00 <a href="dawiki/20260801">dawiki</a>: <span class='done'>Dump complete</span></li>`)
+		case "/sitematrix":
+			matrixRequests.Add(1)
+			_, _ = fmt.Fprint(w, `{"sitematrix":{"count":2,"0":{"code":"da","name":"dansk","localname":"Danish","dir":"ltr","site":[{"url":"https://da.wikipedia.org","dbname":"dawiki","code":"wiki","sitename":"Wikipedia"}]},"specials":[{"url":"https://abstract.wikipedia.org","dbname":"abstractwiki","code":"abstract","lang":"en","sitename":"Abstract Wikipedia"}]}}`)
+		default:
+			metadataRequests.Add(1)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := NewClientWithBaseURL(server.URL)
+	all, err := client.ListAvailable(context.Background(), "", 0, -1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Wikis) != 2 || all.Wikis[0].DisplayName == "" || all.Wikis[1].ContentType == "" {
+		t.Fatalf("full catalog = %#v", all.Wikis)
+	}
+	filtered, err := client.ListAvailable(context.Background(), "encyclopedia", 0, -1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Wikis) != 2 {
+		t.Fatalf("content filter returned %#v", filtered.Wikis)
+	}
+	if catalogRequests.Load() != 1 || matrixRequests.Load() != 1 || metadataRequests.Load() != 0 {
+		t.Fatalf("requests: catalog=%d matrix=%d metadata=%d", catalogRequests.Load(), matrixRequests.Load(), metadataRequests.Load())
+	}
+	client.mu.Lock()
+	client.cached, client.sitesCached = time.Now().Add(-25*time.Hour), time.Now().Add(-25*time.Hour)
+	client.mu.Unlock()
+	if _, err := client.ListAvailable(context.Background(), "", 0, -1, false); err != nil {
+		t.Fatal(err)
+	}
+	if catalogRequests.Load() != 2 || matrixRequests.Load() != 2 {
+		t.Fatalf("stale caches were not refreshed: catalog=%d matrix=%d", catalogRequests.Load(), matrixRequests.Load())
+	}
+}
+
+func TestSiteMetadataIncludesSelectionFields(t *testing.T) {
+	t.Parallel()
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sitematrix":
+			_, _ = fmt.Fprintf(w, `{"sitematrix":{"count":1,"0":{"code":"da","name":"dansk","localname":"Danish","dir":"ltr","site":[{"url":%q,"dbname":"dawiki","code":"wiki","sitename":"Wikipedia"}]}}}`, server.URL)
+		case "/w/api.php":
+			_, _ = fmt.Fprint(w, `{"query":{"general":{"lang":"da"},"statistics":{"articles":321},"rightsinfo":{"text":"CC BY-SA","url":"https://example.test/license"}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := NewClientWithBaseURL(server.URL)
+	metadata := client.SiteMetadata(context.Background(), "dawiki")
+	if metadata.Name != "Danish Wikipedia" || metadata.Project != "wikipedia" || metadata.Language.LocalName != "dansk" || metadata.ContentArticles != 321 || metadata.OnlineSourceURL != server.URL || metadata.License != "CC BY-SA" {
+		t.Fatalf("site metadata = %#v", metadata)
+	}
+}
+
+func TestReadDumpSiteMetadata(t *testing.T) {
+	t.Parallel()
+	var compressed bytes.Buffer
+	writer, err := dsbzip2.NewWriter(&compressed, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte(`<mediawiki xml:lang="da"><siteinfo><sitename>Wikipedia</sitename><dbname>dawiki</dbname><base>https://da.wikipedia.org/wiki/Forside</base></siteinfo><page>`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "dump.bz2")
+	if err := os.WriteFile(path, compressed.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := ReadDumpSiteMetadata(context.Background(), "dawiki", path)
+	if metadata.Name != "Wikipedia" || metadata.Language.Code != "da" || metadata.Project != "wikipedia" || metadata.OnlineSourceURL != "https://da.wikipedia.org" {
+		t.Fatalf("dump site metadata = %#v", metadata)
 	}
 }
 
