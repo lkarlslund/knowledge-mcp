@@ -80,14 +80,14 @@ func (c *Client) JobAction(id, action string) (model.Job, error) {
 	return out, err
 }
 
-func (c *Client) Search(wiki, query string, offset, limit int) (model.SearchResult, error) {
+func (c *Client) Search(ctx context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
 	var out model.SearchResult
-	err := c.Call(context.Background(), "wiki_search", map[string]any{"wiki": wiki, "query": query, "offset": offset, "limit": limit}, &out)
+	err := c.Call(ctx, "wiki_search", map[string]any{"wiki": wiki, "query": query, "offset": offset, "limit": limit}, &out)
 	return out, err
 }
 
-func (c *Client) Read(wiki, title string, pageID uint64, format string, offset, maxChars int) (model.Page, error) {
+func (c *Client) Read(ctx context.Context, wiki, title string, pageID uint64, format string, offset, maxChars int) (model.Page, error) {
 	var out model.Page
-	err := c.Call(context.Background(), "wiki_read", map[string]any{"wiki": wiki, "title": title, "page_id": pageID, "format": format, "offset": offset, "max_chars": maxChars}, &out)
+	err := c.Call(ctx, "wiki_read", map[string]any{"wiki": wiki, "title": title, "page_id": pageID, "format": format, "offset": offset, "max_chars": maxChars}, &out)
 	return out, err
 }

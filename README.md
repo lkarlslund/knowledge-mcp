@@ -143,11 +143,15 @@ Runtime data is not committed. Each installed wiki keeps:
 
 - the original compressed XML dump;
 - the compressed Wikimedia title/offset index;
-- a title index containing page identity and stream offsets;
+- a compact title index containing searchable/exact titles and stored stream offsets;
 - a body-term index that does not store duplicate page bodies; and
 - a manifest binding every index to its dump checksums.
 
 Page reads seek to the indexed bzip2 stream and decompress only that page group.
+Numeric page IDs are Bleve document IDs instead of duplicated fields. Stream
+offsets are stored but not searchable, while term vectors, catch-all fields,
+and sort/facet doc values are disabled. Search handles are cached read-only, and
+MCP cancellation propagates through index queries and page decompression.
 Downloads are resumable, size-checked, and verified against Wikimedia SHA-1
 metadata before publication. Response bodies are streamed directly to staging
 files in bounded buffers rather than accumulated in memory. Job state and
@@ -164,7 +168,10 @@ committed line count per dump part, so completed parts are skipped and only the
 current part's prefix is replayed after a restart. Body indexing uses a compact
 bitset checkpoint and skips committed streams. Checkpoints are removed only
 when their indexes are complete. Exact page reads use a single-stream decoder
-to avoid parallel setup overhead.
+to avoid parallel setup overhead. Body batches are bounded by analyzed bytes,
+and Scorch persistence/merge settings limit tiny segment proliferation. Index
+schema versions are recorded in each manifest; stale schemas are automatically
+queued for a resumable rebuild without downloading the dump again.
 
 ## Development
 

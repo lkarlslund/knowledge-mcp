@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blevesearch/bleve/v2/mapping"
 	dsbzip2 "github.com/dsnet/compress/bzip2"
 )
 
@@ -63,6 +64,10 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if page.PageID != 2 || page.Content != "Beta contains a distinctive platypus phrase." {
 		t.Fatalf("unexpected page: %#v", page)
 	}
+	pageByID, err := ReadPage(dir, "", 2, "wikitext", 0, 1000)
+	if err != nil || pageByID.Title != "Beta: Details" {
+		t.Fatalf("ReadPage by document ID = %#v, %v", pageByID, err)
+	}
 
 	if err := BuildBody(context.Background(), parts, filepath.Join(dir, BodyIndexDir), func(int64, int64) {}); err != nil {
 		t.Fatalf("BuildBody: %v", err)
@@ -73,6 +78,26 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	}
 	if len(bodyResult.Hits) != 1 || bodyResult.Hits[0].PageID != 2 {
 		t.Fatalf("unexpected body hits: %#v", bodyResult.Hits)
+	}
+}
+
+func TestLeanMappings(t *testing.T) {
+	t.Parallel()
+	for name, indexMapping := range map[string]mapping.IndexMapping{"title": titleMapping(), "body": bodyMapping()} {
+		impl, ok := indexMapping.(*mapping.IndexMappingImpl)
+		if !ok {
+			t.Fatalf("%s mapping has type %T", name, indexMapping)
+		}
+		if impl.IndexDynamic || impl.StoreDynamic || impl.DocValuesDynamic {
+			t.Errorf("%s mapping retains dynamic fields", name)
+		}
+		for property, document := range impl.DefaultMapping.Properties {
+			for _, field := range document.Fields {
+				if field.IncludeTermVectors || field.IncludeInAll || field.DocValues {
+					t.Errorf("%s.%s retains redundant index data: %#v", name, property, field)
+				}
+			}
+		}
 	}
 }
 

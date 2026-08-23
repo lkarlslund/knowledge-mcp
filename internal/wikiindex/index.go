@@ -32,22 +32,23 @@ import (
 )
 
 const (
-	TitleIndexDir = "titles.bleve"
-	BodyIndexDir  = "bodies.bleve"
+	TitleIndexDir       = "titles.bleve"
+	BodyIndexDir        = "bodies.bleve"
+	CurrentIndexVersion = 2
+	bodyBatchBytes      = 32 << 20
 )
 
 type titleDocument struct {
 	Title      string `json:"title"`
 	TitleExact string `json:"title_exact"`
-	PageID     uint64 `json:"page_id"`
 	Offset     int64  `json:"offset"`
 	Part       int    `json:"part"`
 }
 
 type bodyDocument struct {
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	PageID uint64 `json:"page_id"`
+	ID    uint64 `json:"-"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
 
 type stream struct {
@@ -115,7 +116,7 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 	var idx bleve.Index
 	var err error
 	if resume {
-		idx, err = bleve.Open(destination)
+		idx, err = openWritableIndex(destination)
 	} else {
 		if err := os.RemoveAll(destination); err != nil {
 			return 0, err
@@ -125,7 +126,7 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 		if err != nil {
 			return 0, err
 		}
-		idx, err = bleve.New(destination, titleMapping())
+		idx, err = newIndex(destination, titleMapping())
 	}
 	if err != nil {
 		return 0, fmt.Errorf("open title index: %w", err)
@@ -199,7 +200,7 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 				_ = f.Close()
 				return 0, parseErr
 			}
-			doc := titleDocument{Title: title, TitleExact: normalizeTitle(title), PageID: pageID, Offset: offset, Part: part.Number}
+			doc := titleDocument{Title: title, TitleExact: normalizeTitle(title), Offset: offset, Part: part.Number}
 			if err := batch.Index(strconv.FormatUint(pageID, 10), doc); err != nil {
 				_ = f.Close()
 				return 0, err
@@ -253,14 +254,14 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 	var idx bleve.Index
 	var err error
 	if resume {
-		idx, err = bleve.Open(destination)
+		idx, err = openWritableIndex(destination)
 	} else {
 		if err := os.RemoveAll(destination); err != nil {
 			return err
 		}
 		_ = os.Remove(checkpointPath)
 		checkpoint = newBodyCheckpoint(streams)
-		idx, err = bleve.New(destination, bodyMapping())
+		idx, err = newIndex(destination, bodyMapping())
 	}
 	if err != nil {
 		return fmt.Errorf("open body index: %w", err)
@@ -291,13 +292,13 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 		}
 	}()
 	type decoded struct {
-		part  stream
-		pages []xmlPage
-		err   error
+		part stream
+		docs []bodyDocument
+		err  error
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	workerCount := min(runtime.GOMAXPROCS(0), 16)
+	workerCount := min(runtime.GOMAXPROCS(0), 8)
 	jobs := make(chan stream)
 	results := make(chan decoded, workerCount)
 	var workers sync.WaitGroup
@@ -306,9 +307,13 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 		go func() {
 			defer workers.Done()
 			for part := range jobs {
-				pages, decodeErr := decodeStream(io.NewSectionReader(dumps[part.Path], part.Offset, part.End-part.Offset))
+				pages, decodeErr := decodeStream(workerCtx, io.NewSectionReader(dumps[part.Path], part.Offset, part.End-part.Offset))
+				docs := make([]bodyDocument, 0, len(pages))
+				for _, page := range pages {
+					docs = append(docs, bodyDocument{ID: page.ID, Title: page.Title, Body: PlainText(page.Revision.Text)})
+				}
 				select {
-				case results <- decoded{part: part, pages: pages, err: decodeErr}:
+				case results <- decoded{part: part, docs: docs, err: decodeErr}:
 				case <-workerCtx.Done():
 					return
 				}
@@ -358,15 +363,14 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 			cancel()
 			return fmt.Errorf("decode stream at %d: %w", result.part.Offset, result.err)
 		}
-		for _, page := range result.pages {
-			doc := bodyDocument{Title: page.Title, Body: PlainText(page.Revision.Text), PageID: page.ID}
-			if err := batch.Index(strconv.FormatUint(page.ID, 10), doc); err != nil {
+		for _, doc := range result.docs {
+			if err := batch.Index(strconv.FormatUint(doc.ID, 10), doc); err != nil {
 				return err
 			}
 			batchCount++
 		}
 		pendingStreams = append(pendingStreams, result.part.Index)
-		if batchCount >= 1000 || len(pendingStreams) >= 64 {
+		if batch.TotalDocsSize() >= bodyBatchBytes || len(pendingStreams) >= 64 {
 			if err := commit(); err != nil {
 				return err
 			}
@@ -393,7 +397,7 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 
 func newBodyCheckpoint(streams []stream) bodyCheckpoint {
 	return bodyCheckpoint{
-		Version:     1,
+		Version:     CurrentIndexVersion,
 		Fingerprint: bodyCheckpointFingerprint(streams),
 		Total:       len(streams),
 		Completed:   make([]byte, (len(streams)+7)/8),
@@ -405,7 +409,7 @@ func newTitleCheckpoint(parts []Part) (titleCheckpoint, int64, error) {
 	if err != nil {
 		return titleCheckpoint{}, 0, err
 	}
-	return titleCheckpoint{Version: 1, Fingerprint: fingerprint, Parts: make([]titlePartCheckpoint, len(parts))}, total, nil
+	return titleCheckpoint{Version: CurrentIndexVersion, Fingerprint: fingerprint, Parts: make([]titlePartCheckpoint, len(parts))}, total, nil
 }
 
 func loadTitleCheckpoint(path, destination string, parts []Part) (titleCheckpoint, int64, bool) {
@@ -421,7 +425,7 @@ func loadTitleCheckpoint(path, destination string, parts []Part) (titleCheckpoin
 	if err != nil || json.Unmarshal(data, &checkpoint) != nil {
 		return titleCheckpoint{}, total, false
 	}
-	if checkpoint.Version != 1 || checkpoint.Fingerprint != fingerprint || len(checkpoint.Parts) != len(parts) || checkpoint.CompressedDone < 0 || checkpoint.CompressedDone > total {
+	if checkpoint.Version != CurrentIndexVersion || checkpoint.Fingerprint != fingerprint || len(checkpoint.Parts) != len(parts) || checkpoint.CompressedDone < 0 || checkpoint.CompressedDone > total {
 		return titleCheckpoint{}, total, false
 	}
 	return checkpoint, total, true
@@ -459,7 +463,7 @@ func loadBodyCheckpoint(path, destination string, streams []stream) (bodyCheckpo
 		return bodyCheckpoint{}, false
 	}
 	wantBytes := (len(streams) + 7) / 8
-	if checkpoint.Version != 1 || checkpoint.Total != len(streams) || len(checkpoint.Completed) != wantBytes || checkpoint.Fingerprint != bodyCheckpointFingerprint(streams) {
+	if checkpoint.Version != CurrentIndexVersion || checkpoint.Total != len(streams) || len(checkpoint.Completed) != wantBytes || checkpoint.Fingerprint != bodyCheckpointFingerprint(streams) {
 		return bodyCheckpoint{}, false
 	}
 	var done int64
@@ -513,7 +517,51 @@ func checkpointMark(checkpoint *bodyCheckpoint, index int) {
 	checkpoint.Done++
 }
 
+type Reader struct {
+	generationPath string
+	title          bleve.Index
+	body           bleve.Index
+}
+
+func OpenReader(generationPath string, fullText bool) (*Reader, error) {
+	reader := &Reader{generationPath: generationPath}
+	if fullText {
+		body, err := bleve.OpenUsing(filepath.Join(generationPath, BodyIndexDir), map[string]interface{}{"read_only": true})
+		if err != nil {
+			return nil, fmt.Errorf("open full_text index: %w", err)
+		}
+		reader.body = body
+		return reader, nil
+	}
+	title, err := bleve.OpenUsing(filepath.Join(generationPath, TitleIndexDir), map[string]interface{}{"read_only": true})
+	if err != nil {
+		return nil, fmt.Errorf("open title index: %w", err)
+	}
+	reader.title = title
+	return reader, nil
+}
+
+func (r *Reader) Close() error {
+	var errs []error
+	if r.body != nil {
+		errs = append(errs, r.body.Close())
+	}
+	if r.title != nil {
+		errs = append(errs, r.title.Close())
+	}
+	return errors.Join(errs...)
+}
+
 func Search(generationPath, query string, offset, limit int, fullText bool) (model.SearchResult, error) {
+	reader, err := OpenReader(generationPath, fullText)
+	if err != nil {
+		return model.SearchResult{}, err
+	}
+	defer func() { _ = reader.Close() }()
+	return reader.Search(context.Background(), query, offset, limit, fullText)
+}
+
+func (r *Reader) Search(ctx context.Context, query string, offset, limit int, fullText bool) (model.SearchResult, error) {
 	if strings.TrimSpace(query) == "" {
 		return model.SearchResult{}, errors.New("query cannot be empty")
 	}
@@ -523,17 +571,18 @@ func Search(generationPath, query string, offset, limit int, fullText bool) (mod
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
-	path := filepath.Join(generationPath, TitleIndexDir)
 	mode := "title"
+	idx := r.title
 	if fullText {
-		path = filepath.Join(generationPath, BodyIndexDir)
 		mode = "full_text"
+		idx = r.body
+		if idx == nil {
+			return model.SearchResult{}, errors.New("full-text index is not open")
+		}
 	}
-	idx, err := bleve.Open(path)
-	if err != nil {
-		return model.SearchResult{}, fmt.Errorf("open %s index: %w", mode, err)
+	if idx == nil {
+		return model.SearchResult{}, errors.New("title index is not open")
 	}
-	defer func() { _ = idx.Close() }()
 	titleQuery := bleve.NewMatchQuery(query)
 	titleQuery.SetField("title")
 	titleQuery.SetBoost(3)
@@ -544,8 +593,8 @@ func Search(generationPath, query string, offset, limit int, fullText bool) (mod
 		q = bleve.NewDisjunctionQuery(titleQuery, bodyQuery)
 	}
 	req := bleve.NewSearchRequestOptions(q, limit, offset, false)
-	req.Fields = []string{"title", "page_id"}
-	response, err := idx.Search(req)
+	req.Fields = []string{"title"}
+	response, err := idx.SearchInContext(ctx, req)
 	if err != nil {
 		return model.SearchResult{}, fmt.Errorf("search: %w", err)
 	}
@@ -559,12 +608,20 @@ func Search(generationPath, query string, offset, limit int, fullText bool) (mod
 }
 
 func ReadPage(generationPath, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
+	reader, err := OpenReader(generationPath, false)
+	if err != nil {
+		return model.Page{}, err
+	}
+	defer func() { _ = reader.Close() }()
+	return reader.ReadPage(context.Background(), title, pageID, format, start, maxChars)
+}
+
+func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
 	if title == "" && pageID == 0 || title != "" && pageID != 0 {
 		return model.Page{}, errors.New("provide exactly one of title or page_id")
 	}
-	idx, err := bleve.Open(filepath.Join(generationPath, TitleIndexDir))
-	if err != nil {
-		return model.Page{}, fmt.Errorf("open title index: %w", err)
+	if r.title == nil {
+		return model.Page{}, errors.New("title index is not open")
 	}
 	var q blevequery.Query
 	if pageID != 0 {
@@ -575,14 +632,10 @@ func ReadPage(generationPath, title string, pageID uint64, format string, start,
 		q = term
 	}
 	req := bleve.NewSearchRequestOptions(q, 1, 0, false)
-	req.Fields = []string{"title", "page_id", "offset", "part"}
-	res, err := idx.Search(req)
-	closeErr := idx.Close()
+	req.Fields = []string{"title", "offset", "part"}
+	res, err := r.title.SearchInContext(ctx, req)
 	if err != nil {
 		return model.Page{}, err
-	}
-	if closeErr != nil {
-		return model.Page{}, closeErr
 	}
 	if len(res.Hits) == 0 {
 		return model.Page{}, errors.New("page not found")
@@ -591,12 +644,12 @@ func ReadPage(generationPath, title string, pageID uint64, format string, start,
 	wantedID, _ := strconv.ParseUint(hit.ID, 10, 64)
 	streamOffset := int64(hit.Fields["offset"].(float64))
 	partNumber := int(hit.Fields["part"].(float64))
-	dump, err := os.Open(filepath.Join(generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", partNumber)))
+	dump, err := os.Open(filepath.Join(r.generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", partNumber)))
 	if err != nil {
 		return model.Page{}, err
 	}
 	defer func() { _ = dump.Close() }()
-	pages, err := decodeStream(io.NewSectionReader(dump, streamOffset, 1<<63-1-streamOffset))
+	pages, err := decodeStream(ctx, io.NewSectionReader(dump, streamOffset, 1<<63-1-streamOffset))
 	if err != nil {
 		return model.Page{}, fmt.Errorf("decode page stream: %w", err)
 	}
@@ -680,8 +733,24 @@ func readStreams(ctx context.Context, part Part) ([]stream, error) {
 	return streams, nil
 }
 
-func decodeStream(r io.Reader) ([]xmlPage, error) {
-	decoder := xml.NewDecoder(bzip2.NewReader(r))
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(buffer)
+	if err == nil {
+		err = r.ctx.Err()
+	}
+	return n, err
+}
+
+func decodeStream(ctx context.Context, r io.Reader) ([]xmlPage, error) {
+	decoder := xml.NewDecoder(bzip2.NewReader(contextReader{ctx: ctx, reader: r}))
 	// Individual multistream blocks are XML fragments: only the first has the
 	// opening mediawiki element and only the last has its closing element.
 	decoder.Strict = false
@@ -716,17 +785,17 @@ func normalizeTitle(title string) string {
 
 func titleMapping() mapping.IndexMapping {
 	m := bleve.NewIndexMapping()
+	m.IndexDynamic, m.StoreDynamic, m.DocValuesDynamic = false, false, false
 	doc := bleve.NewDocumentMapping()
 	storedText := bleve.NewTextFieldMapping()
-	storedText.Store = true
+	storedText.Store, storedText.IncludeTermVectors, storedText.IncludeInAll, storedText.DocValues = true, false, false, false
 	exact := bleve.NewTextFieldMapping()
 	exact.Analyzer = keyword.Name
-	exact.Store = false
+	exact.Store, exact.IncludeTermVectors, exact.IncludeInAll, exact.DocValues, exact.SkipFreqNorm = false, false, false, false, true
 	number := bleve.NewNumericFieldMapping()
-	number.Store = true
+	number.Store, number.Index, number.IncludeInAll, number.DocValues = true, false, false, false
 	doc.AddFieldMappingsAt("title", storedText)
 	doc.AddFieldMappingsAt("title_exact", exact)
-	doc.AddFieldMappingsAt("page_id", number)
 	doc.AddFieldMappingsAt("offset", number)
 	doc.AddFieldMappingsAt("part", number)
 	m.DefaultMapping = doc
@@ -735,18 +804,36 @@ func titleMapping() mapping.IndexMapping {
 
 func bodyMapping() mapping.IndexMapping {
 	m := bleve.NewIndexMapping()
+	m.IndexDynamic, m.StoreDynamic, m.DocValuesDynamic = false, false, false
 	doc := bleve.NewDocumentMapping()
 	title := bleve.NewTextFieldMapping()
-	title.Store = true
+	title.Store, title.IncludeTermVectors, title.IncludeInAll, title.DocValues = true, false, false, false
 	body := bleve.NewTextFieldMapping()
-	body.Store = false
-	number := bleve.NewNumericFieldMapping()
-	number.Store = true
+	body.Store, body.IncludeTermVectors, body.IncludeInAll, body.DocValues = false, false, false, false
 	doc.AddFieldMappingsAt("title", title)
 	doc.AddFieldMappingsAt("body", body)
-	doc.AddFieldMappingsAt("page_id", number)
 	m.DefaultMapping = doc
 	return m
+}
+
+func scorchConfig() map[string]interface{} {
+	return map[string]interface{}{
+		"scorchPersisterOptions": map[string]interface{}{
+			"NumPersisterWorkers":           2,
+			"MaxSizeInMemoryMergePerWorker": 64 << 20,
+		},
+		"scorchMergePlanOptions": map[string]interface{}{
+			"FloorSegmentFileSize": 10 << 20,
+		},
+	}
+}
+
+func newIndex(path string, indexMapping mapping.IndexMapping) (bleve.Index, error) {
+	return bleve.NewUsing(path, indexMapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultMemKVStore, scorchConfig())
+}
+
+func openWritableIndex(path string) (bleve.Index, error) {
+	return bleve.OpenUsing(path, scorchConfig())
 }
 
 var (

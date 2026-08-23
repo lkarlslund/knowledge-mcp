@@ -21,8 +21,8 @@ type Service interface {
 	Submit(string, string) (model.Job, error)
 	Job(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
-	Search(string, string, int, int) (model.SearchResult, error)
-	Read(string, string, uint64, string, int, int) (model.Page, error)
+	Search(context.Context, string, string, int, int) (model.SearchResult, error)
+	Read(context.Context, string, string, uint64, string, int, int) (model.Page, error)
 }
 
 type DashboardService interface {
@@ -101,12 +101,12 @@ func New(service Service) *mcp.Server {
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed wiki. Uses title search as soon as published and full-text search when body indexing finishes."}, func(_ context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
-		out, err := service.Search(in.Wiki, in.Query, in.Offset, in.Limit)
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed wiki. Uses title search as soon as published and full-text search when body indexing finishes."}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+		out, err := service.Search(ctx, in.Wiki, in.Query, in.Offset, in.Limit)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as plain text or raw wikitext."}, func(_ context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
-		out, err := service.Read(in.Wiki, in.Title, in.PageID, in.Format, in.Offset, in.MaxChars)
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as plain text or raw wikitext."}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
+		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, in.Format, in.Offset, in.MaxChars)
 		return nil, out, err
 	})
 	return server

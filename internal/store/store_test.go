@@ -105,14 +105,14 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if len(locals) != 1 || !locals[0].TitleReady || !locals[0].BodyReady {
 		t.Fatalf("unexpected local state: %#v", locals)
 	}
-	result, err := backend.Search("testwiki", "capybara", 0, 10)
+	result, err := backend.Search(context.Background(), "testwiki", "capybara", 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.SearchMode != "full_text" || len(result.Hits) != 1 {
 		t.Fatalf("unexpected search result: %#v", result)
 	}
-	page, err := backend.Read("testwiki", "Test Article", 0, "text", 0, 1000)
+	page, err := backend.Read(context.Background(), "testwiki", "Test Article", 0, "text", 0, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}

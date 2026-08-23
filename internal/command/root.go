@@ -178,7 +178,7 @@ func newSearchCommand(opts *options) *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Search(args[0], args[1], offset, limit)
+				result, err := client.Search(cmd.Context(), args[0], args[1], offset, limit)
 				return printResult(result, err)
 			})
 		},
@@ -205,7 +205,7 @@ func newReadCommand(opts *options) *cobra.Command {
 				return errors.New("provide exactly one TITLE or --page-id")
 			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Read(args[0], title, pageID, format, offset, maxChars)
+				result, err := client.Read(cmd.Context(), args[0], title, pageID, format, offset, maxChars)
 				return printResult(result, err)
 			})
 		},

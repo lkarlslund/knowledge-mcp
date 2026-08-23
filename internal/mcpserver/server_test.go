@@ -25,10 +25,10 @@ func (fakeService) Job(id, wiki string) (model.Job, error) {
 func (fakeService) JobAction(id, action string) (model.Job, error) {
 	return model.Job{ID: id, State: action}, nil
 }
-func (fakeService) Search(wiki, query string, offset, limit int) (model.SearchResult, error) {
+func (fakeService) Search(_ context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
 	return model.SearchResult{Wiki: wiki}, nil
 }
-func (fakeService) Read(wiki, title string, pageID uint64, format string, offset, maxChars int) (model.Page, error) {
+func (fakeService) Read(_ context.Context, wiki, title string, pageID uint64, format string, offset, maxChars int) (model.Page, error) {
 	return model.Page{Wiki: wiki, Title: title, PageID: pageID}, nil
 }
 

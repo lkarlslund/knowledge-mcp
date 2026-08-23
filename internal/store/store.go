@@ -30,6 +30,8 @@ type Store struct {
 	indexQueue    chan string
 	running       map[string]context.CancelFunc
 	watchers      map[chan struct{}]struct{}
+	readerMu      sync.Mutex
+	readers       map[string]*wikiindex.Reader
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 }
@@ -55,7 +57,7 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
 		return nil, errors.New("download and index worker counts must be positive")
 	}
-	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{})}
+	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*wikiindex.Reader)}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
@@ -68,12 +70,47 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	for range config.IndexWorkers {
 		go s.worker(ctx, s.indexQueue)
 	}
+	if err := s.queueStaleIndexes(); err != nil {
+		s.Close()
+		return nil, err
+	}
 	return s, nil
+}
+
+func (s *Store) queueStaleIndexes() error {
+	entries, err := os.ReadDir(filepath.Join(s.root, "wikis"))
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range entries {
+		if !entry.IsDir() || s.active[entry.Name()] != "" {
+			continue
+		}
+		manifest, readErr := readManifest(filepath.Join(s.wikiPath(entry.Name()), "manifest.json"))
+		if readErr != nil || manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentIndexVersion && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion {
+			continue
+		}
+		id, idErr := newID()
+		if idErr != nil {
+			return idErr
+		}
+		now := time.Now().UTC()
+		job := &model.Job{ID: id, Wiki: entry.Name(), Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued index schema upgrade", CreatedAt: now, UpdatedAt: now}
+		s.jobs[id], s.active[entry.Name()] = job, id
+		if err := s.saveJobsLocked(); err != nil {
+			return err
+		}
+		s.enqueue(job)
+	}
+	return nil
 }
 
 func (s *Store) Close() {
 	s.cancel()
 	s.wg.Wait()
+	s.closeReaders("")
 }
 
 func (s *Store) ListAvailable(ctx context.Context, filter string, offset, limit int, refresh bool) (model.AvailableResult, error) {
@@ -102,7 +139,15 @@ func (s *Store) ListAvailable(ctx context.Context, filter string, offset, limit 
 
 func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	active := make(map[string]string, len(s.active))
+	states := make(map[string]string, len(s.active))
+	for wiki, jobID := range s.active {
+		active[wiki] = jobID
+		if job := s.jobs[jobID]; job != nil {
+			states[wiki] = job.State
+		}
+	}
+	s.mu.RUnlock()
 	entries, err := os.ReadDir(filepath.Join(s.root, "wikis"))
 	if err != nil {
 		return nil, err
@@ -117,15 +162,17 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 			continue
 		}
 		local := model.LocalWiki{Manifest: manifest, State: model.StateDownloaded, SearchMode: "none"}
-		if manifest.TitleReady {
+		local.TitleReady = manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentIndexVersion
+		local.BodyReady = local.TitleReady && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion
+		if local.TitleReady {
 			local.State, local.SearchMode = model.StateTitleReady, "title"
 		}
-		if manifest.BodyReady {
+		if local.BodyReady {
 			local.State, local.SearchMode = model.StateReady, "full_text"
 		}
-		if jobID := s.active[entry.Name()]; jobID != "" {
+		if jobID := active[entry.Name()]; jobID != "" {
 			local.ActiveJob = jobID
-			local.State = s.jobs[jobID].State
+			local.State = states[entry.Name()]
 		}
 		local.DiskBytes, local.CompressedDumpBytes, local.MultistreamIndexBytes, local.TitleIndexBytes, local.BodyIndexBytes = localStorage(s.wikiPath(entry.Name()))
 		local.OtherBytes = max(local.DiskBytes-local.CompressedDumpBytes-local.MultistreamIndexBytes-local.TitleIndexBytes-local.BodyIndexBytes, 0)
@@ -397,37 +444,67 @@ func isTerminal(state string) bool {
 	return state == model.StateDownloaded || state == model.StateReady || state == model.StateUpToDate || state == model.StateFailed || state == model.StateCanceled
 }
 
-func (s *Store) Search(wiki, query string, offset, limit int) (model.SearchResult, error) {
+func (s *Store) Search(ctx context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
-	if err != nil || !manifest.TitleReady {
+	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
 		return model.SearchResult{}, fmt.Errorf("wiki %s is not title-ready", wiki)
 	}
-	result, err := wikiindex.Search(s.wikiPath(wiki), query, offset, limit, manifest.BodyReady)
+	fullText := manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion
+	reader, err := s.reader(s.wikiPath(wiki), fullText)
+	if err != nil {
+		return model.SearchResult{}, err
+	}
+	result, err := reader.Search(ctx, query, offset, limit, fullText)
 	if err != nil {
 		return result, err
 	}
 	result.Wiki = wiki
-	for i := range result.Hits {
-		page, readErr := wikiindex.ReadPage(s.wikiPath(wiki), "", result.Hits[i].PageID, "text", 0, 1200)
-		if readErr == nil {
-			result.Hits[i].Snippet = snippet(page.Content, query, 280)
-		}
-	}
 	return result, nil
 }
 
-func (s *Store) Read(wiki, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
+func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
-	if err != nil || !manifest.TitleReady {
+	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
 		return model.Page{}, fmt.Errorf("wiki %s is not title-ready", wiki)
 	}
-	page, err := wikiindex.ReadPage(s.wikiPath(wiki), title, pageID, format, start, maxChars)
+	reader, err := s.reader(s.wikiPath(wiki), false)
+	if err != nil {
+		return model.Page{}, err
+	}
+	page, err := reader.ReadPage(ctx, title, pageID, format, start, maxChars)
 	page.Wiki = wiki
 	return page, err
+}
+
+func (s *Store) reader(path string, fullText bool) (*wikiindex.Reader, error) {
+	key := fmt.Sprintf("%s:%t", path, fullText)
+	s.readerMu.Lock()
+	defer s.readerMu.Unlock()
+	if reader := s.readers[key]; reader != nil {
+		return reader, nil
+	}
+	reader, err := wikiindex.OpenReader(path, fullText)
+	if err != nil {
+		return nil, err
+	}
+	s.readers[key] = reader
+	return reader, nil
+}
+
+func (s *Store) closeReaders(path string) {
+	s.readerMu.Lock()
+	defer s.readerMu.Unlock()
+	for key, reader := range s.readers {
+		if path != "" && !strings.HasPrefix(key, path+":") {
+			continue
+		}
+		_ = reader.Close()
+		delete(s.readers, key)
+	}
 }
 
 func (s *Store) worker(ctx context.Context, queue <-chan string) {
@@ -608,7 +685,7 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 		s.failJob(id, err)
 		return
 	}
-	if !manifest.TitleReady {
+	if !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
 		temporary := filepath.Join(path, wikiindex.TitleIndexDir+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
 		count, buildErr := wikiindex.BuildTitle(ctx, generationParts(path, manifest.PartCount), temporary, func(pages uint64, compressedDone, compressedTotal int64) {
@@ -618,18 +695,23 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 			s.failJob(id, buildErr)
 			return
 		}
+		s.mu.Lock()
+		s.closeReaders(path)
 		final := filepath.Join(path, wikiindex.TitleIndexDir)
-		if err := os.RemoveAll(final); err != nil {
-			s.failJob(id, err)
-			return
+		replaceErr := os.RemoveAll(final)
+		if replaceErr == nil {
+			replaceErr = os.Rename(temporary, final)
 		}
-		if err := os.Rename(temporary, final); err != nil {
-			s.failJob(id, err)
-			return
+		if replaceErr == nil {
+			manifest.PageCount, manifest.TitleReady, manifest.TitleIndexVersion, manifest.PublishedAt = count, true, wikiindex.CurrentIndexVersion, time.Now().UTC()
+			if manifest.BodyIndexVersion != wikiindex.CurrentIndexVersion {
+				manifest.BodyReady = false
+			}
+			replaceErr = writeJSON(filepath.Join(path, "manifest.json"), manifest)
 		}
-		manifest.PageCount, manifest.TitleReady, manifest.PublishedAt = count, true, time.Now().UTC()
-		if err := writeJSON(filepath.Join(path, "manifest.json"), manifest); err != nil {
-			s.failJob(id, err)
+		s.mu.Unlock()
+		if replaceErr != nil {
+			s.failJob(id, replaceErr)
 			return
 		}
 	}
@@ -645,7 +727,7 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 		_ = s.saveJobsLocked()
 	}
 	s.mu.Unlock()
-	if manifest.BodyReady {
+	if manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion {
 		s.finishJob(id, model.StateReady, "title and full-text indexes are ready")
 		return
 	}
@@ -664,6 +746,7 @@ func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.M
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closeReaders(path)
 	final := filepath.Join(path, wikiindex.BodyIndexDir)
 	if err := os.RemoveAll(final); err != nil {
 		s.failJobLocked(id, err)
@@ -673,7 +756,7 @@ func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.M
 		s.failJobLocked(id, err)
 		return
 	}
-	manifest.BodyReady = true
+	manifest.BodyReady, manifest.BodyIndexVersion = true, wikiindex.CurrentIndexVersion
 	if err := writeJSON(filepath.Join(path, "manifest.json"), manifest); err != nil {
 		s.failJobLocked(id, err)
 		return
@@ -716,6 +799,7 @@ func (s *Store) publish(wiki, stage string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	destination := s.wikiPath(wiki)
+	s.closeReaders(destination)
 	old := destination + ".old"
 	if err := os.RemoveAll(old); err != nil {
 		return err
@@ -924,19 +1008,4 @@ func localStorage(path string) (total, compressedDump, multistreamIndex, titleIn
 func pathInIndex(relative, name string) bool {
 	separator := string(filepath.Separator)
 	return strings.HasPrefix(relative, name+separator) || strings.HasPrefix(relative, name+".building"+separator)
-}
-
-func snippet(text, query string, length int) string {
-	runes := []rune(text)
-	if len(runes) <= length {
-		return text
-	}
-	position := strings.Index(strings.ToLower(text), strings.ToLower(strings.Fields(query)[0]))
-	if position < 0 {
-		return string(runes[:length]) + "…"
-	}
-	runePosition := len([]rune(text[:position]))
-	start := max(0, runePosition-length/3)
-	end := min(len(runes), start+length)
-	return "…" + string(runes[start:end]) + "…"
 }

@@ -60,18 +60,20 @@ type DumpPart struct {
 }
 
 type Manifest struct {
-	Wiki        string    `json:"wiki"`
-	DumpDate    string    `json:"dump_date"`
-	DumpSHA1    string    `json:"dump_sha1"`
-	IndexSHA1   string    `json:"index_sha1"`
-	Fingerprint string    `json:"fingerprint,omitempty"`
-	PartCount   int       `json:"part_count"`
-	DumpSize    int64     `json:"dump_size"`
-	IndexSize   int64     `json:"index_size"`
-	PageCount   uint64    `json:"page_count"`
-	TitleReady  bool      `json:"title_ready"`
-	BodyReady   bool      `json:"body_ready"`
-	PublishedAt time.Time `json:"published_at"`
+	Wiki              string    `json:"wiki"`
+	DumpDate          string    `json:"dump_date"`
+	DumpSHA1          string    `json:"dump_sha1"`
+	IndexSHA1         string    `json:"index_sha1"`
+	Fingerprint       string    `json:"fingerprint,omitempty"`
+	PartCount         int       `json:"part_count"`
+	DumpSize          int64     `json:"dump_size"`
+	IndexSize         int64     `json:"index_size"`
+	PageCount         uint64    `json:"page_count"`
+	TitleReady        bool      `json:"title_ready"`
+	BodyReady         bool      `json:"body_ready"`
+	TitleIndexVersion int       `json:"title_index_version,omitempty"`
+	BodyIndexVersion  int       `json:"body_index_version,omitempty"`
+	PublishedAt       time.Time `json:"published_at"`
 }
 
 type LocalWiki struct {
