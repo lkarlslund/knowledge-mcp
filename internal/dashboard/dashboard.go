@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -62,12 +63,27 @@ func Handler(service Service) http.Handler {
 			}
 			return wsjson.Write(r.Context(), connection, stateSnapshot{Local: local, Jobs: service.ListJobs()})
 		}
+		updates := service.Subscribe(r.Context())
 		if err := writeSnapshot(); err != nil {
 			return
 		}
-		for range service.Subscribe(r.Context()) {
-			if err := writeSnapshot(); err != nil {
-				return
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		dirty := false
+		for {
+			select {
+			case _, ok := <-updates:
+				if !ok {
+					return
+				}
+				dirty = true
+			case <-ticker.C:
+				if dirty {
+					if err := writeSnapshot(); err != nil {
+						return
+					}
+					dirty = false
+				}
 			}
 		}
 	})

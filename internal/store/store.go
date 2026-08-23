@@ -32,9 +32,22 @@ type Store struct {
 	watchers      map[chan struct{}]struct{}
 	readerMu      sync.Mutex
 	readers       map[string]*wikiindex.Reader
+	storageMu     sync.Mutex
+	storage       map[string]storageSnapshot
+	lastProgress  map[string]time.Time
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 }
+
+type storageSnapshot struct {
+	updated                                                        time.Time
+	total, compressedDump, multistreamIndex, titleIndex, bodyIndex int64
+}
+
+const (
+	progressSaveInterval = 500 * time.Millisecond
+	storageCacheDuration = 2 * time.Second
+)
 
 type Options struct {
 	DownloadWorkers int
@@ -57,7 +70,7 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
 		return nil, errors.New("download and index worker counts must be positive")
 	}
-	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*wikiindex.Reader)}
+	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*wikiindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time)}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
@@ -174,7 +187,7 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 			local.ActiveJob = jobID
 			local.State = states[entry.Name()]
 		}
-		local.DiskBytes, local.CompressedDumpBytes, local.MultistreamIndexBytes, local.TitleIndexBytes, local.BodyIndexBytes = localStorage(s.wikiPath(entry.Name()))
+		local.DiskBytes, local.CompressedDumpBytes, local.MultistreamIndexBytes, local.TitleIndexBytes, local.BodyIndexBytes = s.localStorage(s.wikiPath(entry.Name()))
 		local.OtherBytes = max(local.DiskBytes-local.CompressedDumpBytes-local.MultistreamIndexBytes-local.TitleIndexBytes-local.BodyIndexBytes, 0)
 		result = append(result, local)
 	}
@@ -855,9 +868,17 @@ func (s *Store) setJob(id, state, phase string, completed, total int64, units st
 	if job.State == model.StatePaused || job.State == model.StateCanceled {
 		return
 	}
+	transition := job.State != state || job.Phase != phase || errText != ""
 	job.State, job.Phase, job.Completed, job.Total, job.Units, job.Rate, job.Message, job.Error = state, phase, completed, total, units, rate, message, errText
 	job.ProgressPercent, job.ProgressApprox = 0, false
-	job.UpdatedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	if s.lastProgress == nil {
+		s.lastProgress = make(map[string]time.Time)
+	}
+	if !transition && now.Sub(s.lastProgress[id]) < progressSaveInterval {
+		return
+	}
+	s.lastProgress[id], job.UpdatedAt = now, now
 	_ = s.saveJobsLocked()
 }
 
@@ -868,6 +889,7 @@ func (s *Store) setTitleProgress(id string, pages uint64, compressedDone, compre
 	if job == nil || job.State == model.StatePaused || job.State == model.StateCanceled {
 		return
 	}
+	transition := job.State != model.StateTitleIndexing || job.Phase != "title_indexing"
 	job.State, job.Phase = model.StateTitleIndexing, "title_indexing"
 	job.Completed, job.Total, job.Units, job.Rate = int64(pages), 0, "pages", 0
 	job.Message, job.Error = "building title index", ""
@@ -875,7 +897,14 @@ func (s *Store) setTitleProgress(id string, pages uint64, compressedDone, compre
 	if compressedTotal > 0 {
 		job.ProgressPercent = min(100, float64(compressedDone)/float64(compressedTotal)*100)
 	}
-	job.UpdatedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	if s.lastProgress == nil {
+		s.lastProgress = make(map[string]time.Time)
+	}
+	if !transition && now.Sub(s.lastProgress[id]) < progressSaveInterval {
+		return
+	}
+	s.lastProgress[id], job.UpdatedAt = now, now
 	_ = s.saveJobsLocked()
 }
 
@@ -1031,6 +1060,20 @@ func localStorage(path string) (total, compressedDump, multistreamIndex, titleIn
 		}
 		return nil
 	})
+	return total, compressedDump, multistreamIndex, titleIndex, bodyIndex
+}
+
+func (s *Store) localStorage(wikiPath string) (total, compressedDump, multistreamIndex, titleIndex, bodyIndex int64) {
+	s.storageMu.Lock()
+	defer s.storageMu.Unlock()
+	if s.storage == nil {
+		s.storage = make(map[string]storageSnapshot)
+	}
+	if cached, ok := s.storage[wikiPath]; ok && time.Since(cached.updated) < storageCacheDuration {
+		return cached.total, cached.compressedDump, cached.multistreamIndex, cached.titleIndex, cached.bodyIndex
+	}
+	total, compressedDump, multistreamIndex, titleIndex, bodyIndex = localStorage(wikiPath)
+	s.storage[wikiPath] = storageSnapshot{updated: time.Now(), total: total, compressedDump: compressedDump, multistreamIndex: multistreamIndex, titleIndex: titleIndex, bodyIndex: bodyIndex}
 	return total, compressedDump, multistreamIndex, titleIndex, bodyIndex
 }
 

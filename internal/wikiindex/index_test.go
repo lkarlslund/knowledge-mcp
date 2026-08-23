@@ -3,10 +3,12 @@ package wikiindex
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2/mapping"
@@ -91,6 +93,10 @@ func TestLeanMappings(t *testing.T) {
 		if impl.IndexDynamic || impl.StoreDynamic || impl.DocValuesDynamic {
 			t.Errorf("%s mapping retains dynamic fields", name)
 		}
+		all, ok := impl.DefaultMapping.Properties["_all"]
+		if !ok || all.Enabled {
+			t.Errorf("%s mapping does not explicitly disable _all", name)
+		}
 		for property, document := range impl.DefaultMapping.Properties {
 			for _, field := range document.Fields {
 				if field.IncludeTermVectors || field.IncludeInAll || field.DocValues {
@@ -103,10 +109,24 @@ func TestLeanMappings(t *testing.T) {
 
 func TestPlainText(t *testing.T) {
 	t.Parallel()
-	input := `== Heading == <!-- hidden --> Text [[Target|label]] <ref>citation</ref> {{Infobox|x}} &amp; [https://example.test external]`
-	want := "Heading Text label & external"
-	if got := PlainText(input); got != want {
-		t.Fatalf("PlainText() = %q, want %q", got, want)
+	tests := map[string]string{
+		`== Heading == <!-- hidden --> Text [[Target|label]] <ref>citation</ref> {{Infobox|x}} &amp; [https://example.test external]`: "Heading Text label & external",
+		`Before {{outer|{{inner}}}} after {| class="wikitable" | hidden |} done`:                                                      "Before after done",
+		`[[Target]] and [[Target|shown]] with ''italics'' and '''bold'''`:                                                             "Target and shown with italics and bold",
+		`A<REF name="x">hidden</REF>B<br/>C &lt; D __TOC__`:                                                                           "A B C < D",
+	}
+	for input, want := range tests {
+		if got := PlainText(input); got != want {
+			t.Errorf("PlainText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func BenchmarkPlainText(b *testing.B) {
+	source := strings.Repeat(`== Heading == Some [[Target|linked text]] with {{template|nested={{value}}}}, <ref>citation</ref> and [https://example.test an external link]. &amp; `, 200)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = PlainText(source)
 	}
 }
 
@@ -143,7 +163,7 @@ func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 	dumpPath := filepath.Join(dir, "dump.bz2")
 	indexPath := filepath.Join(dir, "index.bz2")
 	var dump, sourceIndex bytes.Buffer
-	const streamCount = 130
+	const streamCount = bodyBatchStreams + 16
 	for pageID := 1; pageID <= streamCount; pageID++ {
 		offset := dump.Len()
 		page := fmt.Sprintf(`<page><title>Page %d</title><id>%d</id><revision><id>%d</id><text>resume token %d</text></revision></page>`, pageID, pageID, pageID+1000, pageID)
@@ -160,7 +180,9 @@ func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 	destination := filepath.Join(dir, BodyIndexDir)
 	ctx, cancel := context.WithCancel(context.Background())
 	err := BuildBody(ctx, []Part{{DumpPath: dumpPath, IndexPath: indexPath}}, destination, func(done, _ int64) {
-		if done >= 64 {
+		var saved bodyCheckpoint
+		data, readErr := os.ReadFile(destination + ".checkpoint.json")
+		if readErr == nil && json.Unmarshal(data, &saved) == nil && saved.Done >= bodyShardStreams {
 			cancel()
 		}
 	})
@@ -168,7 +190,7 @@ func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 		t.Fatalf("first BuildBody error = %v, want context.Canceled", err)
 	}
 	checkpoint, ok := loadBodyCheckpoint(destination+".checkpoint.json", destination, mustReadStreams(t, Part{DumpPath: dumpPath, IndexPath: indexPath}))
-	if !ok || checkpoint.Done < 64 || checkpoint.Done >= streamCount {
+	if !ok || checkpoint.Done < bodyShardStreams || checkpoint.Done >= streamCount {
 		t.Fatalf("checkpoint = %#v, valid %v", checkpoint, ok)
 	}
 
@@ -185,6 +207,11 @@ func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 	}
 	if _, err := os.Stat(destination + ".checkpoint.json"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("completed checkpoint still exists: %v", err)
+	}
+	for shard := range bodyShardCount {
+		if info, err := os.Stat(bodyShardPath(destination, shard)); err != nil || !info.IsDir() {
+			t.Fatalf("body shard %d missing: %v", shard, err)
+		}
 	}
 
 	for _, pageID := range []int{1, streamCount} {

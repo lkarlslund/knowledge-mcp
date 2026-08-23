@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,12 +16,15 @@ import (
 
 type fakeService struct {
 	submitted string
+	updates   <-chan struct{}
+	listCalls atomic.Int64
 }
 
 func (f *fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
 	return model.AvailableResult{Wikis: []model.OnlineWiki{{Name: "testwiki", Available: true}}}, nil
 }
 func (f *fakeService) ListLocal() ([]model.LocalWiki, error) {
+	f.listCalls.Add(1)
 	return []model.LocalWiki{{Manifest: model.Manifest{Wiki: "testwiki", TitleReady: true}}}, nil
 }
 func (f *fakeService) ListUpgrades(context.Context) ([]model.OnlineWiki, error) {
@@ -36,12 +40,47 @@ func (f *fakeService) JobAction(id, action string) (model.Job, error) {
 	return model.Job{ID: id, State: action}, nil
 }
 func (f *fakeService) Subscribe(ctx context.Context) <-chan struct{} {
+	if f.updates != nil {
+		return f.updates
+	}
 	updates := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		close(updates)
 	}()
 	return updates
+}
+
+func TestWebSocketCoalescesBurstUpdates(t *testing.T) {
+	t.Parallel()
+	updates := make(chan struct{}, 20)
+	service := &fakeService{updates: updates}
+	server := httptest.NewServer(Handler(service))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connection, response, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/dashboard/events", nil)
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.CloseNow() }()
+	var snapshot stateSnapshot
+	if err := wsjson.Read(ctx, connection, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		updates <- struct{}{}
+	}
+	if err := wsjson.Read(ctx, connection, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if calls := service.listCalls.Load(); calls != 2 {
+		t.Fatalf("ListLocal calls after update burst = %d, want 2", calls)
+	}
 }
 
 func TestDashboardAndMaintenanceAPI(t *testing.T) {

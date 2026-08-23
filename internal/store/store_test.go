@@ -211,6 +211,36 @@ func TestLocalStorageBreakdown(t *testing.T) {
 	}
 }
 
+func TestLocalStorageCachesDirectoryWalk(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := filepath.Join(root, "parts", "000.dump.bz2")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, 3), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backend := &Store{}
+	if total, _, _, _, _ := backend.localStorage(root); total != 3 {
+		t.Fatalf("initial storage = %d, want 3", total)
+	}
+	if err := os.WriteFile(path, make([]byte, 9), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if total, _, _, _, _ := backend.localStorage(root); total != 3 {
+		t.Fatalf("cached storage = %d, want 3", total)
+	}
+	backend.storageMu.Lock()
+	snapshot := backend.storage[root]
+	snapshot.updated = time.Now().Add(-storageCacheDuration)
+	backend.storage[root] = snapshot
+	backend.storageMu.Unlock()
+	if total, _, _, _, _ := backend.localStorage(root); total != 9 {
+		t.Fatalf("refreshed storage = %d, want 9", total)
+	}
+}
+
 func TestListJobsUsesStablePipelineOrder(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -246,6 +276,44 @@ func TestJobPersistenceNotifiesSubscribers(t *testing.T) {
 		t.Fatal("subscriber received no persisted-state notification")
 	}
 	cancel()
+}
+
+func TestJobProgressPersistenceIsThrottled(t *testing.T) {
+	t.Parallel()
+	job := &model.Job{ID: "job-1", State: model.StateQueued, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	backend := &Store{
+		root:         t.TempDir(),
+		jobs:         map[string]*model.Job{job.ID: job},
+		watchers:     map[chan struct{}]struct{}{},
+		lastProgress: map[string]time.Time{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	updates := backend.Subscribe(ctx)
+	backend.setJob(job.ID, model.StateDownloading, "downloading", 1, 10, "bytes", 1, "downloading", "")
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("state transition was not persisted")
+	}
+	backend.setJob(job.ID, model.StateDownloading, "downloading", 2, 10, "bytes", 1, "downloading", "")
+	select {
+	case <-updates:
+		t.Fatal("rapid progress update was persisted")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if status, _ := backend.Job(job.ID, ""); status.Completed != 2 {
+		t.Fatalf("in-memory progress = %d, want 2", status.Completed)
+	}
+	backend.mu.Lock()
+	backend.lastProgress[job.ID] = time.Now().Add(-progressSaveInterval)
+	backend.mu.Unlock()
+	backend.setJob(job.ID, model.StateDownloading, "downloading", 3, 10, "bytes", 1, "downloading", "")
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("progress was not persisted after throttle interval")
+	}
 }
 
 func compress(t *testing.T, data []byte) []byte {

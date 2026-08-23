@@ -43,6 +43,9 @@ downloaded wikis, available upgrades, current/recent job progress, and online
 dumps, and can submit download or update jobs. Alpine.js receives live local and
 job snapshots over a WebSocket; Bootstrap, Bootstrap Icons, and Alpine.js are
 pinned and embedded in the binary, with no CDN dependency.
+Progress persistence and WebSocket snapshots are coalesced to at most twice per
+second, and directory-size scans use a short cache, so an open dashboard does
+not generate continuous metadata I/O while an index is being built.
 
 The job table has live Running, Queued, Failed, and Completed filters. Rows use
 a stable submission order while active, rather than moving whenever progress is
@@ -171,10 +174,14 @@ committed line count per dump part, so completed parts are skipped and only the
 current part's prefix is replayed after a restart. Body indexing uses a compact
 bitset checkpoint and skips committed streams. Checkpoints are removed only
 when their indexes are complete. Exact page reads use a single-stream decoder
-to avoid parallel setup overhead. Body batches are bounded by analyzed bytes,
-and Scorch persistence/merge settings limit tiny segment proliferation. Index
-schema versions are recorded in each manifest; stale schemas are automatically
-queued for a resumable rebuild without downloading the dump again.
+to avoid parallel setup overhead. The body index is split into four searchable
+Bleve shards, allowing commits and later queries to use the machine more
+effectively. Each shard commits roughly every 128 source streams (about 512
+streams across the index) or 32 MiB of analyzed documents, whichever comes
+first. Scorch persistence/merge settings limit tiny segment proliferation.
+Index schema versions are recorded in each manifest; stale schemas are
+automatically queued for a resumable rebuild without downloading the dump
+again.
 
 ## Development
 

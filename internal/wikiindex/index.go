@@ -15,7 +15,6 @@ import (
 	"math/bits"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -34,9 +33,12 @@ import (
 const (
 	TitleIndexDir       = "titles.bleve"
 	BodyIndexDir        = "bodies.bleve"
-	CurrentIndexVersion = 4
+	CurrentIndexVersion = 5
 	titleBatchDocs      = 50_000
 	bodyBatchBytes      = 32 << 20
+	bodyBatchStreams    = 512
+	bodyShardCount      = 4
+	bodyShardStreams    = bodyBatchStreams / bodyShardCount
 )
 
 type titleDocument struct {
@@ -63,6 +65,7 @@ type stream struct {
 
 type bodyCheckpoint struct {
 	Version     int    `json:"version"`
+	Shards      int    `json:"shards"`
 	Fingerprint string `json:"fingerprint"`
 	Total       int    `json:"total"`
 	Done        int64  `json:"done"`
@@ -286,31 +289,48 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 	}
 	checkpointPath := destination + ".checkpoint.json"
 	checkpoint, resume := loadBodyCheckpoint(checkpointPath, destination, streams)
-	var idx bleve.Index
-	var err error
-	if resume {
-		idx, err = openWritableIndex(destination)
-	} else {
+	if !resume {
 		if err := os.RemoveAll(destination); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(destination, 0o755); err != nil {
 			return err
 		}
 		_ = os.Remove(checkpointPath)
 		checkpoint = newBodyCheckpoint(streams)
-		idx, err = newIndex(destination, bodyMapping())
 	}
-	if err != nil {
-		return fmt.Errorf("open body index: %w", err)
+	indexes := make([]bleve.Index, 0, bodyShardCount)
+	for shard := range bodyShardCount {
+		var idx bleve.Index
+		var err error
+		shardPath := bodyShardPath(destination, shard)
+		if resume {
+			idx, err = openWritableIndex(shardPath)
+		} else {
+			idx, err = newIndex(shardPath, bodyMapping())
+		}
+		if err != nil {
+			for _, opened := range indexes {
+				_ = opened.Close()
+			}
+			return fmt.Errorf("open body shard %d: %w", shard, err)
+		}
+		indexes = append(indexes, idx)
 	}
 	if !resume {
 		if err := saveBodyCheckpoint(checkpointPath, checkpoint); err != nil {
-			_ = idx.Close()
+			for _, idx := range indexes {
+				_ = idx.Close()
+			}
 			return fmt.Errorf("create body checkpoint: %w", err)
 		}
 	}
 	closed := false
 	defer func() {
 		if !closed {
-			_ = idx.Close()
+			for _, idx := range indexes {
+				_ = idx.Close()
+			}
 		}
 	}()
 	dumps := make(map[string]*os.File, len(parts))
@@ -376,52 +396,143 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 		close(results)
 	}()
 
-	batch := idx.NewBatch()
-	batchCount := 0
-	pendingStreams := make([]int, 0, 64)
-	progress(checkpoint.Done, int64(len(streams)))
-	commit := func() error {
-		if batchCount > 0 {
-			if err := idx.Batch(batch); err != nil {
-				return fmt.Errorf("write body index: %w", err)
-			}
-			batch, batchCount = idx.NewBatch(), 0
+	type shardState struct {
+		batch      *bleve.Batch
+		pending    []int
+		committing bool
+		inFlight   int
+	}
+	type commitResult struct {
+		shard   int
+		streams []int
+		err     error
+	}
+	shards := make([]shardState, bodyShardCount)
+	for shard := range shards {
+		shards[shard] = shardState{batch: indexes[shard].NewBatch(), pending: make([]int, 0, bodyShardStreams)}
+	}
+	commitResults := make(chan commitResult, bodyShardCount)
+	runningCommits := 0
+	startCommit := func(shard int) {
+		state := &shards[shard]
+		batch, pending := state.batch, state.pending
+		state.batch = indexes[shard].NewBatch()
+		state.pending = make([]int, 0, bodyShardStreams)
+		state.committing, state.inFlight = true, len(pending)
+		runningCommits++
+		go func() {
+			commitResults <- commitResult{shard: shard, streams: pending, err: indexes[shard].Batch(batch)}
+		}()
+	}
+	pendingCount := func() int64 {
+		var count int64
+		for shard := range shards {
+			count += int64(len(shards[shard].pending) + shards[shard].inFlight)
 		}
-		for _, streamIndex := range pendingStreams {
+		return count
+	}
+	handleCommit := func(result commitResult) error {
+		state := &shards[result.shard]
+		state.committing, state.inFlight = false, 0
+		runningCommits--
+		if result.err != nil {
+			return fmt.Errorf("write body shard %d: %w", result.shard, result.err)
+		}
+		for _, streamIndex := range result.streams {
 			checkpointMark(&checkpoint, streamIndex)
 		}
-		pendingStreams = pendingStreams[:0]
-		return saveBodyCheckpoint(checkpointPath, checkpoint)
+		if err := saveBodyCheckpoint(checkpointPath, checkpoint); err != nil {
+			return fmt.Errorf("save body checkpoint: %w", err)
+		}
+		progress(checkpoint.Done+pendingCount(), int64(len(streams)))
+		return nil
 	}
+	ready := func(shard int) bool {
+		state := &shards[shard]
+		return state.batch.TotalDocsSize() >= bodyBatchBytes || len(state.pending) >= bodyShardStreams
+	}
+	progress(checkpoint.Done, int64(len(streams)))
+	var buildErr error
 	for result := range results {
 		if result.err != nil {
 			cancel()
-			return fmt.Errorf("decode stream at %d: %w", result.part.Offset, result.err)
+			if buildErr == nil {
+				buildErr = fmt.Errorf("decode stream at %d: %w", result.part.Offset, result.err)
+			}
+			continue
+		}
+		if buildErr != nil {
+			continue
+		}
+		shard := result.part.Index % bodyShardCount
+		for shards[shard].committing && ready(shard) {
+			if err := handleCommit(<-commitResults); err != nil {
+				buildErr = err
+				cancel()
+				break
+			}
+		}
+		if buildErr != nil {
+			continue
 		}
 		for _, doc := range result.docs {
-			if err := batch.Index(strconv.FormatUint(doc.ID, 10), doc); err != nil {
-				return err
-			}
-			batchCount++
-		}
-		pendingStreams = append(pendingStreams, result.part.Index)
-		if batch.TotalDocsSize() >= bodyBatchBytes || len(pendingStreams) >= 64 {
-			if err := commit(); err != nil {
-				return err
+			if err := shards[shard].batch.Index(strconv.FormatUint(doc.ID, 10), doc); err != nil {
+				buildErr = err
+				cancel()
+				break
 			}
 		}
-		progress(checkpoint.Done+int64(len(pendingStreams)), int64(len(streams)))
+		if buildErr != nil {
+			continue
+		}
+		shards[shard].pending = append(shards[shard].pending, result.part.Index)
+		if ready(shard) && !shards[shard].committing {
+			startCommit(shard)
+		}
+		for runningCommits > 0 {
+			select {
+			case committed := <-commitResults:
+				if err := handleCommit(committed); err != nil {
+					buildErr = err
+					cancel()
+				}
+			default:
+				goto commitsDrained
+			}
+		}
+	commitsDrained:
+		progress(checkpoint.Done+pendingCount(), int64(len(streams)))
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	if buildErr == nil {
+		buildErr = ctx.Err()
 	}
-	if len(pendingStreams) > 0 {
-		if err := commit(); err != nil {
-			return fmt.Errorf("write final body checkpoint: %w", err)
+	for runningCommits > 0 {
+		if err := handleCommit(<-commitResults); err != nil && buildErr == nil {
+			buildErr = err
 		}
 	}
-	if err := idx.Close(); err != nil {
-		return fmt.Errorf("close body index: %w", err)
+	if buildErr == nil {
+		buildErr = ctx.Err()
+	}
+	if buildErr == nil {
+		for shard := range shards {
+			if len(shards[shard].pending) > 0 {
+				startCommit(shard)
+			}
+		}
+		for runningCommits > 0 {
+			if err := handleCommit(<-commitResults); err != nil && buildErr == nil {
+				buildErr = err
+			}
+		}
+	}
+	if buildErr != nil {
+		return buildErr
+	}
+	for shard, idx := range indexes {
+		if err := idx.Close(); err != nil {
+			return fmt.Errorf("close body shard %d: %w", shard, err)
+		}
 	}
 	closed = true
 	if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -433,6 +544,7 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 func newBodyCheckpoint(streams []stream) bodyCheckpoint {
 	return bodyCheckpoint{
 		Version:     CurrentIndexVersion,
+		Shards:      bodyShardCount,
 		Fingerprint: bodyCheckpointFingerprint(streams),
 		Total:       len(streams),
 		Completed:   make([]byte, (len(streams)+7)/8),
@@ -498,7 +610,7 @@ func loadBodyCheckpoint(path, destination string, streams []stream) (bodyCheckpo
 		return bodyCheckpoint{}, false
 	}
 	wantBytes := (len(streams) + 7) / 8
-	if checkpoint.Version != CurrentIndexVersion || checkpoint.Total != len(streams) || len(checkpoint.Completed) != wantBytes || checkpoint.Fingerprint != bodyCheckpointFingerprint(streams) {
+	if checkpoint.Version != CurrentIndexVersion || checkpoint.Shards != bodyShardCount || checkpoint.Total != len(streams) || len(checkpoint.Completed) != wantBytes || checkpoint.Fingerprint != bodyCheckpointFingerprint(streams) {
 		return bodyCheckpoint{}, false
 	}
 	var done int64
@@ -534,10 +646,15 @@ func saveCheckpoint(path string, checkpoint any) error {
 
 func bodyCheckpointFingerprint(streams []stream) string {
 	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "shards:%d\x00", bodyShardCount)
 	for _, part := range streams {
 		_, _ = fmt.Fprintf(hash, "%d:%d:%d\x00", part.Part, part.Offset, part.End)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func bodyShardPath(destination string, shard int) string {
+	return filepath.Join(destination, fmt.Sprintf("%03d.bleve", shard))
 }
 
 func checkpointComplete(checkpoint bodyCheckpoint, index int) bool {
@@ -556,6 +673,7 @@ type Reader struct {
 	generationPath string
 	title          bleve.Index
 	body           bleve.Index
+	bodyShards     []bleve.Index
 	mu             sync.RWMutex
 	closed         bool
 }
@@ -563,11 +681,19 @@ type Reader struct {
 func OpenReader(generationPath string, fullText bool) (*Reader, error) {
 	reader := &Reader{generationPath: generationPath}
 	if fullText {
-		body, err := bleve.OpenUsing(filepath.Join(generationPath, BodyIndexDir), map[string]interface{}{"read_only": true})
-		if err != nil {
-			return nil, fmt.Errorf("open full_text index: %w", err)
+		shards := make([]bleve.Index, 0, bodyShardCount)
+		for shard := range bodyShardCount {
+			body, err := bleve.OpenUsing(bodyShardPath(filepath.Join(generationPath, BodyIndexDir), shard), map[string]interface{}{"read_only": true})
+			if err != nil {
+				for _, opened := range shards {
+					_ = opened.Close()
+				}
+				return nil, fmt.Errorf("open full_text shard %d: %w", shard, err)
+			}
+			shards = append(shards, body)
 		}
-		reader.body = body
+		reader.bodyShards = shards
+		reader.body = bleve.NewIndexAlias(shards...)
 		return reader, nil
 	}
 	title, err := bleve.OpenUsing(filepath.Join(generationPath, TitleIndexDir), map[string]interface{}{"read_only": true})
@@ -588,6 +714,9 @@ func (r *Reader) Close() error {
 	var errs []error
 	if r.body != nil {
 		errs = append(errs, r.body.Close())
+	}
+	for _, shard := range r.bodyShards {
+		errs = append(errs, shard.Close())
 	}
 	if r.title != nil {
 		errs = append(errs, r.title.Close())
@@ -852,6 +981,7 @@ func titleMapping() mapping.IndexMapping {
 	doc.AddFieldMappingsAt("offset", number)
 	doc.AddFieldMappingsAt("end", number)
 	doc.AddFieldMappingsAt("part", number)
+	doc.AddSubDocumentMapping("_all", bleve.NewDocumentDisabledMapping())
 	m.DefaultMapping = doc
 	return m
 }
@@ -866,6 +996,7 @@ func bodyMapping() mapping.IndexMapping {
 	body.Store, body.IncludeTermVectors, body.IncludeInAll, body.DocValues = false, false, false, false
 	doc.AddFieldMappingsAt("title", title)
 	doc.AddFieldMappingsAt("body", body)
+	doc.AddSubDocumentMapping("_all", bleve.NewDocumentDisabledMapping())
 	m.DefaultMapping = doc
 	return m
 }
@@ -890,31 +1021,76 @@ func openWritableIndex(path string) (bleve.Index, error) {
 	return bleve.OpenUsing(path, scorchConfig())
 }
 
-var (
-	commentRE  = regexp.MustCompile(`(?s)<!--.*?-->`)
-	refRE      = regexp.MustCompile(`(?is)<ref\b[^>]*>.*?</ref\s*>|<ref\b[^>]*/\s*>`)
-	tagRE      = regexp.MustCompile(`(?s)<[^>]+>`)
-	linkRE     = regexp.MustCompile(`\[\[([^\]|]+)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]`)
-	externalRE = regexp.MustCompile(`\[(?:https?|ftp)://[^\s\]]+\s+([^\]]+)\]`)
-)
-
 func PlainText(source string) string {
-	source = commentRE.ReplaceAllString(source, " ")
-	source = refRE.ReplaceAllString(source, " ")
-	source = stripBalanced(source, "{{", "}}")
-	source = stripBalanced(source, "{|", "|}")
-	source = linkRE.ReplaceAllStringFunc(source, func(value string) string {
-		match := linkRE.FindStringSubmatch(value)
-		if match[2] != "" {
-			return match[2]
-		}
-		return match[3]
-	})
-	source = externalRE.ReplaceAllString(source, "$1")
-	source = tagRE.ReplaceAllString(source, " ")
-	source = strings.NewReplacer("'''", "", "''", "", "==", " ", "__TOC__", " ").Replace(source)
-	source = html.UnescapeString(source)
 	var out strings.Builder
+	out.Grow(len(source))
+	for i := 0; i < len(source); {
+		switch {
+		case strings.HasPrefix(source[i:], "<!--"):
+			end := strings.Index(source[i+4:], "-->")
+			if end < 0 {
+				i = len(source)
+			} else {
+				i += 4 + end + 3
+			}
+			out.WriteByte(' ')
+		case strings.HasPrefix(source[i:], "{{"):
+			i = skipMarkup(source, i, "{{", "}}")
+			out.WriteByte(' ')
+		case strings.HasPrefix(source[i:], "{|"):
+			i = skipMarkup(source, i, "{|", "|}")
+			out.WriteByte(' ')
+		case strings.HasPrefix(source[i:], "[["):
+			end := strings.Index(source[i+2:], "]]")
+			if end < 0 {
+				out.WriteByte(source[i])
+				i++
+				continue
+			}
+			label := source[i+2 : i+2+end]
+			if pipe := strings.LastIndexByte(label, '|'); pipe >= 0 {
+				label = label[pipe+1:]
+			}
+			out.WriteString(label)
+			i += 2 + end + 2
+		case source[i] == '[':
+			end := strings.IndexByte(source[i+1:], ']')
+			if end < 0 {
+				out.WriteByte(source[i])
+				i++
+				continue
+			}
+			value := source[i+1 : i+1+end]
+			space := strings.IndexAny(value, " \t\r\n")
+			if space > 0 && isExternalURL(value[:space]) {
+				out.WriteString(strings.TrimSpace(value[space+1:]))
+			} else {
+				out.WriteString(value)
+			}
+			i += 1 + end + 1
+		case source[i] == '<':
+			i = skipHTML(source, i)
+			out.WriteByte(' ')
+		case strings.HasPrefix(source[i:], "''"):
+			for i < len(source) && source[i] == '\'' {
+				i++
+			}
+		case source[i] == '=' && i+1 < len(source) && source[i+1] == '=':
+			for i < len(source) && source[i] == '=' {
+				i++
+			}
+			out.WriteByte(' ')
+		case hasASCIIPrefixFold(source[i:], "__TOC__"):
+			i += len("__TOC__")
+			out.WriteByte(' ')
+		default:
+			out.WriteByte(source[i])
+			i++
+		}
+	}
+	source = html.UnescapeString(out.String())
+	out.Reset()
+	out.Grow(len(source))
 	space := true
 	for _, r := range source {
 		if unicode.IsSpace(r) {
@@ -930,10 +1106,9 @@ func PlainText(source string) string {
 	return strings.TrimSpace(out.String())
 }
 
-func stripBalanced(source, open, closing string) string {
-	var out strings.Builder
+func skipMarkup(source string, start int, open, closing string) int {
 	depth := 0
-	for i := 0; i < len(source); {
+	for i := start; i < len(source); {
 		if strings.HasPrefix(source[i:], open) {
 			depth++
 			i += len(open)
@@ -942,12 +1117,71 @@ func stripBalanced(source, open, closing string) string {
 		if depth > 0 && strings.HasPrefix(source[i:], closing) {
 			depth--
 			i += len(closing)
+			if depth == 0 {
+				return i
+			}
 			continue
-		}
-		if depth == 0 {
-			out.WriteByte(source[i])
 		}
 		i++
 	}
-	return out.String()
+	return len(source)
+}
+
+func skipHTML(source string, start int) int {
+	end := strings.IndexByte(source[start:], '>')
+	if end < 0 {
+		return len(source)
+	}
+	tagEnd := start + end + 1
+	if !isRefTag(source[start:tagEnd]) || strings.HasSuffix(strings.TrimSpace(source[start:tagEnd-1]), "/") {
+		return tagEnd
+	}
+	closing := indexASCIIFold(source, tagEnd, "</ref")
+	if closing < 0 {
+		return tagEnd
+	}
+	closingEnd := strings.IndexByte(source[closing:], '>')
+	if closingEnd < 0 {
+		return len(source)
+	}
+	return closing + closingEnd + 1
+}
+
+func isRefTag(tag string) bool {
+	if !hasASCIIPrefixFold(tag, "<ref") {
+		return false
+	}
+	return len(tag) == len("<ref") || tag[len("<ref")] == '>' || tag[len("<ref")] == '/' || unicode.IsSpace(rune(tag[len("<ref")]))
+}
+
+func indexASCIIFold(source string, start int, value string) int {
+	for i := start; i+len(value) <= len(source); i++ {
+		if hasASCIIPrefixFold(source[i:], value) {
+			return i
+		}
+	}
+	return -1
+}
+
+func hasASCIIPrefixFold(source, prefix string) bool {
+	if len(source) < len(prefix) {
+		return false
+	}
+	for i := range len(prefix) {
+		a, b := source[i], prefix[i]
+		if 'A' <= a && a <= 'Z' {
+			a += 'a' - 'A'
+		}
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if a != b {
+			return false
+		}
+	}
+	return true
+}
+
+func isExternalURL(value string) bool {
+	return hasASCIIPrefixFold(value, "http://") || hasASCIIPrefixFold(value, "https://") || hasASCIIPrefixFold(value, "ftp://")
 }
