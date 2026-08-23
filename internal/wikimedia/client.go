@@ -37,11 +37,17 @@ type catalogEntry struct {
 }
 
 type Client struct {
-	baseURL string
-	http    *http.Client
-	mu      sync.Mutex
-	catalog []catalogEntry
-	cached  time.Time
+	baseURL  string
+	http     *http.Client
+	mu       sync.Mutex
+	catalog  []catalogEntry
+	cached   time.Time
+	metadata map[string]cachedMetadata
+}
+
+type cachedMetadata struct {
+	value  model.DumpMetadata
+	cached time.Time
 }
 
 func NewClient() *Client {
@@ -49,7 +55,7 @@ func NewClient() *Client {
 }
 
 func NewClientWithBaseURL(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}, metadata: make(map[string]cachedMetadata)}
 }
 
 func ValidWikiName(name string) bool {
@@ -129,6 +135,13 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 	if !ValidWikiName(wiki) || len(dumpDate) != 8 {
 		return model.DumpMetadata{}, errors.New("invalid wiki or dump date")
 	}
+	cacheKey := wiki + "/" + dumpDate
+	c.mu.Lock()
+	if cached, ok := c.metadata[cacheKey]; ok && time.Since(cached.cached) < time.Hour {
+		c.mu.Unlock()
+		return cached.value, nil
+	}
+	c.mu.Unlock()
 	url := fmt.Sprintf("%s/%s/%s/dumpstatus.json", c.baseURL, wiki, dumpDate)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -173,6 +186,9 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 	if metadata.Dump.URL == "" || metadata.Index.URL == "" {
 		return model.DumpMetadata{}, errors.New("multistream dump metadata is incomplete")
 	}
+	c.mu.Lock()
+	c.metadata[cacheKey] = cachedMetadata{value: metadata, cached: time.Now()}
+	c.mu.Unlock()
 	return metadata, nil
 }
 

@@ -29,6 +29,11 @@ The backend listens on `http://127.0.0.1:8765/mcp` and stores runtime data in
 The listener is intentionally restricted to an explicit loopback IP. There is
 no authentication layer.
 
+Open `http://127.0.0.1:8765/` for the lightweight local dashboard. It shows
+downloaded wikis, available upgrades, current/recent job progress, and online
+dumps, and can submit download or update jobs. The page polls job snapshots; it
+never holds a request open for background work.
+
 ## CLI
 
 All commands below talk to the already-running backend and return after one MCP
@@ -73,6 +78,23 @@ backend:
 ```sh
 /absolute/path/wikipedia-multistream-mcp mcp stdio
 ```
+
+## User service
+
+The included systemd user unit follows the local installation layout used by
+this repository:
+
+```sh
+mkdir -p ~/.local/lib/wikipedia-multistream-mcp ~/.config/systemd/user
+go build -o ~/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp .
+cp contrib/systemd/wikipedia-multistream-mcp.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now wikipedia-multistream-mcp.service
+```
+
+Inspect it with `systemctl --user status wikipedia-multistream-mcp.service` or
+`journalctl --user -u wikipedia-multistream-mcp.service`. Runtime wiki data
+stays in this checkout's ignored `data/` directory.
 
 The server offers these action-specific tools:
 

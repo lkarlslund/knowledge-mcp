@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/dashboard"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,6 +22,11 @@ type Service interface {
 	Job(string, string) (model.Job, error)
 	Search(string, string, int, int) (model.SearchResult, error)
 	Read(string, string, uint64, string, int, int) (model.Page, error)
+}
+
+type DashboardService interface {
+	Service
+	dashboard.Service
 }
 
 type listAvailableInput struct {
@@ -93,7 +99,7 @@ func New(service Service) *mcp.Server {
 	return server
 }
 
-func ServeHTTP(ctx context.Context, listen string, service Service) error {
+func ServeHTTP(ctx context.Context, listen string, service DashboardService) error {
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(ctx, "tcp", listen)
 	if err != nil {
@@ -106,6 +112,7 @@ func ServeHTTP(ctx context.Context, listen string, service Service) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	mux.Handle("/", dashboard.Handler(service))
 	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 2 * time.Minute}
 	go func() {
 		<-ctx.Done()

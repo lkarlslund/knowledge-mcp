@@ -1,0 +1,18 @@
+[Unit]
+Description=Wikipedia multistream MCP server
+Documentation=https://github.com/lkarlslund/wikipedia-multistream-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/github-repos/wikipedia-multistream-mcp
+ExecStart=%h/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp serve --listen 127.0.0.1:8765 --data-dir %h/github-repos/wikipedia-multistream-mcp/data
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

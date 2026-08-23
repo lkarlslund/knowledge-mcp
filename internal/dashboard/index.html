@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Wikipedia Multistream MCP</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: .25rem; } h2 { margin-top: 2rem; }
+    .muted { color: #777; } .error { color: #d33; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #8885; }
+    th { position: sticky; top: 0; background: Canvas; }
+    button, input { font: inherit; padding: .35rem .55rem; }
+    button { cursor: pointer; } button:disabled { cursor: wait; opacity: .6; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    .grow { flex: 1; min-width: 14rem; }
+    progress { width: 9rem; } code { font-size: .85em; }
+    .ready { color: #198754; } .working { color: #b77900; } .failed { color: #c33; }
+  </style>
+</head>
+<body>
+  <h1>Wikipedia Multistream MCP</h1>
+  <div class="muted">Local dashboard · MCP endpoint <code>/mcp</code> · refreshes jobs every 2 seconds</div>
+  <p id="error" class="error"></p>
+
+  <h2>Local wikis</h2>
+  <div id="local">Loading…</div>
+
+  <h2>Jobs</h2>
+  <div id="jobs">Loading…</div>
+
+  <h2>Available online</h2>
+  <form id="search" class="row">
+    <input id="filter" class="grow" placeholder="Filter database names, e.g. dawiki">
+    <button>Search</button>
+    <button type="button" id="refresh">Refresh upstream</button>
+  </form>
+  <div id="available" style="margin-top:1rem">Enter a filter or browse the first page.</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const bytes = n => n ? new Intl.NumberFormat(undefined,{style:'unit',unit:'byte',notation:'compact'}).format(n) : '—';
+const terminal = s => ['ready','up_to_date','failed'].includes(s);
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+async function maintain(wiki, action, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/dashboard/wiki/${encodeURIComponent(wiki)}/${action}`, {method:'POST',headers:{'X-Wikipedia-MCP':'1'}});
+    await loadState();
+  } catch (error) { showError(error); }
+  finally { button.disabled = false; }
+}
+
+function table(headers, rows) {
+  if (!rows.length) return '<p class="muted">None.</p>';
+  return `<table><thead><tr>${headers.map(x=>`<th>${esc(x)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+async function loadState() {
+  try {
+    const [local, jobs, upgrades] = await Promise.all([
+      api('/api/dashboard/local'), api('/api/dashboard/jobs'), api('/api/dashboard/upgrades')
+    ]);
+    const upgradeMap = Object.fromEntries(upgrades.map(x => [x.name, x]));
+    $('local').innerHTML = table(['Wiki','Dump','Pages','Search','Disk','Upgrade','Action'], local.map(w => {
+      const up = upgradeMap[w.wiki];
+      const action = up?.update_available ? `<button data-wiki="${esc(w.wiki)}" data-action="update">Update</button>` : 'Current';
+      return `<tr><td><strong>${esc(w.wiki)}</strong></td><td>${esc(w.dump_date)}</td><td>${Number(w.page_count).toLocaleString()}</td><td>${esc(w.search_mode)}</td><td>${bytes(w.disk_bytes)}</td><td>${up?.update_available ? esc(up.dump_date) : '—'}</td><td>${action}</td></tr>`;
+    }));
+    $('jobs').innerHTML = table(['Wiki','Kind','State','Progress','Message','Updated'], jobs.slice(0,25).map(j => {
+      const max = j.total || 1, value = Math.min(j.completed || 0, max);
+      const progress = terminal(j.state) ? '' : `<progress value="${value}" max="${max}"></progress> ${esc(j.units || '')}`;
+      const cls = j.state === 'failed' ? 'failed' : terminal(j.state) ? 'ready' : 'working';
+      return `<tr><td>${esc(j.wiki)}</td><td>${esc(j.kind)}</td><td class="${cls}">${esc(j.state)}</td><td>${progress}</td><td>${esc(j.error || j.message)}</td><td>${esc(new Date(j.updated_at).toLocaleString())}</td></tr>`;
+    }));
+    bindButtons(); $('error').textContent = '';
+  } catch (error) { showError(error); }
+}
+
+async function loadAvailable(refresh=false, offset=0) {
+  try {
+    const filter = $('filter').value.trim();
+    const data = await api(`/api/dashboard/available?filter=${encodeURIComponent(filter)}&offset=${offset}&limit=25&refresh=${refresh}`);
+    $('available').innerHTML = table(['Wiki','Dump','Download','Index','Installed','Action'], data.wikis.filter(w=>w.multistream_available).map(w => {
+      let action = w.installed ? (w.update_available ? `<button data-wiki="${esc(w.name)}" data-action="update">Update</button>` : 'Current') : `<button data-wiki="${esc(w.name)}" data-action="download">Download</button>`;
+      return `<tr><td><strong>${esc(w.name)}</strong>${w.closed?' <span class="muted">closed</span>':''}</td><td>${esc(w.dump_date)}</td><td>${bytes(w.dump_size)}</td><td>${bytes(w.index_size)}</td><td>${w.installed?'yes':'no'}</td><td>${action}</td></tr>`;
+    })) + (data.next_offset ? `<p><button id="next">Next page</button></p>` : '');
+    bindButtons();
+    if (data.next_offset) $('next').onclick = () => loadAvailable(false, data.next_offset);
+    $('error').textContent = '';
+  } catch (error) { showError(error); }
+}
+
+function bindButtons() {
+  document.querySelectorAll('button[data-action]').forEach(button => {
+    button.onclick = () => maintain(button.dataset.wiki, button.dataset.action, button);
+  });
+}
+function showError(error) { $('error').textContent = error.message || String(error); }
+$('search').onsubmit = event => { event.preventDefault(); loadAvailable(); };
+$('refresh').onclick = () => loadAvailable(true);
+loadState(); loadAvailable(); setInterval(loadState, 2000);
+</script>
+</body>
+</html>

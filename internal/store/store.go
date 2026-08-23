@@ -111,6 +111,66 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 	return result, nil
 }
 
+func (s *Store) ListJobs() []model.Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]model.Job, 0, len(s.jobs))
+	for _, job := range s.jobs {
+		result = append(result, *job)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
+	return result
+}
+
+func (s *Store) ListUpgrades(ctx context.Context) ([]model.OnlineWiki, error) {
+	locals, err := s.ListLocal()
+	if err != nil {
+		return nil, err
+	}
+	type result struct {
+		wiki model.OnlineWiki
+		err  error
+	}
+	results := make(chan result, len(locals))
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+	for _, local := range locals {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results <- result{err: ctx.Err()}
+				return
+			}
+			defer func() { <-sem }()
+			metadata, metadataErr := s.remote.LatestMetadata(ctx, local.Wiki)
+			if metadataErr != nil {
+				results <- result{err: metadataErr}
+				return
+			}
+			results <- result{wiki: model.OnlineWiki{Name: local.Wiki, DumpDate: metadata.DumpDate, Available: true, DumpSize: metadata.Dump.Size, IndexSize: metadata.Index.Size, DumpSHA1: metadata.Dump.SHA1, IndexSHA1: metadata.Index.SHA1, Installed: true, UpdateAvailable: metadata.Dump.SHA1 != local.DumpSHA1}}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	upgrades := make([]model.OnlineWiki, 0, len(locals))
+	for item := range results {
+		if item.err != nil {
+			if errors.Is(item.err, context.Canceled) {
+				return nil, item.err
+			}
+			continue
+		}
+		upgrades = append(upgrades, item.wiki)
+	}
+	sort.Slice(upgrades, func(i, j int) bool { return upgrades[i].Name < upgrades[j].Name })
+	return upgrades, nil
+}
+
 func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 	if !wikimedia.ValidWikiName(wiki) {
 		return model.Job{}, fmt.Errorf("invalid Wikimedia database name %q", wiki)
