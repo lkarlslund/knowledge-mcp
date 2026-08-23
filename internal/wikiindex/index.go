@@ -994,10 +994,10 @@ func ReadPage(generationPath, title string, pageID uint64, format string, start,
 		return model.Page{}, err
 	}
 	defer func() { _ = reader.Close() }()
-	return reader.ReadPage(context.Background(), title, pageID, format, start, maxChars, "", true)
+	return reader.ReadPage(context.Background(), title, pageID, model.ReadOptions{Format: format, Offset: start, MaxChars: maxChars, FollowRedirects: true}, "")
 }
 
-func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, format string, start, maxChars int, baseURL string, followRedirects bool) (model.Page, error) {
+func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, options model.ReadOptions, baseURL string) (model.Page, error) {
 	if title == "" && pageID == 0 || title != "" && pageID != 0 {
 		return model.Page{}, errors.New("provide exactly one of title or page_id")
 	}
@@ -1011,14 +1011,14 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, form
 	requestedTitle, requestedPageID := source.Title, source.ID
 	visited := map[uint64]struct{}{source.ID: {}}
 	chain := make([]model.RedirectHop, 0)
-	section := ""
+	redirectSection := ""
 	for target := redirectTarget(source); target != ""; target = redirectTarget(source) {
 		targetTitle, fragment := splitRedirectTarget(target)
 		chain = append(chain, model.RedirectHop{FromTitle: source.Title, FromPageID: source.ID, ToTitle: targetTitle, Fragment: fragment})
 		if fragment != "" {
-			section = fragment
+			redirectSection = fragment
 		}
-		if !followRedirects {
+		if !options.FollowRedirects {
 			break
 		}
 		if len(chain) > 8 {
@@ -1037,56 +1037,103 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, form
 	content := source.Revision.Text
 	var references []MarkdownReference
 	var sectionFound *bool
-	switch format {
+	section := strings.TrimSpace(options.Section)
+	if section == "" && options.FollowRedirects {
+		section = redirectSection
+	}
+	outline := pageSectionOutline(content)
+	switch options.Format {
 	case "", "markdown":
 		document := RenderMarkdown(content, baseURL)
-		format, content, references = "markdown", document.Content, document.References
-		if followRedirects && section != "" {
+		options.Format, content, references = "markdown", document.Content, document.References
+		if section != "" {
 			var found bool
 			content, found = extractMarkdownSection(content, section)
 			sectionFound = boolPointer(found)
+			if !found && options.Section != "" {
+				content = ""
+			}
 		}
 	case "text":
-		if followRedirects && section != "" {
+		if section != "" {
 			var found bool
 			content, found = extractWikitextSection(content, section)
 			sectionFound = boolPointer(found)
+			if !found && options.Section != "" {
+				content = ""
+			}
 		}
 		content = PlainText(content)
 	case "wikitext":
-		if followRedirects && section != "" {
+		if section != "" {
 			var found bool
 			content, found = extractWikitextSection(content, section)
 			sectionFound = boolPointer(found)
+			if !found && options.Section != "" {
+				content = ""
+			}
 		}
 	default:
 		return model.Page{}, errors.New("format must be markdown, text, or wikitext")
 	}
-	if start < 0 {
-		start = 0
+	if options.Offset < 0 {
+		options.Offset = 0
 	}
 	runes := []rune(content)
-	if start > len(runes) {
-		start = len(runes)
+	if options.Offset > len(runes) {
+		options.Offset = len(runes)
 	}
-	if maxChars <= 0 {
-		maxChars = DefaultReadMaxChars
-	} else if maxChars > MaximumReadMaxChars {
-		maxChars = MaximumReadMaxChars
+	if options.MaxChars <= 0 {
+		options.MaxChars = DefaultReadMaxChars
+	} else if options.MaxChars > MaximumReadMaxChars {
+		options.MaxChars = MaximumReadMaxChars
 	}
-	end := min(start+maxChars, len(runes))
-	excerpt := string(runes[start:end])
+	end := min(options.Offset+options.MaxChars, len(runes))
+	if options.AlignBoundaries && end < len(runes) {
+		end = readableChunkEnd(runes, options.Offset, end)
+	}
+	excerpt := string(runes[options.Offset:end])
 	pageReferences := make([]model.PageReference, 0)
+	referencesTruncated := false
+	var omittedReferenceIDs []int
+	referenceBudget := options.ReferenceBudgetChars
+	if referenceBudget <= 0 {
+		referenceBudget = int(^uint(0) >> 1)
+	}
+	referenceMaximum := options.ReferenceMaxChars
+	if referenceMaximum <= 0 {
+		referenceMaximum = int(^uint(0) >> 1)
+	}
 	for _, reference := range referencedMarkdownDefinitions(excerpt, references) {
-		pageReferences = append(pageReferences, model.PageReference{ID: reference.ID, Name: reference.Name, Content: reference.Content})
+		original := []rune(reference.Content)
+		allowed := min(len(original), referenceMaximum, referenceBudget)
+		if allowed <= 0 {
+			omittedReferenceIDs = append(omittedReferenceIDs, reference.ID)
+			referencesTruncated = true
+			continue
+		}
+		truncated := allowed < len(original)
+		pageReferences = append(pageReferences, model.PageReference{ID: reference.ID, Name: reference.Name, Content: string(original[:allowed]), Truncated: truncated, OriginalChars: len(original)})
+		referenceBudget -= allowed
+		referencesTruncated = referencesTruncated || truncated
 	}
 	pageURLTarget := source.Title
 	returnedSection := ""
-	if followRedirects && section != "" {
+	if section != "" {
 		pageURLTarget += "#" + section
 		returnedSection = section
 	}
-	page := model.Page{PageID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, PageURL: PageURL(baseURL, pageURLTarget), Redirected: len(chain) > 0, RedirectChain: chain, Section: returnedSection, SectionFound: sectionFound, Format: format, Content: excerpt, References: pageReferences, Truncated: end < len(runes), NextOffset: end}
+	page := model.Page{PageID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, PageURL: PageURL(baseURL, pageURLTarget), Redirected: len(chain) > 0, RedirectChain: chain, Section: returnedSection, SectionFound: sectionFound, Format: options.Format, Content: excerpt, Offset: options.Offset, ReturnedChars: end - options.Offset, TotalChars: len(runes), References: pageReferences, ReferencesTruncated: referencesTruncated, OmittedReferenceIDs: omittedReferenceIDs, Truncated: end < len(runes)}
+	if page.Truncated {
+		page.NextOffset = end
+	}
+	if options.IncludeOutline || options.Section != "" && sectionFound != nil && !*sectionFound {
+		page.Sections = outline
+		if len(page.Sections) > 200 {
+			page.Sections = page.Sections[:200]
+			page.OutlineTruncated = true
+		}
+	}
 	if len(chain) > 0 {
 		page.RequestedTitle, page.RequestedPageID = requestedTitle, requestedPageID
 	}
@@ -1232,6 +1279,45 @@ func normalizeSectionHeading(value string) string {
 	value = html.UnescapeString(value)
 	value = strings.ReplaceAll(value, "_", " ")
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+func pageSectionOutline(content string) []model.PageSection {
+	sections := make([]model.PageSection, 0)
+	for _, line := range strings.Split(content, "\n") {
+		level, heading, ok := wikiHeading(line)
+		if !ok {
+			continue
+		}
+		heading = strings.TrimSpace(PlainText(heading))
+		if heading == "" {
+			continue
+		}
+		sections = append(sections, model.PageSection{Heading: heading, Anchor: strings.ReplaceAll(strings.Join(strings.Fields(heading), " "), " ", "_"), Level: level})
+	}
+	return sections
+}
+
+func readableChunkEnd(content []rune, start, hardEnd int) int {
+	if hardEnd <= start || hardEnd >= len(content) {
+		return hardEnd
+	}
+	minimum := start + (hardEnd-start)*7/10
+	for index := hardEnd; index > minimum; index-- {
+		if index >= 2 && content[index-1] == '\n' && content[index-2] == '\n' {
+			return index
+		}
+	}
+	for index := hardEnd; index > minimum; index-- {
+		if content[index-1] == '\n' {
+			return index
+		}
+	}
+	for index := hardEnd; index > minimum; index-- {
+		if index < len(content) && unicode.IsSpace(content[index]) && (content[index-1] == '.' || content[index-1] == '!' || content[index-1] == '?') {
+			return index
+		}
+	}
+	return hardEnd
 }
 
 func boolPointer(value bool) *bool { return &value }

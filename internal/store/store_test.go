@@ -113,7 +113,7 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if result.SearchMode != "full_text" || len(result.Hits) != 1 {
 		t.Fatalf("unexpected search result: %#v", result)
 	}
-	page, err := backend.Read(context.Background(), "testwiki", "Test Article", 0, "text", 0, 1000, true)
+	page, err := backend.Read(context.Background(), "testwiki", "Test Article", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true})
 	if err != nil {
 		t.Fatal(err)
 	}

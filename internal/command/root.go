@@ -158,16 +158,19 @@ func newWikiCommand(opts *options) *cobra.Command {
 	var jobAction string
 	job := &cobra.Command{
 		Use:   "job JOB_ID",
-		Short: "Inspect or control a background job",
+		Short: "Control a background job",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if jobAction != "pause" && jobAction != "resume" && jobAction != "cancel" && jobAction != "retry" {
+				return errors.New("--action must be pause, resume, cancel, or retry")
+			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
 				result, err := client.JobAction(args[0], jobAction)
 				return printResult(result, err)
 			})
 		},
 	}
-	job.Flags().StringVar(&jobAction, "action", "status", "status, pause, resume, cancel, or retry")
+	job.Flags().StringVar(&jobAction, "action", "", "pause, resume, cancel, or retry")
 	wiki.AddCommand(available, list, submit("download"), submit("update"), status, job)
 	return wiki
 }
@@ -195,9 +198,9 @@ func newSearchCommand(opts *options) *cobra.Command {
 
 func newReadCommand(opts *options) *cobra.Command {
 	var pageID uint64
-	var format string
+	var format, section string
 	var offset, maxChars int
-	var followRedirects bool
+	var followRedirects, outline bool
 	command := &cobra.Command{
 		Use:   "read WIKI [TITLE]",
 		Short: "Read a local wiki page",
@@ -211,16 +214,18 @@ func newReadCommand(opts *options) *cobra.Command {
 				return errors.New("provide exactly one TITLE or --page-id")
 			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Read(cmd.Context(), args[0], title, pageID, format, offset, maxChars, followRedirects)
+				result, err := client.Read(cmd.Context(), args[0], title, pageID, model.ReadOptions{Format: format, Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
 				return printResult(result, err)
 			})
 		},
 	}
 	command.Flags().Uint64Var(&pageID, "page-id", 0, "read by numeric page ID")
 	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or wikitext")
+	command.Flags().StringVar(&section, "section", "", "read one article section by heading or anchor")
 	command.Flags().IntVar(&offset, "offset", 0, "character offset")
 	command.Flags().IntVar(&maxChars, "max-chars", wikiindex.DefaultReadMaxChars, "maximum returned characters (up to 1000000)")
 	command.Flags().BoolVar(&followRedirects, "follow-redirects", true, "follow redirects and extract targeted sections")
+	command.Flags().BoolVar(&outline, "outline", false, "include the article section outline")
 	return command
 }
 

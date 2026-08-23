@@ -89,7 +89,7 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if err != nil {
 		t.Fatal(err)
 	}
-	redirectStub, err := reader.ReadPage(context.Background(), "Alpha alias", 0, "wikitext", 0, 1000, "", false)
+	redirectStub, err := reader.ReadPage(context.Background(), "Alpha alias", 0, model.ReadOptions{Format: "wikitext", MaxChars: 1000}, "")
 	_ = reader.Close()
 	if err != nil || redirectStub.Title != "Alpha alias" || !redirectStub.Redirected || redirectStub.Section != "" || !strings.HasPrefix(redirectStub.Content, "#REDIRECT") {
 		t.Fatalf("unfollowed redirect = %#v, %v", redirectStub, err)
@@ -124,6 +124,47 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	_ = fullReader.Close()
 	if err != nil || len(withProjects.Hits) < 2 || withProjects.Hits[0].Namespace != 4 {
 		t.Fatalf("non-article namespace search = %#v, %v", withProjects.Hits, err)
+	}
+
+	readReader, err := OpenReader(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = readReader.Close() }()
+	sectionPage, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", Section: "Details", MaxChars: 1000, FollowRedirects: true, IncludeOutline: true}, "https://en.wikipedia.org")
+	if err != nil || sectionPage.SectionFound == nil || !*sectionPage.SectionFound || len(sectionPage.Sections) != 1 || sectionPage.Sections[0].Anchor != "Details" || strings.Contains(sectionPage.Content, "Alpha has") {
+		t.Fatalf("explicit section page = %#v, %v", sectionPage, err)
+	}
+	missingSection, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", Section: "Missing", MaxChars: 1000, FollowRedirects: true}, "")
+	if err != nil || missingSection.SectionFound == nil || *missingSection.SectionFound || missingSection.Content != "" || len(missingSection.Sections) != 1 {
+		t.Fatalf("missing section page = %#v, %v", missingSection, err)
+	}
+	complete, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", MaxChars: 1000, FollowRedirects: true, ReferenceBudgetChars: 5, ReferenceMaxChars: 5}, "")
+	if err != nil || complete.Truncated || complete.NextOffset != 0 || complete.ReturnedChars != complete.TotalChars || !complete.ReferencesTruncated || len(complete.References) != 1 || !complete.References[0].Truncated {
+		t.Fatalf("complete bounded-reference page = %#v, %v", complete, err)
+	}
+	var reconstructed strings.Builder
+	next := 0
+	for {
+		chunk, chunkErr := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "text", Offset: next, MaxChars: 24, FollowRedirects: true, AlignBoundaries: true}, "")
+		if chunkErr != nil {
+			t.Fatal(chunkErr)
+		}
+		reconstructed.WriteString(chunk.Content)
+		if !chunk.Truncated {
+			if chunk.NextOffset != 0 {
+				t.Fatalf("complete chunk next_offset = %d", chunk.NextOffset)
+			}
+			break
+		}
+		if chunk.NextOffset <= next {
+			t.Fatalf("pagination did not progress: %#v", chunk)
+		}
+		next = chunk.NextOffset
+	}
+	whole, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true}, "")
+	if err != nil || reconstructed.String() != whole.Content {
+		t.Fatalf("paginated reconstruction differs: got %q want %q, %v", reconstructed.String(), whole.Content, err)
 	}
 }
 

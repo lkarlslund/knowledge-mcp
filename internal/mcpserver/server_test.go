@@ -14,6 +14,16 @@ import (
 
 type fakeService struct{}
 
+type recordingService struct {
+	fakeService
+	readOptions model.ReadOptions
+}
+
+func (service *recordingService) Read(_ context.Context, wiki, title string, pageID uint64, options model.ReadOptions) (model.Page, error) {
+	service.readOptions = options
+	return model.Page{Wiki: wiki, Title: title, PageID: pageID}, nil
+}
+
 func (fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
 	return model.AvailableResult{}, nil
 }
@@ -44,7 +54,7 @@ func (fakeService) JobAction(id, action string) (model.Job, error) {
 func (fakeService) Search(_ context.Context, wiki, query string, options model.SearchOptions) (model.SearchResult, error) {
 	return model.SearchResult{Wiki: wiki}, nil
 }
-func (fakeService) Read(_ context.Context, wiki, title string, pageID uint64, format string, offset, maxChars int, _ bool) (model.Page, error) {
+func (fakeService) Read(_ context.Context, wiki, title string, pageID uint64, options model.ReadOptions) (model.Page, error) {
 	return model.Page{Wiki: wiki, Title: title, PageID: pageID}, nil
 }
 
@@ -97,6 +107,12 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		if tool.OutputSchema == nil {
 			t.Errorf("tool %s has no output schema", tool.Name)
 		}
+		if tool.Name == "wiki_read" {
+			schemaJSON, marshalErr := json.Marshal(tool.InputSchema)
+			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":50000`) {
+				t.Errorf("wiki_read schema lacks conditional/bound constraints: %s, %v", schemaJSON, marshalErr)
+			}
+		}
 		if tool.Annotations.ReadOnlyHint != expectation.readOnly {
 			t.Errorf("tool %s readOnlyHint = %v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, expectation.readOnly)
 		}
@@ -144,6 +160,29 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		if strings.Contains(text, field) {
 			t.Errorf("wiki_list_local exposes operational field %s: %s", field, text)
 		}
+	}
+}
+
+func TestWikiReadAppliesAgentSizedDefaults(t *testing.T) {
+	t.Parallel()
+	service := &recordingService{}
+	server := New(service)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "wiki_read", Arguments: map[string]any{"wiki": "testwiki", "page_id": 7}})
+	if err != nil || result.IsError {
+		t.Fatalf("wiki_read = %#v, %v", result, err)
+	}
+	if service.readOptions.MaxChars != 12_000 || !service.readOptions.AlignBoundaries || service.readOptions.ReferenceBudgetChars != 10_000 || service.readOptions.ReferenceMaxChars != 4_000 || !service.readOptions.IncludeOutline {
+		t.Fatalf("read options = %#v", service.readOptions)
 	}
 }
 

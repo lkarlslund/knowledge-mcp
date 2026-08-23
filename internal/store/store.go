@@ -549,7 +549,7 @@ func (s *Store) Search(ctx context.Context, wiki, query string, options model.Se
 	return result, nil
 }
 
-func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, format string, start, maxChars int, followRedirects bool) (model.Page, error) {
+func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, options model.ReadOptions) (model.Page, error) {
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
 	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
@@ -567,7 +567,7 @@ func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, for
 		return model.Page{}, err
 	}
 	defer release()
-	page, err := reader.ReadPage(ctx, title, pageID, format, start, maxChars, manifest.Site.OnlineSourceURL, followRedirects)
+	page, err := reader.ReadPage(ctx, title, pageID, options, manifest.Site.OnlineSourceURL)
 	page.Wiki = wiki
 	return page, err
 }

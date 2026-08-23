@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
+	jsonschema "github.com/google/jsonschema-go/jsonschema"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/dashboard"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -22,7 +24,7 @@ type Service interface {
 	Job(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
 	Search(context.Context, string, string, model.SearchOptions) (model.SearchResult, error)
-	Read(context.Context, string, string, uint64, string, int, int, bool) (model.Page, error)
+	Read(context.Context, string, string, uint64, model.ReadOptions) (model.Page, error)
 }
 
 type DashboardService interface {
@@ -67,14 +69,31 @@ type readInput struct {
 	Title           string `json:"title,omitempty" jsonschema:"exact page title; mutually exclusive with page_id"`
 	PageID          uint64 `json:"page_id,omitempty" jsonschema:"numeric page identifier; mutually exclusive with title"`
 	Format          string `json:"format,omitempty" jsonschema:"markdown (default), text, or wikitext"`
+	Section         string `json:"section,omitempty" jsonschema:"article section heading or anchor; offsets apply within the selected section"`
 	Offset          int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
-	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum characters; defaults to 100000 and is capped at 1000000"`
+	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum article-content characters; defaults to 12000 and is capped at 50000"`
 	FollowRedirects *bool  `json:"follow_redirects,omitempty" jsonschema:"follow redirect chains and extract a targeted section; defaults to true"`
+	IncludeOutline  *bool  `json:"include_outline,omitempty" jsonschema:"include up to 200 section headings; defaults to true on the first whole-article chunk and when a requested section is missing"`
 }
 
 func New(service Service) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "wikipedia-multistream-mcp", Version: Version}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_available", Description: "List and filter Wikimedia wikis with completed online multistream article dumps.", Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
+	listAvailableSchema := mustSchemaFor[listAvailableInput]()
+	setIntegerBounds(listAvailableSchema, "offset", 0, nil)
+	setIntegerBounds(listAvailableSchema, "limit", 1, intPointer(50))
+	jobStatusSchema := mustSchemaFor[jobStatusInput]()
+	jobStatusSchema.AnyOf = []*jsonschema.Schema{{Required: []string{"job_id"}}, {Required: []string{"wiki"}}}
+	jobSchema := mustSchemaFor[jobInput]()
+	jobSchema.Properties["action"].Enum = []any{"pause", "resume", "cancel", "retry"}
+	searchSchema := mustSchemaFor[searchInput]()
+	setIntegerBounds(searchSchema, "offset", 0, nil)
+	setIntegerBounds(searchSchema, "limit", 1, intPointer(50))
+	readSchema := mustSchemaFor[readInput]()
+	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"title"}}, {Required: []string{"page_id"}}}
+	readSchema.Properties["format"].Enum = []any{"markdown", "text", "wikitext"}
+	setIntegerBounds(readSchema, "offset", 0, nil)
+	setIntegerBounds(readSchema, "max_chars", 1, intPointer(50_000))
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_available", Description: "List and filter Wikimedia wikis with completed online multistream article dumps.", InputSchema: listAvailableSchema, Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
 		out, err := service.ListAvailable(ctx, in.Filter, in.Offset, in.Limit, in.Refresh)
 		return nil, out, err
 	})
@@ -90,14 +109,14 @@ func New(service Service) *mcp.Server {
 		out, err := service.Submit(in.Wiki, "update")
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job_status", Description: "Poll one download/update job by job ID or wiki name.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobStatusInput) (*mcp.CallToolResult, model.Job, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job_status", Description: "Poll one download/update job by job ID or wiki name.", InputSchema: jobStatusSchema, Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobStatusInput) (*mcp.CallToolResult, model.Job, error) {
 		if in.JobID == "" && in.Wiki == "" {
 			return nil, model.Job{}, errors.New("provide job_id or wiki")
 		}
 		out, err := service.Job(in.JobID, in.Wiki)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job", Description: "Control a background job using action pause, resume, cancel, or retry. Use wiki_job_status to inspect progress.", Annotations: changingAnnotations(true, false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobInput) (*mcp.CallToolResult, model.Job, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job", Description: "Control a background job using action pause, resume, cancel, or retry. Use wiki_job_status to inspect progress.", InputSchema: jobSchema, Annotations: changingAnnotations(true, false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobInput) (*mcp.CallToolResult, model.Job, error) {
 		if in.JobID == "" {
 			return nil, model.Job{}, errors.New("provide job_id")
 		}
@@ -107,18 +126,51 @@ func New(service Service) *mcp.Server {
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed offline wiki snapshot. Results matching all query terms rank before relaxed matches and include canonical URLs, page IDs, and query-centered snippets. Encyclopedia articles are searched by default; set include_non_articles to include project, category, draft, talk, and other namespaces. Follow a relevant result with wiki_read using its page_id.", Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed offline wiki snapshot. Results matching all query terms rank before relaxed matches and include canonical URLs, page IDs, and query-centered snippets. Encyclopedia articles are searched by default; set include_non_articles to include project, category, draft, talk, and other namespaces. Follow a relevant result with wiki_read using its page_id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+		if strings.TrimSpace(in.Wiki) == "" || strings.TrimSpace(in.Query) == "" {
+			return nil, model.SearchResult{}, errors.New("provide wiki and a non-empty query")
+		}
 		snippets := in.Snippets == nil || *in.Snippets
 		out, err := service.Search(ctx, in.Wiki, in.Query, model.SearchOptions{Offset: in.Offset, Limit: in.Limit, IncludeNonArticles: in.IncludeNonArticles, Snippets: snippets})
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Redirects are followed by default; redirects to sections return that section. Markdown preserves links, tables, and footnotes; referenced definitions are included with each paginated result.", Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Use section to jump to a heading from the returned outline. Large pages return readable boundary-aligned chunks with offset, returned_chars, total_chars, truncated, and next_offset; continue with next_offset. Redirects are followed by default. Only references used by the current chunk are returned, with explicit truncation metadata when the reference budget is exceeded.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
+		if (strings.TrimSpace(in.Title) == "") == (in.PageID == 0) {
+			return nil, model.Page{}, errors.New("provide exactly one of title or page_id")
+		}
 		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
-		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, in.Format, in.Offset, in.MaxChars, followRedirects)
+		maxChars := in.MaxChars
+		if maxChars <= 0 {
+			maxChars = 12_000
+		} else if maxChars > 50_000 {
+			maxChars = 50_000
+		}
+		includeOutline := in.IncludeOutline != nil && *in.IncludeOutline || in.IncludeOutline == nil && in.Offset == 0 && in.Section == ""
+		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, model.ReadOptions{Format: in.Format, Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000})
 		return nil, out, err
 	})
 	return server
 }
+
+func mustSchemaFor[T any]() *jsonschema.Schema {
+	schema, err := jsonschema.For[T](nil)
+	if err != nil {
+		panic(err)
+	}
+	return schema
+}
+
+func setIntegerBounds(schema *jsonschema.Schema, property string, minimum int, maximum *int) {
+	field := schema.Properties[property]
+	minValue := float64(minimum)
+	field.Minimum = &minValue
+	if maximum != nil {
+		maxValue := float64(*maximum)
+		field.Maximum = &maxValue
+	}
+}
+
+func intPointer(value int) *int { return &value }
 
 func readOnlyAnnotations(openWorld bool) *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}
