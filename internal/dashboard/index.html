@@ -22,7 +22,8 @@
     .table > :not(caption) > * > * { padding: .5rem .75rem; border-color: rgba(255,255,255,.07); vertical-align: middle; }
     .table thead th { color: var(--bs-secondary-color); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; white-space: nowrap; }
     .wiki-name { letter-spacing: -.015em; }
-    .storage-bar { display: flex; width: 14rem; max-width: 100%; height: .35rem; overflow: hidden; background: rgba(255,255,255,.08); }
+    .storage-column { width: 44%; min-width: 28rem; }
+    .storage-bar { display: flex; width: 100%; height: .35rem; overflow: hidden; background: rgba(255,255,255,.08); }
     .storage-bar > span { min-width: 1px; }
     .storage-detail { font-size: .72rem; line-height: 1.25; white-space: nowrap; }
     .dot { width: .5rem; height: .5rem; display: inline-block; border-radius: 50%; }
@@ -61,15 +62,15 @@
     <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local wikis</h2><div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#onlineWikisModal" @click="loadAvailable()"><i class="bi bi-cloud-arrow-down me-1"></i>Download</button></div></div>
     <div class="table-responsive" x-show="local.length">
       <table class="table table-hover align-middle">
-        <thead><tr><th>Wiki</th><th>Status</th><th>Pages</th><th>Search</th><th>Storage</th><th class="text-end">Actions</th></tr></thead>
+        <thead><tr><th>Wiki</th><th>Status</th><th>Pages</th><th>Search</th><th class="storage-column">Storage</th><th class="text-end">Actions</th></tr></thead>
         <tbody><template x-for="wiki in local" :key="wiki.wiki"><tr>
           <td><div class="wiki-name fw-semibold" x-text="wiki.site?.name || wiki.wiki"></div><div class="small text-body-secondary"><code x-text="wiki.wiki"></code><span class="mx-1">·</span><span x-text="wiki.dump_date"></span></div></td>
           <td><span class="badge rounded-pill fw-normal" :class="stateClass(wiki.state)" x-text="label(wiki.state)"></span></td>
           <td class="text-nowrap" x-text="number(wiki.page_count)"></td><td><span class="small" x-text="label(wiki.search_mode)"></span></td>
-          <td>
+          <td class="storage-column">
             <div class="small mb-1"><strong x-text="`${bytes(wiki.disk_bytes)} total`"></strong></div>
             <div class="storage-bar rounded-pill mb-1" :title="storageTitle(wiki)"><span class="bg-primary" :style="storageWidth(wiki.compressed_dump_bytes, wiki.disk_bytes)"></span><span class="bg-info" :style="storageWidth(wiki.multistream_index_bytes, wiki.disk_bytes)"></span><span class="bg-warning" :style="storageWidth(wiki.title_index_bytes, wiki.disk_bytes)"></span><span class="bg-success" :style="storageWidth(wiki.body_index_bytes, wiki.disk_bytes)"></span></div>
-            <div class="storage-detail text-body-secondary"><span class="me-2"><i class="dot bg-primary me-1"></i>dump <span x-text="bytes(wiki.compressed_dump_bytes)"></span></span><span class="me-2"><i class="dot bg-info me-1"></i>source <span x-text="bytes(wiki.multistream_index_bytes)"></span></span><span class="me-2"><i class="dot bg-warning me-1"></i>title <span x-text="bytes(wiki.title_index_bytes)"></span></span><span><i class="dot bg-success me-1"></i>body <span x-text="bytes(wiki.body_index_bytes)"></span></span></div>
+            <div class="storage-detail text-body-secondary"><span class="me-2"><i class="dot bg-primary me-1"></i>dump <span x-text="bytes(wiki.compressed_dump_bytes)"></span></span><span class="me-2"><i class="dot bg-info me-1"></i>dump index <span x-text="bytes(wiki.multistream_index_bytes)"></span></span><span class="me-2"><i class="dot bg-warning me-1"></i>title <span x-text="bytes(wiki.title_index_bytes)"></span></span><span><i class="dot bg-success me-1"></i>body <span x-text="bytes(wiki.body_index_bytes)"></span></span></div>
           </td>
           <td class="text-end text-nowrap"><button x-show="localAction(wiki)" class="btn btn-sm btn-outline-primary btn-icon rounded-circle ms-1" :disabled="busy(wiki.wiki)" :title="busy(wiki.wiki) ? 'Work in progress' : localAction(wiki)?.label" :aria-label="busy(wiki.wiki) ? 'Work in progress' : localAction(wiki)?.label" @click="maintain(wiki.wiki, localAction(wiki).action)"><i :class="busy(wiki.wiki) ? 'bi bi-hourglass-split' : localAction(wiki)?.icon"></i></button><button class="btn btn-sm btn-outline-danger btn-icon rounded-circle ms-1" :disabled="busy(wiki.wiki)" :title="busy(wiki.wiki) ? 'Cancel the active job before deleting' : 'Delete local wiki'" :aria-label="`Delete ${wiki.wiki}`" @click="deleteWiki(wiki)"><i class="bi bi-trash3"></i></button></td>
         </tr></template></tbody>
@@ -147,7 +148,7 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
   bytes(value) { const amount = Number(value || 0), units = ['B','KiB','MiB','GiB','TiB']; if (!amount) return '0 B'; const unit = Math.min(Math.floor(Math.log(amount) / Math.log(1024)), units.length - 1); return `${(amount / Math.pow(1024, unit)).toFixed(unit ? 1 : 0)} ${units[unit]}`; },
   number(value) { return Number(value || 0).toLocaleString(); }, label(value) { return String(value || '—').replaceAll('_', ' '); },
   stateClass(state) { return ['ready','up_to_date','downloaded'].includes(state) ? 'text-bg-success' : state === 'failed' ? 'text-bg-danger' : state === 'paused' ? 'text-bg-warning' : 'text-bg-primary'; },
-  storageWidth(value, total) { return `width:${total ? Number(value || 0) / Number(total) * 100 : 0}%`; }, storageTitle(wiki) { return `Dump ${this.bytes(wiki.compressed_dump_bytes)} · source index ${this.bytes(wiki.multistream_index_bytes)} · title ${this.bytes(wiki.title_index_bytes)} · body ${this.bytes(wiki.body_index_bytes)}`; },
+  storageWidth(value, total) { return `width:${total ? Number(value || 0) / Number(total) * 100 : 0}%`; }, storageTitle(wiki) { return `Dump ${this.bytes(wiki.compressed_dump_bytes)} · Wikimedia dump index ${this.bytes(wiki.multistream_index_bytes)} · title ${this.bytes(wiki.title_index_bytes)} · body ${this.bytes(wiki.body_index_bytes)}`; },
   progressPercent(job) { if (job.progress_percent) return Math.min(100, Number(job.progress_percent)); return job.total ? Math.min(100, Number(job.completed || 0) / Number(job.total) * 100) : 0; },
   progressText(job) { const done = Number(job.completed || 0), total = Number(job.total || 0), rate = Number(job.rate || 0); if (job.state === 'title_indexing') return `${this.number(done)} pages · ~${this.progressPercent(job).toFixed(1)}%`; const values = job.units === 'bytes' ? `${this.bytes(done)}${total ? ` / ${this.bytes(total)}` : ''}` : `${this.number(done)}${total ? ` / ${this.number(total)}` : ''} ${job.units || ''}`; if (!rate || job.units !== 'bytes') return values || job.message || ''; const seconds = total > done ? (total - done) / rate : 0; return `${values} · ${this.bytes(rate)}/s · ${this.duration(seconds)} left`; },
   duration(seconds) { if (seconds < 60) return `${Math.ceil(seconds)}s`; if (seconds < 3600) return `${Math.floor(seconds/60)}m`; return `${Math.floor(seconds/3600)}h ${Math.ceil((seconds%3600)/60)}m`; },
