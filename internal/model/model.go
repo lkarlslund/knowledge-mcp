@@ -167,6 +167,7 @@ type SearchResult struct {
 	Offset                 int         `json:"offset"`
 	NextOffset             int         `json:"next_offset,omitempty"`
 	NamespaceFilterApplied bool        `json:"namespace_filter_applied"`
+	SnippetsAvailable      bool        `json:"snippets_available"`
 	SnippetsComplete       bool        `json:"snippets_complete"`
 	SnippetErrors          int         `json:"snippet_errors,omitempty"`
 	Hits                   []SearchHit `json:"hits"`

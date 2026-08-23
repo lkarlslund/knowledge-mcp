@@ -220,7 +220,8 @@ query terms across their title and body are returned before relaxed any-term
 matches. Each full-text result includes a query-centered plain-text snippet,
 canonical page URL, page ID, namespace, and match mode. During the temporary
 title-only indexing stage, namespace filtering and snippets are unavailable and
-the response reports that explicitly.
+the response reports that explicitly through `search_mode`,
+`namespace_filter_applied`, and `snippets_available`.
 
 `wiki_read` converts the stored wikitext to agent-friendly Markdown by default.
 It preserves headings, lists, links, tables, infobox fields, images as linked

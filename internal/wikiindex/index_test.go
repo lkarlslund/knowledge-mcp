@@ -63,6 +63,9 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if len(titleResult.Hits) != 1 || titleResult.Hits[0].Title != "Beta: Details" {
 		t.Fatalf("unexpected title hits: %#v", titleResult.Hits)
 	}
+	if titleResult.SnippetsAvailable || titleResult.SnippetsComplete {
+		t.Fatalf("title-only snippet capability = %#v", titleResult)
+	}
 	page, err := ReadPage(dir, "Beta: Details", 0, "text", 0, 1000)
 	if err != nil {
 		t.Fatalf("ReadPage: %v", err)
@@ -115,6 +118,9 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	}
 	if relevance.Hits[0].Namespace != 0 || !strings.Contains(relevance.Hits[0].Snippet, "Trump phone call") {
 		t.Fatalf("relevant hit metadata = %#v", relevance.Hits[0])
+	}
+	if !relevance.SnippetsAvailable || !relevance.SnippetsComplete {
+		t.Fatalf("full-text snippet capability = %#v", relevance)
 	}
 	fullReader, err := OpenReader(dir, true)
 	if err != nil {

@@ -808,7 +808,7 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 		hits = append(hits, relaxedHits...)
 	}
 	total := strictTotal + relaxedTotal
-	result := model.SearchResult{Query: query, SearchMode: mode, Total: total, Offset: options.Offset, NamespaceFilterApplied: fullText && !options.IncludeNonArticles, SnippetsComplete: true, Hits: hits}
+	result := model.SearchResult{Query: query, SearchMode: mode, Total: total, Offset: options.Offset, NamespaceFilterApplied: fullText && !options.IncludeNonArticles, SnippetsAvailable: fullText, SnippetsComplete: fullText, Hits: hits}
 	if options.Offset+len(hits) < int(total) {
 		result.NextOffset = options.Offset + len(hits)
 	}
