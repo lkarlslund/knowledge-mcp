@@ -35,6 +35,10 @@ func (f *fakeService) Submit(wiki, kind string) (model.Job, error) {
 	f.submitted = wiki + "/" + kind
 	return model.Job{ID: "job-2", Wiki: wiki, Kind: kind}, nil
 }
+func (f *fakeService) DeleteWiki(wiki string) error {
+	f.submitted = wiki + "/delete"
+	return nil
+}
 func (f *fakeService) JobAction(id, action string) (model.Job, error) {
 	f.submitted = id + "/" + action
 	return model.Job{ID: id, State: action}, nil
@@ -91,7 +95,7 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Wikipedia Multistream MCP") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Wikipedia Multistream MCP") || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || !strings.Contains(page.Body.String(), "bi-trash3") {
 		t.Fatalf("unexpected dashboard response: %d %q", page.Code, page.Body.String())
 	}
 
@@ -107,6 +111,13 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || service.submitted != "testwiki/update" {
 		t.Fatalf("maintenance response %d, submitted %q", response.Code, service.submitted)
+	}
+	deleteRequest := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/wiki/testwiki/delete", nil)
+	deleteRequest.Header.Set("X-Wikipedia-MCP", "1")
+	deleteResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusOK || service.submitted != "testwiki/delete" {
+		t.Fatalf("delete response %d, submitted %q", deleteResponse.Code, service.submitted)
 	}
 	jobRequest := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/job/job-1/pause", nil)
 	jobRequest.Header.Set("X-Wikipedia-MCP", "1")

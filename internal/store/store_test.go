@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -183,6 +184,64 @@ func TestJobPauseResumeCancelAndRetry(t *testing.T) {
 	retried, err := backend.JobAction(job.ID, "retry")
 	if err != nil || retried.State != model.StateQueued {
 		t.Fatalf("retry = %#v, %v", retried, err)
+	}
+}
+
+func TestDeleteWikiRemovesLocalAndStagedData(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	wiki := "testwiki"
+	job := &model.Job{ID: "job-1", Wiki: wiki, Kind: "download", State: model.StateDownloaded, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	backend := &Store{
+		root:         root,
+		jobs:         map[string]*model.Job{job.ID: job},
+		active:       map[string]string{},
+		watchers:     map[chan struct{}]struct{}{},
+		readers:      map[string]*wikiindex.Reader{},
+		storage:      map[string]storageSnapshot{},
+		lastProgress: map[string]time.Time{},
+	}
+	wikiPath := backend.wikiPath(wiki)
+	if err := os.MkdirAll(filepath.Join(wikiPath, "parts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(wikiPath, "manifest.json"), model.Manifest{Wiki: wiki}); err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(root, ".staging", job.ID)
+	if err := os.MkdirAll(stagePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.DeleteWiki(wiki); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{wikiPath, stagePath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("deleted path %s still exists: %v", path, err)
+		}
+	}
+	if _, err := backend.Job(job.ID, ""); err != nil {
+		t.Fatalf("job history was removed: %v", err)
+	}
+}
+
+func TestDeleteWikiRejectsActiveJob(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	wiki := "testwiki"
+	wikiPath := filepath.Join(root, "wikis", wiki)
+	if err := os.MkdirAll(wikiPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(wikiPath, "manifest.json"), model.Manifest{Wiki: wiki}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &Store{root: root, active: map[string]string{wiki: "job-1"}}
+	if err := backend.DeleteWiki(wiki); err == nil {
+		t.Fatal("DeleteWiki succeeded with an active job")
+	}
+	if _, err := os.Stat(wikiPath); err != nil {
+		t.Fatalf("active wiki was removed: %v", err)
 	}
 }
 

@@ -25,6 +25,7 @@ type Service interface {
 	ListUpgrades(context.Context) ([]model.OnlineWiki, error)
 	ListJobs() []model.Job
 	Submit(string, string) (model.Job, error)
+	DeleteWiki(string) error
 	JobAction(string, string) (model.Job, error)
 	Subscribe(context.Context) <-chan struct{}
 }
@@ -111,8 +112,13 @@ func Handler(service Service) http.Handler {
 			return
 		}
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/dashboard/wiki/"), "/")
-		if len(parts) != 2 || parts[0] == "" || parts[1] != "download" && parts[1] != "update" {
-			writeJSONStatus(w, nil, errors.New("expected /api/dashboard/wiki/{wiki}/{download|update}"), http.StatusBadRequest)
+		if len(parts) != 2 || parts[0] == "" || parts[1] != "download" && parts[1] != "update" && parts[1] != "delete" {
+			writeJSONStatus(w, nil, errors.New("expected /api/dashboard/wiki/{wiki}/{download|update|delete}"), http.StatusBadRequest)
+			return
+		}
+		if parts[1] == "delete" {
+			err := service.DeleteWiki(parts[0])
+			writeJSON(w, map[string]any{"wiki": parts[0], "deleted": err == nil}, err)
 			return
 		}
 		job, err := service.Submit(parts[0], parts[1])

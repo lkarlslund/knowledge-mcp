@@ -16,28 +16,28 @@
     .app-shell { max-width: 1440px; }
     .brand-mark { width: 2.5rem; height: 2.5rem; display: grid; place-items: center; color: #0d1117; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
     .surface { background: color-mix(in srgb, var(--bs-body-bg) 89%, #fff 11%); border-color: rgba(255,255,255,.08) !important; box-shadow: 0 .5rem 2rem rgba(0,0,0,.16); }
-    .metric { min-height: 6.25rem; }
+    .metric { min-height: 5.25rem; }
     .metric-value { font-size: clamp(1.35rem, 3vw, 2rem); letter-spacing: -.04em; }
     .table { --bs-table-bg: transparent; margin: 0; }
-    .table > :not(caption) > * > * { padding: .75rem 1rem; border-color: rgba(255,255,255,.07); vertical-align: middle; }
+    .table > :not(caption) > * > * { padding: .5rem .75rem; border-color: rgba(255,255,255,.07); vertical-align: middle; }
     .table thead th { color: var(--bs-secondary-color); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; white-space: nowrap; }
     .wiki-name { letter-spacing: -.015em; }
     .storage-bar { display: flex; width: 14rem; max-width: 100%; height: .35rem; overflow: hidden; background: rgba(255,255,255,.08); }
     .storage-bar > span { min-width: 1px; }
-    .storage-detail { font-size: .72rem; line-height: 1.55; white-space: nowrap; }
+    .storage-detail { font-size: .72rem; line-height: 1.25; white-space: nowrap; }
     .dot { width: .5rem; height: .5rem; display: inline-block; border-radius: 50%; }
     .progress { height: .35rem; background: rgba(255,255,255,.08); }
-    .btn-icon { width: 2rem; height: 2rem; padding: 0; display: inline-grid; place-items: center; }
+    .btn-icon { width: 1.8rem; height: 1.8rem; padding: 0; display: inline-grid; place-items: center; }
     .connection-dot { width: .55rem; height: .55rem; box-shadow: 0 0 .75rem currentColor; }
     .bg-current { background-color: currentColor; }
-    .empty { min-height: 7rem; display: grid; place-items: center; color: var(--bs-secondary-color); }
+    .empty { min-height: 5rem; display: grid; place-items: center; color: var(--bs-secondary-color); }
     .section-icon { color: var(--accent); }
-    @media (max-width: 767px) { .table > :not(caption) > * > * { padding: .65rem .75rem; } }
+    @media (max-width: 767px) { .table > :not(caption) > * > * { padding: .45rem .6rem; } }
   </style>
 </head>
 <body>
-<main class="app-shell container-fluid px-3 px-lg-4 py-4" x-data="dashboard" x-init="init()" x-cloak>
-  <header class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+<main class="app-shell container-fluid px-3 px-lg-4 py-3" x-data="dashboard" x-init="init()" x-cloak>
+  <header class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
     <div class="d-flex align-items-center gap-3">
       <div class="brand-mark rounded-3"><i class="bi bi-book-half fs-5"></i></div>
       <div><h1 class="h4 mb-0 fw-semibold">Wikipedia Multistream</h1><div class="small text-body-secondary">Local knowledge, compressed and agent-ready</div></div>
@@ -50,18 +50,18 @@
 
   <div class="alert alert-danger py-2" role="alert" x-show="error" x-transition><i class="bi bi-exclamation-triangle me-2"></i><span x-text="error"></span></div>
 
-  <section class="row g-3 mb-4">
+  <section class="row g-2 mb-3">
     <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Local wikis</div><div class="metric-value fw-semibold" x-text="local.length"></div></div></div>
     <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Active jobs</div><div class="metric-value fw-semibold" x-text="activeJobs.length"></div></div></div>
     <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Local storage</div><div class="metric-value fw-semibold" x-text="bytes(totalStorage)"></div></div></div>
     <div class="col-6 col-lg-3"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-2">Search-ready</div><div class="metric-value fw-semibold" x-text="local.filter(w => w.title_ready).length"></div></div></div>
   </section>
 
-  <section class="surface border rounded-4 overflow-hidden mb-4">
-    <div class="d-flex align-items-center justify-content-between px-3 px-lg-4 py-3 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local wikis</h2><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span></div>
+  <section class="surface border rounded-4 overflow-hidden mb-3">
+    <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local wikis</h2><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span></div>
     <div class="table-responsive" x-show="local.length">
       <table class="table table-hover align-middle">
-        <thead><tr><th>Wiki</th><th>Status</th><th>Pages</th><th>Search</th><th>Storage</th><th>Upgrade</th><th class="text-end">Action</th></tr></thead>
+        <thead><tr><th>Wiki</th><th>Status</th><th>Pages</th><th>Search</th><th>Storage</th><th class="text-end">Actions</th></tr></thead>
         <tbody><template x-for="wiki in local" :key="wiki.wiki"><tr>
           <td><div class="wiki-name fw-semibold" x-text="wiki.wiki"></div><div class="small text-body-secondary" x-text="wiki.dump_date"></div></td>
           <td><span class="badge rounded-pill fw-normal" :class="stateClass(wiki.state)" x-text="label(wiki.state)"></span></td>
@@ -71,22 +71,21 @@
             <div class="storage-bar rounded-pill mb-1" :title="storageTitle(wiki)"><span class="bg-primary" :style="storageWidth(wiki.compressed_dump_bytes, wiki.disk_bytes)"></span><span class="bg-info" :style="storageWidth(wiki.multistream_index_bytes, wiki.disk_bytes)"></span><span class="bg-warning" :style="storageWidth(wiki.title_index_bytes, wiki.disk_bytes)"></span><span class="bg-success" :style="storageWidth(wiki.body_index_bytes, wiki.disk_bytes)"></span></div>
             <div class="storage-detail text-body-secondary"><span class="me-2"><i class="dot bg-primary me-1"></i>dump <span x-text="bytes(wiki.compressed_dump_bytes)"></span></span><span class="me-2"><i class="dot bg-info me-1"></i>source <span x-text="bytes(wiki.multistream_index_bytes)"></span></span><span class="me-2"><i class="dot bg-warning me-1"></i>title <span x-text="bytes(wiki.title_index_bytes)"></span></span><span><i class="dot bg-success me-1"></i>body <span x-text="bytes(wiki.body_index_bytes)"></span></span></div>
           </td>
-          <td class="small" x-text="upgradeFor(wiki)?.update_available ? upgradeFor(wiki).dump_date : 'Current'"></td>
-          <td class="text-end"><button x-show="localAction(wiki)" class="btn btn-sm btn-outline-primary btn-icon rounded-circle" :disabled="busy(wiki.wiki)" :title="busy(wiki.wiki) ? 'Work in progress' : localAction(wiki)?.label" :aria-label="busy(wiki.wiki) ? 'Work in progress' : localAction(wiki)?.label" @click="maintain(wiki.wiki, localAction(wiki).action)"><i :class="busy(wiki.wiki) ? 'bi bi-hourglass-split' : localAction(wiki)?.icon"></i></button></td>
+          <td class="text-end text-nowrap"><button x-show="localAction(wiki)" class="btn btn-sm btn-outline-primary btn-icon rounded-circle ms-1" :disabled="busy(wiki.wiki)" :title="busy(wiki.wiki) ? 'Work in progress' : localAction(wiki)?.label" :aria-label="busy(wiki.wiki) ? 'Work in progress' : localAction(wiki)?.label" @click="maintain(wiki.wiki, localAction(wiki).action)"><i :class="busy(wiki.wiki) ? 'bi bi-hourglass-split' : localAction(wiki)?.icon"></i></button><button class="btn btn-sm btn-outline-danger btn-icon rounded-circle ms-1" :disabled="busy(wiki.wiki)" :title="busy(wiki.wiki) ? 'Cancel the active job before deleting' : 'Delete local wiki'" :aria-label="`Delete ${wiki.wiki}`" @click="deleteWiki(wiki)"><i class="bi bi-trash3"></i></button></td>
         </tr></template></tbody>
       </table>
     </div>
     <div class="empty" x-show="!local.length"><span><i class="bi bi-inbox me-2"></i>No local wikis yet</span></div>
   </section>
 
-  <section class="surface border rounded-4 overflow-hidden mb-4">
-    <div class="d-flex flex-wrap align-items-center gap-2 px-3 px-lg-4 py-3 border-bottom"><h2 class="h6 mb-0 me-auto"><i class="bi bi-activity section-icon me-2"></i>Jobs</h2><div class="btn-group btn-group-sm" role="group" aria-label="Filter jobs"><template x-for="option in jobFilterOptions" :key="option.value"><button type="button" class="btn" :class="jobFilter === option.value ? 'btn-primary' : 'btn-outline-secondary'" @click="jobFilter = option.value"><i :class="option.icon" class="me-1"></i><span x-text="option.label"></span><span class="badge rounded-pill ms-1" :class="jobFilter === option.value ? 'text-bg-light' : 'text-bg-secondary'" x-text="jobFilterCount(option.value)"></span></button></template></div></div>
+  <section class="surface border rounded-4 overflow-hidden mb-3">
+    <div class="d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-bottom"><h2 class="h6 mb-0 me-auto"><i class="bi bi-activity section-icon me-2"></i>Jobs</h2><div class="btn-group btn-group-sm" role="group" aria-label="Filter jobs"><template x-for="option in jobFilterOptions" :key="option.value"><button type="button" class="btn" :class="jobFilter === option.value ? 'btn-primary' : 'btn-outline-secondary'" @click="jobFilter = option.value"><i :class="option.icon" class="me-1"></i><span x-text="option.label"></span><span class="badge rounded-pill ms-1" :class="jobFilter === option.value ? 'text-bg-light' : 'text-bg-secondary'" x-text="jobFilterCount(option.value)"></span></button></template></div></div>
     <div class="table-responsive" x-show="filteredJobs.length">
       <table class="table table-hover"><thead><tr><th>Wiki</th><th>Kind</th><th>Status</th><th style="min-width:16rem">Progress</th><th>Updated</th><th class="text-end">Controls</th></tr></thead>
         <tbody><template x-for="job in filteredJobs.slice(0, 30)" :key="job.id"><tr>
           <td class="fw-semibold" x-text="job.wiki"></td><td><span class="badge text-bg-secondary fw-normal" x-text="job.kind"></span></td>
           <td><span class="small" :class="job.state === 'failed' ? 'text-danger' : ''" x-text="label(job.state)"></span><div class="small text-danger text-wrap" x-show="job.error" x-text="job.error"></div></td>
-          <td><div class="progress mb-2" role="progressbar" x-show="job.total || job.progress_percent"><div class="progress-bar" :class="job.state === 'failed' ? 'bg-danger' : ''" :style="`width:${progressPercent(job)}%`"></div></div><div class="small text-body-secondary" x-text="progressText(job)"></div></td>
+          <td><div class="progress mb-1" role="progressbar" x-show="job.total || job.progress_percent"><div class="progress-bar" :class="job.state === 'failed' ? 'bg-danger' : ''" :style="`width:${progressPercent(job)}%`"></div></div><div class="small text-body-secondary" x-text="progressText(job)"></div></td>
           <td class="small text-body-secondary text-nowrap" x-text="relativeTime(job.updated_at)"></td>
           <td class="text-end text-nowrap"><template x-for="control in jobControls(job)" :key="control.action"><button class="btn btn-sm btn-outline-secondary btn-icon rounded-circle ms-1" :class="control.class" :title="control.label" :aria-label="control.label" @click="controlJob(job.id, control.action)"><i :class="control.icon"></i></button></template></td>
         </tr></template></tbody>
@@ -96,7 +95,7 @@
   </section>
 
   <section class="surface border rounded-4 overflow-hidden">
-    <div class="d-flex flex-wrap align-items-center gap-2 px-3 px-lg-4 py-3 border-bottom">
+    <div class="d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-bottom">
       <h2 class="h6 mb-0 me-auto"><i class="bi bi-cloud-arrow-down section-icon me-2"></i>Available online</h2>
       <div class="input-group input-group-sm" style="max-width:22rem"><span class="input-group-text"><i class="bi bi-search"></i></span><input class="form-control" type="search" placeholder="Filter, e.g. enwiki" x-model="filter" @keydown.enter="loadAvailable(true)" aria-label="Filter online wikis" /><button class="btn btn-outline-secondary" title="Search" aria-label="Search" @click="loadAvailable(true)"><i class="bi bi-arrow-return-left"></i></button><button class="btn btn-outline-secondary" title="Refresh Wikimedia catalog" aria-label="Refresh Wikimedia catalog" @click="loadAvailable(true, true)"><i class="bi bi-arrow-clockwise"></i></button></div>
     </div>
@@ -135,6 +134,7 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
   async loadUpgrades() { try { this.upgrades = await this.api('/api/dashboard/upgrades'); } catch (error) { this.error = error.message; } },
   async loadAvailable(reset = false, refresh = false) { try { const data = await this.api(`/api/dashboard/available?filter=${encodeURIComponent(this.filter.trim())}&offset=0&limit=25&refresh=${refresh}`); this.available = (data.wikis || []).filter(wiki => wiki.multistream_available); if (reset) this.error = ''; } catch (error) { this.error = error.message; } },
   async maintain(wiki, action) { try { await this.api(`/api/dashboard/wiki/${encodeURIComponent(wiki)}/${action}`, {method:'POST', headers:{'X-Wikipedia-MCP':'1'}}); await this.loadAvailable(); } catch (error) { this.error = error.message; } },
+  async deleteWiki(wiki) { if (!window.confirm(`Delete ${wiki.wiki} and permanently remove ${this.bytes(wiki.disk_bytes)} of local data?`)) return; try { await this.api(`/api/dashboard/wiki/${encodeURIComponent(wiki.wiki)}/delete`, {method:'POST', headers:{'X-Wikipedia-MCP':'1'}}); this.local = this.local.filter(item => item.wiki !== wiki.wiki); await Promise.all([this.loadUpgrades(), this.loadAvailable()]); } catch (error) { this.error = error.message; } },
   async controlJob(id, action) { try { await this.api(`/api/dashboard/job/${encodeURIComponent(id)}/${action}`, {method:'POST', headers:{'X-Wikipedia-MCP':'1'}}); } catch (error) { this.error = error.message; } },
   busy(wiki) { return this.activeJobs.some(job => job.wiki === wiki); }, upgradeFor(wiki) { return this.upgrades.find(item => item.name === wiki.wiki); },
 	jobFilterMatches(job, filter) { if (filter === 'all') return true; if (filter === 'queued') return job.state === 'queued'; if (filter === 'failed') return job.state === 'failed'; if (filter === 'completed') return ['downloaded','ready','up_to_date'].includes(job.state); return ['discovering','downloading','verifying','title_indexing','body_indexing'].includes(job.state); },

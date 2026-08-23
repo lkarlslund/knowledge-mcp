@@ -40,9 +40,12 @@ no authentication layer.
 
 Open `http://127.0.0.1:8765/` for the lightweight local dashboard. It shows
 downloaded wikis, available upgrades, current/recent job progress, and online
-dumps, and can submit download or update jobs. Alpine.js receives live local and
-job snapshots over a WebSocket; Bootstrap, Bootstrap Icons, and Alpine.js are
-pinned and embedded in the binary, with no CDN dependency.
+dumps, and can submit download or update jobs. Upgrade controls appear with the
+other local-wiki actions. A confirmed trash action permanently removes an idle
+local wiki and its staged remnants; active work must be canceled first.
+Alpine.js receives live local and job snapshots over a WebSocket; Bootstrap,
+Bootstrap Icons, and Alpine.js are pinned and embedded in the binary, with no
+CDN dependency.
 Progress persistence and WebSocket snapshots are coalesced to at most twice per
 second, and directory-size scans use a short cache, so an open dashboard does
 not generate continuous metadata I/O while an index is being built.

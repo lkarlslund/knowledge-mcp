@@ -360,6 +360,44 @@ func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 	return *job, nil
 }
 
+func (s *Store) DeleteWiki(wiki string) error {
+	if !wikimedia.ValidWikiName(wiki) {
+		return fmt.Errorf("invalid Wikimedia database name %q", wiki)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id := s.active[wiki]; id != "" {
+		return fmt.Errorf("wiki %s has active job %s; cancel it before deleting", wiki, id)
+	}
+	path := s.wikiPath(wiki)
+	if _, err := os.Stat(filepath.Join(path, "manifest.json")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("wiki %s is not installed", wiki)
+		}
+		return err
+	}
+	s.closeReaders(path)
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("delete wiki %s: %w", wiki, err)
+	}
+	var cleanupErr error
+	for _, job := range s.jobs {
+		if job.Wiki != wiki {
+			continue
+		}
+		for _, id := range []string{job.ID, job.SourceJobID} {
+			if id != "" {
+				cleanupErr = errors.Join(cleanupErr, os.RemoveAll(filepath.Join(s.root, ".staging", id)))
+			}
+		}
+	}
+	s.storageMu.Lock()
+	delete(s.storage, path)
+	s.storageMu.Unlock()
+	s.notifyLocked()
+	return cleanupErr
+}
+
 func (s *Store) Job(id, wiki string) (model.Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -992,13 +1030,17 @@ func (s *Store) saveJobsLocked() error {
 	if err := writeJSON(s.jobsPath(), jobs); err != nil {
 		return err
 	}
+	s.notifyLocked()
+	return nil
+}
+
+func (s *Store) notifyLocked() {
 	for watcher := range s.watchers {
 		select {
 		case watcher <- struct{}{}:
 		default:
 		}
 	}
-	return nil
 }
 
 func readManifest(path string) (model.Manifest, error) {
