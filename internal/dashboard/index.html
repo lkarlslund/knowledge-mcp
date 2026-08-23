@@ -17,6 +17,7 @@
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
     .grow { flex: 1; min-width: 14rem; }
     progress { width: 9rem; } code { font-size: .85em; }
+    .storage { white-space: nowrap; line-height: 1.45; }
     .ready { color: #198754; } .working { color: #b77900; } .failed { color: #c33; }
   </style>
 </head>
@@ -95,13 +96,18 @@ async function loadState() {
     ]);
     const upgradeMap = Object.fromEntries(upgrades.map(x => [x.name, x]));
     busyWikis = new Set(jobs.filter(j => !terminal(j.state)).map(j => j.wiki));
-    $('local').innerHTML = table(['Wiki','Dump','State','Pages','Search','Disk','Upgrade','Action'], local.map(w => {
+    $('local').innerHTML = table(['Wiki','Dump','State','Pages','Search','Storage breakdown','Upgrade','Action'], local.map(w => {
       const up = upgradeMap[w.wiki];
       const disabled = busyWikis.has(w.wiki) ? ' disabled' : '';
       const action = !w.title_ready ? `<button data-wiki="${esc(w.wiki)}" data-action="update"${disabled}>Index</button>` :
         !w.body_ready ? `<button data-wiki="${esc(w.wiki)}" data-action="update"${disabled}>Resume indexing</button>` :
         up?.update_available ? `<button data-wiki="${esc(w.wiki)}" data-action="update"${disabled}>Update</button>` : 'Current';
-      return `<tr><td><strong>${esc(w.wiki)}</strong></td><td>${esc(w.dump_date)}</td><td>${esc(w.state)}</td><td>${Number(w.page_count).toLocaleString()}</td><td>${esc(w.search_mode)}</td><td>${bytes(w.disk_bytes)}</td><td>${up?.update_available ? esc(up.dump_date) : '—'}</td><td>${action}</td></tr>`;
+      const storage = `<div class="storage"><strong>${bytes(w.disk_bytes)} total</strong><br>`+
+        `<span class="muted">compressed XML ${bytes(w.compressed_dump_bytes)}<br>`+
+        `multistream index ${bytes(w.multistream_index_bytes)}<br>`+
+        `title index ${bytes(w.title_index_bytes)}<br>`+
+        `body index ${bytes(w.body_index_bytes)}${Number(w.other_bytes||0) ? `<br>other ${bytes(w.other_bytes)}` : ''}</span></div>`;
+      return `<tr><td><strong>${esc(w.wiki)}</strong></td><td>${esc(w.dump_date)}</td><td>${esc(w.state)}</td><td>${Number(w.page_count).toLocaleString()}</td><td>${esc(w.search_mode)}</td><td>${storage}</td><td>${up?.update_available ? esc(up.dump_date) : '—'}</td><td>${action}</td></tr>`;
     }));
     $('jobs').innerHTML = table(['Wiki','Kind','State','Progress','Message','Updated','Action'], jobs.slice(0,25).map(j => {
       const max = Number(j.total || 0), value = Math.min(Number(j.completed || 0), max || Number(j.completed || 0));

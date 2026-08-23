@@ -15,6 +15,7 @@ import (
 
 	dsbzip2 "github.com/dsnet/compress/bzip2"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikiindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
 )
 
@@ -182,6 +183,31 @@ func TestJobPauseResumeCancelAndRetry(t *testing.T) {
 	retried, err := backend.JobAction(job.ID, "retry")
 	if err != nil || retried.State != model.StateQueued {
 		t.Fatalf("retry = %#v, %v", retried, err)
+	}
+}
+
+func TestLocalStorageBreakdown(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	files := map[string]int{
+		"parts/000.dump.bz2":                      11,
+		"parts/000.index.bz2":                     7,
+		wikiindex.TitleIndexDir + "/data":         13,
+		wikiindex.BodyIndexDir + ".building/data": 17,
+		"manifest.json":                           5,
+	}
+	for name, size := range files {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total, dump, sourceIndex, title, body := localStorage(root)
+	if total != 53 || dump != 11 || sourceIndex != 7 || title != 13 || body != 17 {
+		t.Fatalf("storage = total %d dump %d source %d title %d body %d", total, dump, sourceIndex, title, body)
 	}
 }
 

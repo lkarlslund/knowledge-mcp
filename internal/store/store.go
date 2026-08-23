@@ -126,7 +126,8 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 			local.ActiveJob = jobID
 			local.State = s.jobs[jobID].State
 		}
-		local.DiskBytes, _ = directorySize(s.wikiPath(entry.Name()))
+		local.DiskBytes, local.CompressedDumpBytes, local.MultistreamIndexBytes, local.TitleIndexBytes, local.BodyIndexBytes = localStorage(s.wikiPath(entry.Name()))
+		local.OtherBytes = max(local.DiskBytes-local.CompressedDumpBytes-local.MultistreamIndexBytes-local.TitleIndexBytes-local.BodyIndexBytes, 0)
 		result = append(result, local)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Wiki < result[j].Wiki })
@@ -834,23 +835,39 @@ func newID() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-func directorySize(path string) (int64, error) {
-	var size int64
-	err := filepath.WalkDir(path, func(_ string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !entry.Type().IsRegular() {
+func localStorage(path string) (total, compressedDump, multistreamIndex, titleIndex, bodyIndex int64) {
+	_ = filepath.WalkDir(path, func(filePath string, entry fs.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
 			return nil
 		}
 		info, err := entry.Info()
 		if err != nil {
-			return err
+			return nil
 		}
-		size += info.Size()
+		size := info.Size()
+		total += size
+		relative, err := filepath.Rel(path, filePath)
+		if err != nil {
+			return nil
+		}
+		switch {
+		case strings.HasPrefix(relative, "parts"+string(filepath.Separator)) && strings.HasSuffix(relative, ".dump.bz2"):
+			compressedDump += size
+		case strings.HasPrefix(relative, "parts"+string(filepath.Separator)) && strings.HasSuffix(relative, ".index.bz2"):
+			multistreamIndex += size
+		case pathInIndex(relative, wikiindex.TitleIndexDir):
+			titleIndex += size
+		case pathInIndex(relative, wikiindex.BodyIndexDir):
+			bodyIndex += size
+		}
 		return nil
 	})
-	return size, err
+	return total, compressedDump, multistreamIndex, titleIndex, bodyIndex
+}
+
+func pathInIndex(relative, name string) bool {
+	separator := string(filepath.Separator)
+	return strings.HasPrefix(relative, name+separator) || strings.HasPrefix(relative, name+".building"+separator)
 }
 
 func snippet(text, query string, length int) string {

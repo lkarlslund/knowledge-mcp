@@ -76,10 +76,15 @@ type Manifest struct {
 
 type LocalWiki struct {
 	Manifest
-	State      string `json:"state"`
-	SearchMode string `json:"search_mode"`
-	DiskBytes  int64  `json:"disk_bytes"`
-	ActiveJob  string `json:"active_job_id,omitempty"`
+	State                 string `json:"state"`
+	SearchMode            string `json:"search_mode"`
+	DiskBytes             int64  `json:"disk_bytes"`
+	CompressedDumpBytes   int64  `json:"compressed_dump_bytes"`
+	MultistreamIndexBytes int64  `json:"multistream_index_bytes"`
+	TitleIndexBytes       int64  `json:"title_index_bytes"`
+	BodyIndexBytes        int64  `json:"body_index_bytes"`
+	OtherBytes            int64  `json:"other_bytes"`
+	ActiveJob             string `json:"active_job_id,omitempty"`
 }
 
 type Job struct {
