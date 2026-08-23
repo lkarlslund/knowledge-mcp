@@ -14,6 +14,10 @@ the full-text body index continues building in the background.
 
 Go 1.25 or newer is required.
 
+Daily rolling releases provide binaries and SHA-256 checksums for Linux,
+macOS, and Windows on AMD64 and ARM64. The workflow skips days without code
+changes and can also be run or repaired manually from GitHub Actions.
+
 ```sh
 go build -o wikipedia-multistream-mcp .
 ./wikipedia-multistream-mcp serve

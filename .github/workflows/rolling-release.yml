@@ -1,0 +1,184 @@
+name: Rolling release
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Rebuild and replace assets even when the latest release is already at HEAD"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rolling-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build rolling release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compute release metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+
+          latest_tag="$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(test("^r[0-9]+$"))] | sort_by(ltrimstr("r") | tonumber) | reverse | .[0] // ""')"
+          if [[ -n "$latest_tag" ]]; then
+            git fetch --force origin "refs/tags/${latest_tag}:refs/tags/${latest_tag}" || true
+          fi
+
+          release_has_expected_assets() {
+            local tag="$1"
+            local missing=0
+            local asset
+            local expected_assets=(
+              "wikipedia-multistream-mcp-${tag}-linux-amd64"
+              "wikipedia-multistream-mcp-${tag}-linux-amd64.sha256"
+              "wikipedia-multistream-mcp-${tag}-linux-arm64"
+              "wikipedia-multistream-mcp-${tag}-linux-arm64.sha256"
+              "wikipedia-multistream-mcp-${tag}-darwin-amd64"
+              "wikipedia-multistream-mcp-${tag}-darwin-amd64.sha256"
+              "wikipedia-multistream-mcp-${tag}-darwin-arm64"
+              "wikipedia-multistream-mcp-${tag}-darwin-arm64.sha256"
+              "wikipedia-multistream-mcp-${tag}-windows-amd64.exe"
+              "wikipedia-multistream-mcp-${tag}-windows-amd64.exe.sha256"
+              "wikipedia-multistream-mcp-${tag}-windows-arm64.exe"
+              "wikipedia-multistream-mcp-${tag}-windows-arm64.exe.sha256"
+            )
+
+            mapfile -t release_assets < <(gh release view "$tag" --json assets --jq '.assets[].name')
+            for asset in "${expected_assets[@]}"; do
+              if ! printf '%s\n' "${release_assets[@]}" | grep -Fxq "$asset"; then
+                echo "Release ${tag} is missing ${asset}."
+                missing=1
+              fi
+            done
+
+            return "$missing"
+          }
+
+          repair_release=false
+          if [[ -n "$latest_tag" ]] && git rev-parse -q --verify "refs/tags/${latest_tag}" >/dev/null; then
+            if [[ "$(git rev-parse HEAD)" == "$(git rev-parse "${latest_tag}")" ]]; then
+              if [[ "${FORCE_REBUILD}" != "true" ]] && release_has_expected_assets "$latest_tag"; then
+                echo "changed=false" >>"$GITHUB_OUTPUT"
+                echo "No changes since ${latest_tag}, and all expected assets exist; skipping release."
+                exit 0
+              fi
+
+              repair_release=true
+              tag="$latest_tag"
+              changelog_range="${latest_tag}..HEAD"
+            else
+              tag="$(scripts/build-number)"
+              changelog_range="${latest_tag}..HEAD"
+            fi
+          else
+            tag="$(scripts/build-number)"
+            changelog_range="HEAD"
+          fi
+
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+          {
+            echo "changed=true"
+            echo "repair_release=${repair_release}"
+            echo "tag=${tag}"
+            echo "short_sha=${short_sha}"
+            echo "built_at=${built_at}"
+          } >>"$GITHUB_OUTPUT"
+
+          {
+            echo "## Wikipedia Multistream MCP ${tag}"
+            echo
+            echo "Rolling release for Linux, macOS, and Windows on AMD64 and ARM64, built from ${short_sha} at ${built_at}."
+            echo
+            echo "### Changelog"
+            echo
+            if [[ "$repair_release" == "true" ]]; then
+              echo "- Rebuilt release assets for ${short_sha}."
+            else
+              git log --no-merges --format='- %s (%h)' "$changelog_range"
+            fi
+          } >release-notes.md
+
+      - name: Run tests
+        if: steps.meta.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          go test ./...
+          go vet ./...
+
+      - name: Build release artifacts
+        if: steps.meta.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          targets=(
+            linux/amd64
+            linux/arm64
+            darwin/amd64
+            darwin/arm64
+            windows/amd64
+            windows/arm64
+          )
+
+          for target in "${targets[@]}"; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            extension=""
+            if [[ "$goos" == "windows" ]]; then
+              extension=".exe"
+            fi
+            asset="wikipedia-multistream-mcp-${VERSION}-${goos}-${goarch}${extension}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -ldflags "-s -w -X github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver.Version=${VERSION}" \
+              -o "dist/${asset}" .
+            (cd dist && sha256sum "$asset" >"${asset}.sha256")
+          done
+
+      - name: Publish GitHub release
+        if: steps.meta.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPAIR_RELEASE: ${{ steps.meta.outputs.repair_release }}
+        run: |
+          set -euo pipefail
+          if [[ "$REPAIR_RELEASE" == "true" ]]; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" \
+              --title "$TAG" \
+              --notes-file release-notes.md
+          else
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              dist/*
+          fi
