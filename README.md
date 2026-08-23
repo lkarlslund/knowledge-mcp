@@ -89,7 +89,10 @@ request. Download and update jobs continue in the backend and must be polled.
 ./wikipedia-multistream-mcp wiki update dawiki
 
 ./wikipedia-multistream-mcp search dawiki "Copenhagen architecture"
+./wikipedia-multistream-mcp search dawiki "Copenhagen architecture" --include-non-articles
 ./wikipedia-multistream-mcp read dawiki "København"
+./wikipedia-multistream-mcp read dawiki "København" --outline
+./wikipedia-multistream-mcp read dawiki "København" --section History
 ./wikipedia-multistream-mcp read dawiki --page-id 12345 --format wikitext
 ```
 
@@ -196,9 +199,9 @@ The server offers these action-specific tools:
 | `wiki_download` | Submit a first-time background download. |
 | `wiki_update` | Submit an update or finish a missing body index. |
 | `wiki_job_status` | Poll one job snapshot by ID or wiki. |
-| `wiki_job` | Status, pause, resume, cancel, or retry a job via `action`. |
-| `wiki_search` | Search titles, then full text when ready. |
-| `wiki_read` | Read an exact page as Markdown by default, plain text, or raw wikitext; follows redirects and section targets. |
+| `wiki_job` | Pause, resume, cancel, or retry a job via `action`; use `wiki_job_status` to poll. |
+| `wiki_search` | Search the offline snapshot with all-term matches first, article-namespace filtering, canonical URLs, and query-centered snippets. |
+| `wiki_read` | Read an exact page or section with an outline, bounded references, and continuation metadata for large articles. |
 
 A download job ends after all compressed files pass size and checksum
 verification. The server then creates a separate indexing job. Fresh downloads
@@ -210,6 +213,15 @@ indexing does not download the dump again. Once a title stage is published, its
 full-text stage returns to the end of the index queue so other downloaded wikis
 become searchable before long body builds monopolize the workers.
 
+`wiki_search` defaults to encyclopedia articles in namespace 0 once full-text
+indexing is ready. Set `include_non_articles: true` to include project,
+category, draft, talk, and other namespaces. Results that contain all analyzed
+query terms across their title and body are returned before relaxed any-term
+matches. Each full-text result includes a query-centered plain-text snippet,
+canonical page URL, page ID, namespace, and match mode. During the temporary
+title-only indexing stage, namespace filtering and snippets are unavailable and
+the response reports that explicitly.
+
 `wiki_read` converts the stored wikitext to agent-friendly Markdown by default.
 It preserves headings, lists, links, tables, infobox fields, images as linked
 descriptions, and citations as footnotes. References used by a paginated chunk
@@ -220,8 +232,18 @@ the exact source is required; `format: "text"` is intentionally lossy.
 Hard redirects are followed by default, including redirect chains. A redirect
 to a section returns only that section and its subsections, with the requested
 page and redirect chain retained as metadata. Set `follow_redirects: false` to
-inspect the redirect stub itself. Reads default to 100,000 characters and may
-request up to 1,000,000 characters using `max_chars`.
+inspect the redirect stub itself. The optional `section` input reads a heading
+directly; the first whole-article chunk includes a bounded section outline that
+can be used for follow-up reads.
+
+MCP reads default to 12,000 article-content characters and accept at most
+50,000. Chunks end on a useful structural or sentence boundary when practical
+and return `offset`, `returned_chars`, `total_chars`, `truncated`, and
+`next_offset`; `next_offset` is present only when another chunk exists.
+Markdown reference definitions used by a chunk are limited to 4,000 characters
+each and 10,000 total, with explicit truncation and omitted-reference metadata.
+The direct CLI retains its 100,000-character default and 1,000,000-character
+maximum.
 
 ## Storage
 
@@ -235,6 +257,10 @@ Runtime data is not committed. Each installed wiki keeps:
 
 Page reads seek to the indexed bzip2 stream and use its stored end offset to
 decompress only that page group, rather than following concatenated streams.
+The body index stores the numeric namespace and exact title in addition to the
+unstored body terms. An upgrade from body-index version 6 to version 7 queues a
+background body-only rebuild from the already downloaded dump; title search and
+page reads remain available and no redownload is required.
 Numeric page IDs are Bleve document IDs instead of duplicated fields. Stream
 offsets are stored but not searchable, while term vectors, catch-all fields,
 and sort/facet doc values are disabled. Search handles are cached read-only, and
