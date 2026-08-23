@@ -42,7 +42,7 @@ func (fakeService) JobAction(id, action string) (model.Job, error) {
 func (fakeService) Search(_ context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
 	return model.SearchResult{Wiki: wiki}, nil
 }
-func (fakeService) Read(_ context.Context, wiki, title string, pageID uint64, format string, offset, maxChars int) (model.Page, error) {
+func (fakeService) Read(_ context.Context, wiki, title string, pageID uint64, format string, offset, maxChars int, _ bool) (model.Page, error) {
 	return model.Page{Wiki: wiki, Title: title, PageID: pageID}, nil
 }
 

@@ -198,7 +198,7 @@ The server offers these action-specific tools:
 | `wiki_job_status` | Poll one job snapshot by ID or wiki. |
 | `wiki_job` | Status, pause, resume, cancel, or retry a job via `action`. |
 | `wiki_search` | Search titles, then full text when ready. |
-| `wiki_read` | Read an exact page as Markdown by default, plain text, or raw wikitext. |
+| `wiki_read` | Read an exact page as Markdown by default, plain text, or raw wikitext; follows redirects and section targets. |
 
 A download job ends after all compressed files pass size and checksum
 verification. The server then creates a separate indexing job. Fresh downloads
@@ -217,6 +217,11 @@ are also returned in the structured `references` field. This is a local syntax
 conversion, not a MediaWiki render: templates and Lua modules cannot be fully
 expanded without a wiki's rendering environment. Use `format: "wikitext"` when
 the exact source is required; `format: "text"` is intentionally lossy.
+Hard redirects are followed by default, including redirect chains. A redirect
+to a section returns only that section and its subsections, with the requested
+page and redirect chain retained as metadata. Set `follow_redirects: false` to
+inspect the redirect stub itself. Reads default to 100,000 characters and may
+request up to 1,000,000 characters using `max_chars`.
 
 ## Storage
 

@@ -13,8 +13,10 @@ import (
 	"html"
 	"io"
 	"math/bits"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -31,14 +33,17 @@ import (
 )
 
 const (
-	TitleIndexDir       = "titles.bleve"
-	BodyIndexDir        = "bodies.bleve"
-	CurrentIndexVersion = 5
-	titleBatchDocs      = 50_000
-	bodyBatchBytes      = 32 << 20
-	bodyBatchStreams    = 512
-	bodyShardCount      = 4
-	bodyShardStreams    = bodyBatchStreams / bodyShardCount
+	TitleIndexDir            = "titles.bleve"
+	BodyIndexDir             = "bodies.bleve"
+	CurrentTitleIndexVersion = 5
+	CurrentBodyIndexVersion  = 6
+	DefaultReadMaxChars      = 100_000
+	MaximumReadMaxChars      = 1_000_000
+	titleBatchDocs           = 50_000
+	bodyBatchBytes           = 32 << 20
+	bodyBatchStreams         = 512
+	bodyShardCount           = 4
+	bodyShardStreams         = bodyBatchStreams / bodyShardCount
 )
 
 type titleDocument struct {
@@ -105,6 +110,9 @@ type Part struct {
 type xmlPage struct {
 	Title    string `xml:"title"`
 	ID       uint64 `xml:"id"`
+	Redirect *struct {
+		Title string `xml:"title,attr"`
+	} `xml:"redirect"`
 	Revision struct {
 		ID        uint64 `xml:"id"`
 		Timestamp string `xml:"timestamp"`
@@ -114,6 +122,8 @@ type xmlPage struct {
 
 type BuildProgress func(done, total int64)
 type TitleBuildProgress func(pages uint64, compressedDone, compressedTotal int64)
+
+var redirectDirectiveRE = regexp.MustCompile(`(?i)^#redirect\s*:?\s*\[\[([^\]|]+)`)
 
 func BuildTitle(ctx context.Context, parts []Part, destination string, progress TitleBuildProgress) (uint64, error) {
 	checkpointPath := destination + ".checkpoint.json"
@@ -365,7 +375,11 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 				pages, decodeErr := decodeStream(workerCtx, io.NewSectionReader(dumps[part.Path], part.Offset, part.End-part.Offset))
 				docs := make([]bodyDocument, 0, len(pages))
 				for _, page := range pages {
-					docs = append(docs, bodyDocument{ID: page.ID, Title: page.Title, Body: PlainText(page.Revision.Text)})
+					body := ""
+					if redirectTarget(page) == "" {
+						body = PlainText(page.Revision.Text)
+					}
+					docs = append(docs, bodyDocument{ID: page.ID, Title: page.Title, Body: body})
 				}
 				select {
 				case results <- decoded{part: part, docs: docs, err: decodeErr}:
@@ -543,7 +557,7 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 
 func newBodyCheckpoint(streams []stream) bodyCheckpoint {
 	return bodyCheckpoint{
-		Version:     CurrentIndexVersion,
+		Version:     CurrentBodyIndexVersion,
 		Shards:      bodyShardCount,
 		Fingerprint: bodyCheckpointFingerprint(streams),
 		Total:       len(streams),
@@ -556,7 +570,7 @@ func newTitleCheckpoint(parts []Part) (titleCheckpoint, int64, error) {
 	if err != nil {
 		return titleCheckpoint{}, 0, err
 	}
-	return titleCheckpoint{Version: CurrentIndexVersion, Fingerprint: fingerprint, Parts: make([]titlePartCheckpoint, len(parts))}, total, nil
+	return titleCheckpoint{Version: CurrentTitleIndexVersion, Fingerprint: fingerprint, Parts: make([]titlePartCheckpoint, len(parts))}, total, nil
 }
 
 func loadTitleCheckpoint(path, destination string, parts []Part) (titleCheckpoint, int64, bool) {
@@ -572,7 +586,7 @@ func loadTitleCheckpoint(path, destination string, parts []Part) (titleCheckpoin
 	if err != nil || json.Unmarshal(data, &checkpoint) != nil {
 		return titleCheckpoint{}, total, false
 	}
-	if checkpoint.Version != CurrentIndexVersion || checkpoint.Fingerprint != fingerprint || len(checkpoint.Parts) != len(parts) || checkpoint.CompressedDone < 0 || checkpoint.CompressedDone > total {
+	if checkpoint.Version != CurrentTitleIndexVersion || checkpoint.Fingerprint != fingerprint || len(checkpoint.Parts) != len(parts) || checkpoint.CompressedDone < 0 || checkpoint.CompressedDone > total {
 		return titleCheckpoint{}, total, false
 	}
 	return checkpoint, total, true
@@ -610,7 +624,7 @@ func loadBodyCheckpoint(path, destination string, streams []stream) (bodyCheckpo
 		return bodyCheckpoint{}, false
 	}
 	wantBytes := (len(streams) + 7) / 8
-	if checkpoint.Version != CurrentIndexVersion || checkpoint.Shards != bodyShardCount || checkpoint.Total != len(streams) || len(checkpoint.Completed) != wantBytes || checkpoint.Fingerprint != bodyCheckpointFingerprint(streams) {
+	if checkpoint.Version != CurrentBodyIndexVersion || checkpoint.Shards != bodyShardCount || checkpoint.Total != len(streams) || len(checkpoint.Completed) != wantBytes || checkpoint.Fingerprint != bodyCheckpointFingerprint(streams) {
 		return bodyCheckpoint{}, false
 	}
 	var done int64
@@ -794,16 +808,106 @@ func ReadPage(generationPath, title string, pageID uint64, format string, start,
 		return model.Page{}, err
 	}
 	defer func() { _ = reader.Close() }()
-	return reader.ReadPage(context.Background(), title, pageID, format, start, maxChars, "")
+	return reader.ReadPage(context.Background(), title, pageID, format, start, maxChars, "", true)
 }
 
-func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, format string, start, maxChars int, baseURL string) (model.Page, error) {
+func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, format string, start, maxChars int, baseURL string, followRedirects bool) (model.Page, error) {
 	if title == "" && pageID == 0 || title != "" && pageID != 0 {
 		return model.Page{}, errors.New("provide exactly one of title or page_id")
 	}
 	if r.title == nil {
 		return model.Page{}, errors.New("title index is not open")
 	}
+	source, err := r.loadPage(ctx, title, pageID)
+	if err != nil {
+		return model.Page{}, err
+	}
+	requestedTitle, requestedPageID := source.Title, source.ID
+	visited := map[uint64]struct{}{source.ID: {}}
+	chain := make([]model.RedirectHop, 0)
+	section := ""
+	for target := redirectTarget(source); target != ""; target = redirectTarget(source) {
+		targetTitle, fragment := splitRedirectTarget(target)
+		chain = append(chain, model.RedirectHop{FromTitle: source.Title, FromPageID: source.ID, ToTitle: targetTitle, Fragment: fragment})
+		if fragment != "" {
+			section = fragment
+		}
+		if !followRedirects {
+			break
+		}
+		if len(chain) > 8 {
+			return model.Page{}, fmt.Errorf("redirect chain from %q exceeds 8 hops", requestedTitle)
+		}
+		source, err = r.loadPage(ctx, targetTitle, 0)
+		if err != nil {
+			return model.Page{}, fmt.Errorf("follow redirect from %q to %q: %w", chain[len(chain)-1].FromTitle, targetTitle, err)
+		}
+		if _, exists := visited[source.ID]; exists {
+			return model.Page{}, fmt.Errorf("redirect loop from %q through %q", requestedTitle, source.Title)
+		}
+		visited[source.ID] = struct{}{}
+	}
+
+	content := source.Revision.Text
+	var references []MarkdownReference
+	var sectionFound *bool
+	switch format {
+	case "", "markdown":
+		document := RenderMarkdown(content, baseURL)
+		format, content, references = "markdown", document.Content, document.References
+		if followRedirects && section != "" {
+			var found bool
+			content, found = extractMarkdownSection(content, section)
+			sectionFound = boolPointer(found)
+		}
+	case "text":
+		if followRedirects && section != "" {
+			var found bool
+			content, found = extractWikitextSection(content, section)
+			sectionFound = boolPointer(found)
+		}
+		content = PlainText(content)
+	case "wikitext":
+		if followRedirects && section != "" {
+			var found bool
+			content, found = extractWikitextSection(content, section)
+			sectionFound = boolPointer(found)
+		}
+	default:
+		return model.Page{}, errors.New("format must be markdown, text, or wikitext")
+	}
+	if start < 0 {
+		start = 0
+	}
+	runes := []rune(content)
+	if start > len(runes) {
+		start = len(runes)
+	}
+	if maxChars <= 0 {
+		maxChars = DefaultReadMaxChars
+	} else if maxChars > MaximumReadMaxChars {
+		maxChars = MaximumReadMaxChars
+	}
+	end := min(start+maxChars, len(runes))
+	excerpt := string(runes[start:end])
+	pageReferences := make([]model.PageReference, 0)
+	for _, reference := range referencedMarkdownDefinitions(excerpt, references) {
+		pageReferences = append(pageReferences, model.PageReference{ID: reference.ID, Name: reference.Name, Content: reference.Content})
+	}
+	pageURLTarget := source.Title
+	returnedSection := ""
+	if followRedirects && section != "" {
+		pageURLTarget += "#" + section
+		returnedSection = section
+	}
+	page := model.Page{PageID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, PageURL: PageURL(baseURL, pageURLTarget), Redirected: len(chain) > 0, RedirectChain: chain, Section: returnedSection, SectionFound: sectionFound, Format: format, Content: excerpt, References: pageReferences, Truncated: end < len(runes), NextOffset: end}
+	if len(chain) > 0 {
+		page.RequestedTitle, page.RequestedPageID = requestedTitle, requestedPageID
+	}
+	return page, nil
+}
+
+func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xmlPage, error) {
 	var q blevequery.Query
 	if pageID != 0 {
 		q = bleve.NewDocIDQuery([]string{strconv.FormatUint(pageID, 10)})
@@ -812,65 +916,139 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, form
 		term.SetField("title_exact")
 		q = term
 	}
-	req := bleve.NewSearchRequestOptions(q, 1, 0, false)
+	limit := 1
+	if title != "" {
+		limit = 20
+	}
+	req := bleve.NewSearchRequestOptions(q, limit, 0, false)
 	req.Fields = []string{"title", "offset", "end", "part"}
 	res, err := r.title.SearchInContext(ctx, req)
 	if err != nil {
-		return model.Page{}, err
+		return xmlPage{}, err
 	}
 	if len(res.Hits) == 0 {
-		return model.Page{}, errors.New("page not found")
+		return xmlPage{}, errors.New("page not found")
 	}
 	hit := res.Hits[0]
+	wantedTitle := strings.ReplaceAll(strings.TrimSpace(title), "_", " ")
+	for _, candidate := range res.Hits {
+		candidateTitle, _ := candidate.Fields["title"].(string)
+		if candidateTitle == wantedTitle {
+			hit = candidate
+			break
+		}
+	}
 	wantedID, _ := strconv.ParseUint(hit.ID, 10, 64)
 	streamOffset := int64(hit.Fields["offset"].(float64))
 	streamEnd := int64(hit.Fields["end"].(float64))
 	partNumber := int(hit.Fields["part"].(float64))
 	dump, err := os.Open(filepath.Join(r.generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", partNumber)))
 	if err != nil {
-		return model.Page{}, err
+		return xmlPage{}, err
 	}
 	defer func() { _ = dump.Close() }()
 	pages, err := decodeStream(ctx, io.NewSectionReader(dump, streamOffset, streamEnd-streamOffset))
 	if err != nil {
-		return model.Page{}, fmt.Errorf("decode page stream: %w", err)
+		return xmlPage{}, fmt.Errorf("decode page stream: %w", err)
 	}
 	for _, source := range pages {
 		if source.ID != wantedID {
 			continue
 		}
-		content := source.Revision.Text
-		var references []MarkdownReference
-		switch format {
-		case "", "markdown":
-			document := RenderMarkdown(content, baseURL)
-			format, content, references = "markdown", document.Content, document.References
-		case "text":
-			content = PlainText(content)
-		case "wikitext":
-		default:
-			return model.Page{}, errors.New("format must be markdown, text, or wikitext")
-		}
-		if start < 0 {
-			start = 0
-		}
-		runes := []rune(content)
-		if start > len(runes) {
-			start = len(runes)
-		}
-		if maxChars <= 0 || maxChars > 100_000 {
-			maxChars = 20_000
-		}
-		end := min(start+maxChars, len(runes))
-		excerpt := string(runes[start:end])
-		pageReferences := make([]model.PageReference, 0)
-		for _, reference := range referencedMarkdownDefinitions(excerpt, references) {
-			pageReferences = append(pageReferences, model.PageReference{ID: reference.ID, Name: reference.Name, Content: reference.Content})
-		}
-		return model.Page{PageID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, PageURL: PageURL(baseURL, source.Title), Format: format, Content: excerpt, References: pageReferences, Truncated: end < len(runes), NextOffset: end}, nil
+		return source, nil
 	}
-	return model.Page{}, errors.New("page was absent from its indexed stream")
+	return xmlPage{}, errors.New("page was absent from its indexed stream")
 }
+
+func redirectTarget(page xmlPage) string {
+	source := strings.TrimPrefix(page.Revision.Text, "\ufeff")
+	match := redirectDirectiveRE.FindStringSubmatch(source)
+	if len(match) >= 2 {
+		return strings.TrimSpace(match[1])
+	}
+	if page.Redirect != nil {
+		return strings.TrimSpace(page.Redirect.Title)
+	}
+	return ""
+}
+
+func splitRedirectTarget(target string) (string, string) {
+	title, fragment, _ := strings.Cut(strings.TrimSpace(target), "#")
+	if decoded, err := url.PathUnescape(fragment); err == nil {
+		fragment = decoded
+	}
+	return strings.TrimSpace(strings.ReplaceAll(title, "_", " ")), strings.TrimSpace(strings.ReplaceAll(fragment, "_", " "))
+}
+
+func extractWikitextSection(content, fragment string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	start, level := -1, 0
+	for index, line := range lines {
+		headingLevel, heading, ok := wikiHeading(line)
+		if !ok || normalizeSectionHeading(heading) != normalizeSectionHeading(fragment) {
+			continue
+		}
+		start, level = index, headingLevel
+		break
+	}
+	if start < 0 {
+		return content, false
+	}
+	end := len(lines)
+	for index := start + 1; index < len(lines); index++ {
+		headingLevel, _, ok := wikiHeading(lines[index])
+		if ok && headingLevel <= level {
+			end = index
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines[start:end], "\n")), true
+}
+
+func extractMarkdownSection(content, fragment string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	start, level := -1, 0
+	for index, line := range lines {
+		headingLevel, heading, ok := markdownHeading(line)
+		if !ok || normalizeSectionHeading(heading) != normalizeSectionHeading(fragment) {
+			continue
+		}
+		start, level = index, headingLevel
+		break
+	}
+	if start < 0 {
+		return content, false
+	}
+	end := len(lines)
+	for index := start + 1; index < len(lines); index++ {
+		headingLevel, _, ok := markdownHeading(lines[index])
+		if ok && headingLevel <= level {
+			end = index
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines[start:end], "\n")), true
+}
+
+func markdownHeading(line string) (int, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	level := 0
+	for level < len(trimmed) && trimmed[level] == '#' {
+		level++
+	}
+	if level == 0 || level > 6 || level >= len(trimmed) || trimmed[level] != ' ' {
+		return 0, "", false
+	}
+	return level, strings.TrimSpace(trimmed[level+1:]), true
+}
+
+func normalizeSectionHeading(value string) string {
+	value = html.UnescapeString(value)
+	value = strings.ReplaceAll(value, "_", " ")
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+func boolPointer(value bool) *bool { return &value }
 
 func referencedMarkdownDefinitions(content string, references []MarkdownReference) []MarkdownReference {
 	if len(references) == 0 {

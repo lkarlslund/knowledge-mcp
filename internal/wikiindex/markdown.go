@@ -648,17 +648,22 @@ func (r *markdownRenderer) renderInline(source string) string {
 			}
 			offset += 4 + end + 3
 		case strings.HasPrefix(source[offset:], "[["):
-			end := strings.Index(source[offset+2:], "]]")
-			if end < 0 {
+			end := skipMarkup(source, offset, "[[", "]]")
+			if end <= offset || end > len(source) {
 				out.WriteString(source[offset:])
 				return out.String()
 			}
-			value := source[offset+2 : offset+2+end]
+			value := source[offset+2 : end-2]
 			parts := splitTopLevel(value, '|')
 			target := strings.TrimSpace(parts[0])
 			label := internalLinkLabel(target, parts[1:])
-			out.WriteString(r.internalLink(target, r.renderFragment(label)))
-			offset += 2 + end + 2
+			if hasASCIIPrefixFold(target, "file:") || hasASCIIPrefixFold(target, "image:") {
+				label = PlainText(label)
+			} else {
+				label = r.renderFragment(label)
+			}
+			out.WriteString(r.internalLink(target, label))
+			offset = end
 		case source[offset] == '[':
 			end := strings.IndexByte(source[offset+1:], ']')
 			if end < 0 {

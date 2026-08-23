@@ -22,7 +22,7 @@ type Service interface {
 	Job(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
 	Search(context.Context, string, string, int, int) (model.SearchResult, error)
-	Read(context.Context, string, string, uint64, string, int, int) (model.Page, error)
+	Read(context.Context, string, string, uint64, string, int, int, bool) (model.Page, error)
 }
 
 type DashboardService interface {
@@ -61,12 +61,13 @@ type searchInput struct {
 }
 
 type readInput struct {
-	Wiki     string `json:"wiki" jsonschema:"installed Wikimedia database name"`
-	Title    string `json:"title,omitempty" jsonschema:"exact page title; mutually exclusive with page_id"`
-	PageID   uint64 `json:"page_id,omitempty" jsonschema:"numeric page identifier; mutually exclusive with title"`
-	Format   string `json:"format,omitempty" jsonschema:"markdown (default), text, or wikitext"`
-	Offset   int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
-	MaxChars int    `json:"max_chars,omitempty" jsonschema:"maximum characters; defaults to 20000 and is capped at 100000"`
+	Wiki            string `json:"wiki" jsonschema:"installed Wikimedia database name"`
+	Title           string `json:"title,omitempty" jsonschema:"exact page title; mutually exclusive with page_id"`
+	PageID          uint64 `json:"page_id,omitempty" jsonschema:"numeric page identifier; mutually exclusive with title"`
+	Format          string `json:"format,omitempty" jsonschema:"markdown (default), text, or wikitext"`
+	Offset          int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
+	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum characters; defaults to 100000 and is capped at 1000000"`
+	FollowRedirects *bool  `json:"follow_redirects,omitempty" jsonschema:"follow redirect chains and extract a targeted section; defaults to true"`
 }
 
 func New(service Service) *mcp.Server {
@@ -105,8 +106,9 @@ func New(service Service) *mcp.Server {
 		out, err := service.Search(ctx, in.Wiki, in.Query, in.Offset, in.Limit)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Markdown preserves links, tables, and footnotes; referenced definitions are included with each paginated result."}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
-		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, in.Format, in.Offset, in.MaxChars)
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Redirects are followed by default; redirects to sections return that section. Markdown preserves links, tables, and footnotes; referenced definitions are included with each paginated result."}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
+		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
+		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, in.Format, in.Offset, in.MaxChars, followRedirects)
 		return nil, out, err
 	})
 	return server

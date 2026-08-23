@@ -22,7 +22,10 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err := os.MkdirAll(partsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;</text></revision></page>`))
+	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;
+== Details ==
+The useful redirected section.</text></revision></page><page><title>Alpha alias</title><id>3</id><redirect title="Alpha Page"/><revision><id>33</id><timestamp>2026-01-03T00:00:00Z</timestamp><text>#REDIRECT [[Alpha Page#Details]]
+unique_redirect_stub_noise</text></revision></page><page><title>Alpha double alias</title><id>4</id><redirect title="Alpha alias"/><revision><id>44</id><timestamp>2026-01-04T00:00:00Z</timestamp><text>#REDIRECT [[Alpha alias]]</text></revision></page>`))
 	second := compressForTest(t, []byte(`<page><title>Beta: Details</title><id>2</id><revision><id>22</id><timestamp>2026-01-02T00:00:00Z</timestamp><text>Beta contains a distinctive platypus phrase.</text></revision></page></mediawiki>`))
 	firstDumpPath := filepath.Join(partsDir, "000.dump.bz2")
 	firstIndexPath := filepath.Join(partsDir, "000.index.bz2")
@@ -31,7 +34,7 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err := os.WriteFile(firstDumpPath, first, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(firstIndexPath, compressForTest(t, []byte("0:1:Alpha Page\n")), 0o644); err != nil {
+	if err := os.WriteFile(firstIndexPath, compressForTest(t, []byte("0:1:Alpha Page\n0:3:Alpha alias\n0:4:Alpha double alias\n")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(secondDumpPath, second, 0o644); err != nil {
@@ -49,8 +52,8 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildTitle: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("page count = %d, want 2", count)
+	if count != 4 {
+		t.Fatalf("page count = %d, want 4", count)
 	}
 	titleResult, err := Search(dir, "Beta", 0, 10, false)
 	if err != nil {
@@ -74,6 +77,22 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err != nil || pageByID.Title != "Beta: Details" {
 		t.Fatalf("ReadPage by document ID = %#v, %v", pageByID, err)
 	}
+	redirectedPage, err := ReadPage(dir, "Alpha double alias", 0, "markdown", 0, 1000)
+	if err != nil {
+		t.Fatalf("ReadPage redirect: %v", err)
+	}
+	if redirectedPage.Title != "Alpha Page" || redirectedPage.RequestedTitle != "Alpha double alias" || len(redirectedPage.RedirectChain) != 2 || redirectedPage.Section != "Details" || redirectedPage.SectionFound == nil || !*redirectedPage.SectionFound || !strings.Contains(redirectedPage.Content, "## Details") || strings.Contains(redirectedPage.Content, "Alpha has") {
+		t.Fatalf("redirected page = %#v", redirectedPage)
+	}
+	reader, err := OpenReader(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirectStub, err := reader.ReadPage(context.Background(), "Alpha alias", 0, "wikitext", 0, 1000, "", false)
+	_ = reader.Close()
+	if err != nil || redirectStub.Title != "Alpha alias" || !redirectStub.Redirected || redirectStub.Section != "" || !strings.HasPrefix(redirectStub.Content, "#REDIRECT") {
+		t.Fatalf("unfollowed redirect = %#v, %v", redirectStub, err)
+	}
 
 	if err := BuildBody(context.Background(), parts, filepath.Join(dir, BodyIndexDir), func(int64, int64) {}); err != nil {
 		t.Fatalf("BuildBody: %v", err)
@@ -84,6 +103,23 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	}
 	if len(bodyResult.Hits) != 1 || bodyResult.Hits[0].PageID != 2 {
 		t.Fatalf("unexpected body hits: %#v", bodyResult.Hits)
+	}
+	redirectNoise, err := Search(dir, "unique_redirect_stub_noise", 0, 10, true)
+	if err != nil || len(redirectNoise.Hits) != 0 {
+		t.Fatalf("redirect stub text was indexed: %#v, %v", redirectNoise.Hits, err)
+	}
+}
+
+func TestSectionExtractionFallsBackWhenFragmentIsMissing(t *testing.T) {
+	t.Parallel()
+	content := "Lead\n\n## Existing\n\nBody"
+	got, found := extractMarkdownSection(content, "Missing")
+	if found || got != content {
+		t.Fatalf("extractMarkdownSection missing = %q, %t", got, found)
+	}
+	got, found = extractMarkdownSection(content, "Existing")
+	if !found || got != "## Existing\n\nBody" {
+		t.Fatalf("extractMarkdownSection existing = %q, %t", got, found)
 	}
 }
 
@@ -191,10 +227,14 @@ func TestMarkdownReferencesSurvivePagination(t *testing.T) {
 
 func TestMarkdownMediaLinkUsesCaption(t *testing.T) {
 	t.Parallel()
-	got := Markdown(`[[File:Example.svg|thumb|20px|A useful diagram]]`, "https://en.wikipedia.org")
-	want := `[Image: A useful diagram](https://en.wikipedia.org/wiki/File:Example.svg)`
-	if got != want {
-		t.Fatalf("Markdown media link = %q, want %q", got, want)
+	tests := map[string]string{
+		`[[File:Example.svg|thumb|20px|A useful diagram]]`: `[Image: A useful diagram](https://en.wikipedia.org/wiki/File:Example.svg)`,
+		`[[File:Square.jpg|thumb|[[Kultorvet]] in 2016]]`:  `[Image: Kultorvet in 2016](https://en.wikipedia.org/wiki/File:Square.jpg)`,
+	}
+	for source, want := range tests {
+		if got := Markdown(source, "https://en.wikipedia.org"); got != want {
+			t.Errorf("Markdown media link = %q, want %q", got, want)
+		}
 	}
 }
 

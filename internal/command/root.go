@@ -14,6 +14,7 @@ import (
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpclient"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/store"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikiindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
 	"github.com/spf13/cobra"
 )
@@ -192,6 +193,7 @@ func newReadCommand(opts *options) *cobra.Command {
 	var pageID uint64
 	var format string
 	var offset, maxChars int
+	var followRedirects bool
 	command := &cobra.Command{
 		Use:   "read WIKI [TITLE]",
 		Short: "Read a local wiki page",
@@ -205,7 +207,7 @@ func newReadCommand(opts *options) *cobra.Command {
 				return errors.New("provide exactly one TITLE or --page-id")
 			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Read(cmd.Context(), args[0], title, pageID, format, offset, maxChars)
+				result, err := client.Read(cmd.Context(), args[0], title, pageID, format, offset, maxChars, followRedirects)
 				return printResult(result, err)
 			})
 		},
@@ -213,7 +215,8 @@ func newReadCommand(opts *options) *cobra.Command {
 	command.Flags().Uint64Var(&pageID, "page-id", 0, "read by numeric page ID")
 	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or wikitext")
 	command.Flags().IntVar(&offset, "offset", 0, "character offset")
-	command.Flags().IntVar(&maxChars, "max-chars", 20_000, "maximum returned characters")
+	command.Flags().IntVar(&maxChars, "max-chars", wikiindex.DefaultReadMaxChars, "maximum returned characters (up to 1000000)")
+	command.Flags().BoolVar(&followRedirects, "follow-redirects", true, "follow redirects and extract targeted sections")
 	return command
 }
 

@@ -90,8 +90,8 @@ func (c *Client) Search(ctx context.Context, wiki, query string, offset, limit i
 	return out, err
 }
 
-func (c *Client) Read(ctx context.Context, wiki, title string, pageID uint64, format string, offset, maxChars int) (model.Page, error) {
+func (c *Client) Read(ctx context.Context, wiki, title string, pageID uint64, format string, offset, maxChars int, followRedirects bool) (model.Page, error) {
 	var out model.Page
-	err := c.Call(ctx, "wiki_read", map[string]any{"wiki": wiki, "title": title, "page_id": pageID, "format": format, "offset": offset, "max_chars": maxChars}, &out)
+	err := c.Call(ctx, "wiki_read", map[string]any{"wiki": wiki, "title": title, "page_id": pageID, "format": format, "offset": offset, "max_chars": maxChars, "follow_redirects": followRedirects}, &out)
 	return out, err
 }

@@ -165,17 +165,30 @@ type SearchResult struct {
 }
 
 type Page struct {
-	Wiki       string          `json:"wiki"`
-	PageID     uint64          `json:"page_id"`
-	RevisionID uint64          `json:"revision_id"`
-	Title      string          `json:"title"`
-	Timestamp  string          `json:"timestamp,omitempty"`
-	PageURL    string          `json:"page_url,omitempty"`
-	Format     string          `json:"format"`
-	Content    string          `json:"content"`
-	References []PageReference `json:"references,omitempty"`
-	Truncated  bool            `json:"truncated"`
-	NextOffset int             `json:"next_offset,omitempty"`
+	Wiki            string          `json:"wiki"`
+	PageID          uint64          `json:"page_id"`
+	RevisionID      uint64          `json:"revision_id"`
+	Title           string          `json:"title"`
+	Timestamp       string          `json:"timestamp,omitempty"`
+	PageURL         string          `json:"page_url,omitempty"`
+	RequestedTitle  string          `json:"requested_title,omitempty"`
+	RequestedPageID uint64          `json:"requested_page_id,omitempty"`
+	Redirected      bool            `json:"redirected,omitempty"`
+	RedirectChain   []RedirectHop   `json:"redirect_chain,omitempty"`
+	Section         string          `json:"section,omitempty"`
+	SectionFound    *bool           `json:"section_found,omitempty"`
+	Format          string          `json:"format"`
+	Content         string          `json:"content"`
+	References      []PageReference `json:"references,omitempty"`
+	Truncated       bool            `json:"truncated"`
+	NextOffset      int             `json:"next_offset,omitempty"`
+}
+
+type RedirectHop struct {
+	FromTitle  string `json:"from_title"`
+	FromPageID uint64 `json:"from_page_id"`
+	ToTitle    string `json:"to_title"`
+	Fragment   string `json:"fragment,omitempty"`
 }
 
 type PageReference struct {

@@ -105,7 +105,7 @@ func (s *Store) queueStaleIndexes() error {
 			continue
 		}
 		manifest, readErr := readManifest(filepath.Join(s.wikiPath(entry.Name()), "manifest.json"))
-		if readErr != nil || manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentIndexVersion && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion {
+		if readErr != nil || manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentTitleIndexVersion && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion {
 			continue
 		}
 		id, idErr := newID()
@@ -178,8 +178,8 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 			continue
 		}
 		local := model.LocalWiki{Manifest: manifest, State: model.StateDownloaded, SearchMode: "none"}
-		local.TitleReady = manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentIndexVersion
-		local.BodyReady = local.TitleReady && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion
+		local.TitleReady = manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentTitleIndexVersion
+		local.BodyReady = local.TitleReady && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion
 		if local.TitleReady {
 			local.State, local.SearchMode = model.StateTitleReady, "title"
 		}
@@ -522,11 +522,11 @@ func isTerminal(state string) bool {
 func (s *Store) Search(ctx context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
-	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
+	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
 		s.mu.RUnlock()
 		return model.SearchResult{}, fmt.Errorf("wiki %s is not title-ready", wiki)
 	}
-	fullText := manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion
+	fullText := manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion
 	reader, err := s.reader(s.wikiPath(wiki), fullText)
 	if err != nil {
 		s.mu.RUnlock()
@@ -546,10 +546,10 @@ func (s *Store) Search(ctx context.Context, wiki, query string, offset, limit in
 	return result, nil
 }
 
-func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
+func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, format string, start, maxChars int, followRedirects bool) (model.Page, error) {
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
-	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
+	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
 		s.mu.RUnlock()
 		return model.Page{}, fmt.Errorf("wiki %s is not title-ready", wiki)
 	}
@@ -564,7 +564,7 @@ func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, for
 		return model.Page{}, err
 	}
 	defer release()
-	page, err := reader.ReadPage(ctx, title, pageID, format, start, maxChars, manifest.Site.OnlineSourceURL)
+	page, err := reader.ReadPage(ctx, title, pageID, format, start, maxChars, manifest.Site.OnlineSourceURL, followRedirects)
 	page.Wiki = wiki
 	return page, err
 }
@@ -786,7 +786,7 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		return false
 	}
 	titleBuilt := false
-	if !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
+	if !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
 		temporary := filepath.Join(path, wikiindex.TitleIndexDir+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
 		count, buildErr := wikiindex.BuildTitle(ctx, generationParts(path, manifest.PartCount), temporary, func(pages uint64, compressedDone, compressedTotal int64) {
@@ -804,8 +804,8 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 			replaceErr = os.Rename(temporary, final)
 		}
 		if replaceErr == nil {
-			manifest.PageCount, manifest.TitleReady, manifest.TitleIndexVersion, manifest.PublishedAt = count, true, wikiindex.CurrentIndexVersion, time.Now().UTC()
-			if manifest.BodyIndexVersion != wikiindex.CurrentIndexVersion {
+			manifest.PageCount, manifest.TitleReady, manifest.TitleIndexVersion, manifest.PublishedAt = count, true, wikiindex.CurrentTitleIndexVersion, time.Now().UTC()
+			if manifest.BodyIndexVersion != wikiindex.CurrentBodyIndexVersion {
 				manifest.BodyReady = false
 			}
 			replaceErr = writeJSON(filepath.Join(path, "manifest.json"), manifest)
@@ -829,7 +829,7 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		_ = s.saveJobsLocked()
 	}
 	s.mu.Unlock()
-	if manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion {
+	if manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion {
 		s.finishJob(id, model.StateReady, "title and full-text indexes are ready")
 		return false
 	}
@@ -862,7 +862,7 @@ func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.M
 		s.failJobLocked(id, err)
 		return
 	}
-	manifest.BodyReady, manifest.BodyIndexVersion = true, wikiindex.CurrentIndexVersion
+	manifest.BodyReady, manifest.BodyIndexVersion = true, wikiindex.CurrentBodyIndexVersion
 	if err := writeJSON(filepath.Join(path, "manifest.json"), manifest); err != nil {
 		s.failJobLocked(id, err)
 		return
