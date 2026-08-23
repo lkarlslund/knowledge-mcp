@@ -176,7 +176,7 @@ func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	indexPath := filepath.Join(dir, "index.bz2")
 	var sourceIndex bytes.Buffer
-	const pageCount = 5100
+	const pageCount = titleBatchDocs + 100
 	for pageID := 1; pageID <= pageCount; pageID++ {
 		fmt.Fprintf(&sourceIndex, "0:%d:Checkpoint Page %d\n", pageID, pageID)
 	}
@@ -188,7 +188,7 @@ func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	_, err := BuildTitle(ctx, parts, destination, func(pages uint64, _, _ int64) {
-		if pages >= 5000 {
+		if pages >= titleBatchDocs {
 			cancel()
 		}
 	})
@@ -196,7 +196,7 @@ func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
 		t.Fatalf("first BuildTitle error = %v, want context.Canceled", err)
 	}
 	checkpoint, _, ok := loadTitleCheckpoint(destination+".checkpoint.json", destination, parts)
-	if !ok || checkpoint.Pages != 5000 || checkpoint.Parts[0].Lines != 5000 || checkpoint.Parts[0].Complete {
+	if !ok || checkpoint.Pages != titleBatchDocs || checkpoint.Parts[0].Lines != titleBatchDocs || checkpoint.Parts[0].Complete {
 		t.Fatalf("checkpoint = %#v, valid %v", checkpoint, ok)
 	}
 
@@ -215,7 +215,7 @@ func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
 	if _, err := os.Stat(destination + ".checkpoint.json"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("completed checkpoint still exists: %v", err)
 	}
-	result, err := Search(dir, "Checkpoint Page 5100", 0, 10, false)
+	result, err := Search(dir, fmt.Sprintf("Checkpoint Page %d", pageCount), 0, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}

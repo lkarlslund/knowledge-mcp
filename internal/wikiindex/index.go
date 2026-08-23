@@ -34,7 +34,8 @@ import (
 const (
 	TitleIndexDir       = "titles.bleve"
 	BodyIndexDir        = "bodies.bleve"
-	CurrentIndexVersion = 2
+	CurrentIndexVersion = 3
+	titleBatchDocs      = 50_000
 	bodyBatchBytes      = 32 << 20
 )
 
@@ -207,7 +208,7 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 			}
 			count++
 			batchCount++
-			if batchCount >= 5000 {
+			if batchCount >= titleBatchDocs {
 				if err := commit(false); err != nil {
 					_ = f.Close()
 					return 0, err
@@ -521,6 +522,8 @@ type Reader struct {
 	generationPath string
 	title          bleve.Index
 	body           bleve.Index
+	mu             sync.RWMutex
+	closed         bool
 }
 
 func OpenReader(generationPath string, fullText bool) (*Reader, error) {
@@ -542,6 +545,12 @@ func OpenReader(generationPath string, fullText bool) (*Reader, error) {
 }
 
 func (r *Reader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 	var errs []error
 	if r.body != nil {
 		errs = append(errs, r.body.Close())
@@ -550,6 +559,15 @@ func (r *Reader) Close() error {
 		errs = append(errs, r.title.Close())
 	}
 	return errors.Join(errs...)
+}
+
+func (r *Reader) Retain() (func(), error) {
+	r.mu.RLock()
+	if r.closed {
+		r.mu.RUnlock()
+		return nil, errors.New("index reader is closed")
+	}
+	return r.mu.RUnlock, nil
 }
 
 func Search(generationPath, query string, offset, limit int, fullText bool) (model.SearchResult, error) {

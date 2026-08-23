@@ -446,16 +446,23 @@ func isTerminal(state string) bool {
 
 func (s *Store) Search(ctx context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
 	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
+		s.mu.RUnlock()
 		return model.SearchResult{}, fmt.Errorf("wiki %s is not title-ready", wiki)
 	}
 	fullText := manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentIndexVersion
 	reader, err := s.reader(s.wikiPath(wiki), fullText)
 	if err != nil {
+		s.mu.RUnlock()
 		return model.SearchResult{}, err
 	}
+	release, err := reader.Retain()
+	s.mu.RUnlock()
+	if err != nil {
+		return model.SearchResult{}, err
+	}
+	defer release()
 	result, err := reader.Search(ctx, query, offset, limit, fullText)
 	if err != nil {
 		return result, err
@@ -466,15 +473,22 @@ func (s *Store) Search(ctx context.Context, wiki, query string, offset, limit in
 
 func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
 	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentIndexVersion {
+		s.mu.RUnlock()
 		return model.Page{}, fmt.Errorf("wiki %s is not title-ready", wiki)
 	}
 	reader, err := s.reader(s.wikiPath(wiki), false)
 	if err != nil {
+		s.mu.RUnlock()
 		return model.Page{}, err
 	}
+	release, err := reader.Retain()
+	s.mu.RUnlock()
+	if err != nil {
+		return model.Page{}, err
+	}
+	defer release()
 	page, err := reader.ReadPage(ctx, title, pageID, format, start, maxChars)
 	page.Wiki = wiki
 	return page, err
