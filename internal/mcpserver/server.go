@@ -50,7 +50,7 @@ type jobStatusInput struct {
 
 type jobInput struct {
 	JobID  string `json:"job_id" jsonschema:"job identifier returned by a background operation"`
-	Action string `json:"action" jsonschema:"one of status, pause, resume, cancel, or retry"`
+	Action string `json:"action" jsonschema:"one of pause, resume, cancel, or retry; use wiki_job_status to inspect a job"`
 }
 
 type searchInput struct {
@@ -72,46 +72,57 @@ type readInput struct {
 
 func New(service Service) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "wikipedia-multistream-mcp", Version: Version}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_available", Description: "List and filter Wikimedia wikis with completed online multistream article dumps."}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_available", Description: "List and filter Wikimedia wikis with completed online multistream article dumps.", Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
 		out, err := service.ListAvailable(ctx, in.Filter, in.Offset, in.Limit, in.Refresh)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_local", Description: "List local wikis with human-readable project, language, content scope, online source, content size, snapshot date, and search capability metadata."}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalWikiSummary, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_local", Description: "List local wikis with human-readable project, language, content scope, online source, content size, snapshot date, and search capability metadata.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalWikiSummary, error) {
 		out, err := service.ListLocalSummary()
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_download", Description: "Submit a background download for a new wiki and return immediately with a job ID."}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_download", Description: "Submit a background download for a new wiki and return immediately with a job ID.", Annotations: changingAnnotations(false, true)}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
 		out, err := service.Submit(in.Wiki, "download")
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_update", Description: "Submit a background update for an installed wiki and return immediately with a job ID."}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_update", Description: "Submit a background update for an installed wiki and return immediately with a job ID.", Annotations: changingAnnotations(true, true)}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
 		out, err := service.Submit(in.Wiki, "update")
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job_status", Description: "Poll one download/update job by job ID or wiki name."}, func(_ context.Context, _ *mcp.CallToolRequest, in jobStatusInput) (*mcp.CallToolResult, model.Job, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job_status", Description: "Poll one download/update job by job ID or wiki name.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobStatusInput) (*mcp.CallToolResult, model.Job, error) {
 		if in.JobID == "" && in.Wiki == "" {
 			return nil, model.Job{}, errors.New("provide job_id or wiki")
 		}
 		out, err := service.Job(in.JobID, in.Wiki)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job", Description: "Inspect or control a background job using action status, pause, resume, cancel, or retry."}, func(_ context.Context, _ *mcp.CallToolRequest, in jobInput) (*mcp.CallToolResult, model.Job, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job", Description: "Control a background job using action pause, resume, cancel, or retry. Use wiki_job_status to inspect progress.", Annotations: changingAnnotations(true, false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobInput) (*mcp.CallToolResult, model.Job, error) {
 		if in.JobID == "" {
 			return nil, model.Job{}, errors.New("provide job_id")
+		}
+		if in.Action != "pause" && in.Action != "resume" && in.Action != "cancel" && in.Action != "retry" {
+			return nil, model.Job{}, errors.New("action must be pause, resume, cancel, or retry; use wiki_job_status to inspect a job")
 		}
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed wiki. Uses title search as soon as published and full-text search when body indexing finishes."}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed wiki. Uses title search as soon as published and full-text search when body indexing finishes.", Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
 		out, err := service.Search(ctx, in.Wiki, in.Query, in.Offset, in.Limit)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Redirects are followed by default; redirects to sections return that section. Markdown preserves links, tables, and footnotes; referenced definitions are included with each paginated result."}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Redirects are followed by default; redirects to sections return that section. Markdown preserves links, tables, and footnotes; referenced definitions are included with each paginated result.", Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
 		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
 		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, in.Format, in.Offset, in.MaxChars, followRedirects)
 		return nil, out, err
 	})
 	return server
+}
+
+func readOnlyAnnotations(openWorld bool) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}
+}
+
+func changingAnnotations(destructive, openWorld bool) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &openWorld}
 }
 
 func ServeHTTP(ctx context.Context, listen string, service DashboardService) error {
@@ -120,7 +131,7 @@ func ServeHTTP(ctx context.Context, listen string, service DashboardService) err
 	if err != nil {
 		return err
 	}
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return New(service) }, &mcp.StreamableHTTPOptions{JSONResponse: true})
+	handler := httpHandler(service)
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", handler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -139,6 +150,16 @@ func ServeHTTP(ctx context.Context, listen string, service DashboardService) err
 		return fmt.Errorf("serve MCP HTTP: %w", err)
 	}
 	return nil
+}
+
+func httpHandler(service Service) http.Handler {
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return New(service) }, &mcp.StreamableHTTPOptions{
+		Stateless:                    true,
+		JSONResponse:                 true,
+		MaxRequestBodyBytes:          1 << 20,
+		PropagateRequestCancellation: true,
+	})
+	return http.NewCrossOriginProtection().Handler(handler)
 }
 
 func ServeStdio(ctx context.Context, service Service) error {

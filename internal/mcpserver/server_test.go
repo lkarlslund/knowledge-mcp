@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -64,23 +66,60 @@ func TestToolsAndStructuredCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{
-		"wiki_list_available": false,
-		"wiki_list_local":     false,
-		"wiki_download":       false,
-		"wiki_update":         false,
-		"wiki_job_status":     false,
-		"wiki_job":            false,
-		"wiki_search":         false,
-		"wiki_read":           false,
+	type annotationExpectation struct {
+		found       bool
+		readOnly    bool
+		destructive *bool
+		openWorld   bool
+	}
+	boolPointer := func(value bool) *bool { return &value }
+	want := map[string]annotationExpectation{
+		"wiki_list_available": {readOnly: true, openWorld: true},
+		"wiki_list_local":     {readOnly: true, openWorld: false},
+		"wiki_download":       {destructive: boolPointer(false), openWorld: true},
+		"wiki_update":         {destructive: boolPointer(true), openWorld: true},
+		"wiki_job_status":     {readOnly: true, openWorld: false},
+		"wiki_job":            {destructive: boolPointer(true), openWorld: false},
+		"wiki_search":         {readOnly: true, openWorld: false},
+		"wiki_read":           {readOnly: true, openWorld: false},
 	}
 	for _, tool := range tools.Tools {
-		if _, ok := want[tool.Name]; ok {
-			want[tool.Name] = true
+		expectation, ok := want[tool.Name]
+		if !ok {
+			continue
+		}
+		expectation.found = true
+		want[tool.Name] = expectation
+		if tool.Annotations == nil {
+			t.Errorf("tool %s has no annotations", tool.Name)
+			continue
+		}
+		if tool.OutputSchema == nil {
+			t.Errorf("tool %s has no output schema", tool.Name)
+		}
+		if tool.Annotations.ReadOnlyHint != expectation.readOnly {
+			t.Errorf("tool %s readOnlyHint = %v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, expectation.readOnly)
+		}
+		if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint != expectation.openWorld {
+			t.Errorf("tool %s openWorldHint = %v, want %v", tool.Name, tool.Annotations.OpenWorldHint, expectation.openWorld)
+		}
+		if expectation.destructive == nil {
+			if tool.Annotations.DestructiveHint != nil {
+				t.Errorf("tool %s destructiveHint = %v, want omitted", tool.Name, *tool.Annotations.DestructiveHint)
+			}
+		} else if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint != *expectation.destructive {
+			t.Errorf("tool %s destructiveHint = %v, want %v", tool.Name, tool.Annotations.DestructiveHint, *expectation.destructive)
 		}
 	}
-	for name, found := range want {
-		if !found {
+	invalidJob, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "wiki_job", Arguments: map[string]any{"job_id": "job", "action": "status"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !invalidJob.IsError {
+		t.Fatalf("wiki_job status action unexpectedly succeeded: %#v", invalidJob)
+	}
+	for name, expectation := range want {
+		if !expectation.found {
 			t.Errorf("tool %s was not registered", name)
 		}
 	}
@@ -105,5 +144,27 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		if strings.Contains(text, field) {
 			t.Errorf("wiki_list_local exposes operational field %s: %s", field, text)
 		}
+	}
+}
+
+func TestHTTPHandlerIsStatelessAndRejectsCrossOriginRequests(t *testing.T) {
+	t.Parallel()
+	handler := httpHandler(fakeService{})
+
+	get := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/mcp", nil)
+	get.Host = "127.0.0.1"
+	getResponse := httptest.NewRecorder()
+	handler.ServeHTTP(getResponse, get)
+	if getResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("stateless GET status = %d, want 405", getResponse.Code)
+	}
+
+	crossOrigin := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", strings.NewReader(`{}`))
+	crossOrigin.Host = "127.0.0.1"
+	crossOrigin.Header.Set("Origin", "https://attacker.example")
+	crossOriginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(crossOriginResponse, crossOrigin)
+	if crossOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin POST status = %d, want 403", crossOriginResponse.Code)
 	}
 }
