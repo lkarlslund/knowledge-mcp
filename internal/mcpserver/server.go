@@ -64,7 +64,7 @@ type readInput struct {
 	Wiki     string `json:"wiki" jsonschema:"installed Wikimedia database name"`
 	Title    string `json:"title,omitempty" jsonschema:"exact page title; mutually exclusive with page_id"`
 	PageID   uint64 `json:"page_id,omitempty" jsonschema:"numeric page identifier; mutually exclusive with title"`
-	Format   string `json:"format,omitempty" jsonschema:"text (default) or wikitext"`
+	Format   string `json:"format,omitempty" jsonschema:"markdown (default), text, or wikitext"`
 	Offset   int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
 	MaxChars int    `json:"max_chars,omitempty" jsonschema:"maximum characters; defaults to 20000 and is capped at 100000"`
 }
@@ -105,7 +105,7 @@ func New(service Service) *mcp.Server {
 		out, err := service.Search(ctx, in.Wiki, in.Query, in.Offset, in.Limit)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as plain text or raw wikitext."}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Markdown preserves links, tables, and footnotes; referenced definitions are included with each paginated result."}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
 		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, in.Format, in.Offset, in.MaxChars)
 		return nil, out, err
 	})

@@ -794,10 +794,10 @@ func ReadPage(generationPath, title string, pageID uint64, format string, start,
 		return model.Page{}, err
 	}
 	defer func() { _ = reader.Close() }()
-	return reader.ReadPage(context.Background(), title, pageID, format, start, maxChars)
+	return reader.ReadPage(context.Background(), title, pageID, format, start, maxChars, "")
 }
 
-func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
+func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, format string, start, maxChars int, baseURL string) (model.Page, error) {
 	if title == "" && pageID == 0 || title != "" && pageID != 0 {
 		return model.Page{}, errors.New("provide exactly one of title or page_id")
 	}
@@ -840,10 +840,16 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, form
 			continue
 		}
 		content := source.Revision.Text
-		if format == "" || format == "text" {
-			format, content = "text", PlainText(content)
-		} else if format != "wikitext" {
-			return model.Page{}, errors.New("format must be text or wikitext")
+		var references []MarkdownReference
+		switch format {
+		case "", "markdown":
+			document := RenderMarkdown(content, baseURL)
+			format, content, references = "markdown", document.Content, document.References
+		case "text":
+			content = PlainText(content)
+		case "wikitext":
+		default:
+			return model.Page{}, errors.New("format must be markdown, text, or wikitext")
 		}
 		if start < 0 {
 			start = 0
@@ -856,9 +862,28 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, form
 			maxChars = 20_000
 		}
 		end := min(start+maxChars, len(runes))
-		return model.Page{PageID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, Format: format, Content: string(runes[start:end]), Truncated: end < len(runes), NextOffset: end}, nil
+		excerpt := string(runes[start:end])
+		pageReferences := make([]model.PageReference, 0)
+		for _, reference := range referencedMarkdownDefinitions(excerpt, references) {
+			pageReferences = append(pageReferences, model.PageReference{ID: reference.ID, Name: reference.Name, Content: reference.Content})
+		}
+		return model.Page{PageID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, PageURL: PageURL(baseURL, source.Title), Format: format, Content: excerpt, References: pageReferences, Truncated: end < len(runes), NextOffset: end}, nil
 	}
 	return model.Page{}, errors.New("page was absent from its indexed stream")
+}
+
+func referencedMarkdownDefinitions(content string, references []MarkdownReference) []MarkdownReference {
+	if len(references) == 0 {
+		return nil
+	}
+	result := make([]MarkdownReference, 0)
+	for _, reference := range references {
+		marker := "[^" + strconv.Itoa(reference.ID) + "]"
+		if strings.Contains(content, marker) {
+			result = append(result, reference)
+		}
+	}
+	return result
 }
 
 func parseIndexLine(line string) (int64, uint64, string, error) {

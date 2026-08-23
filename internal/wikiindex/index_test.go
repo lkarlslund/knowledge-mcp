@@ -22,7 +22,7 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err := os.MkdirAll(partsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.</text></revision></page>`))
+	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;</text></revision></page>`))
 	second := compressForTest(t, []byte(`<page><title>Beta: Details</title><id>2</id><revision><id>22</id><timestamp>2026-01-02T00:00:00Z</timestamp><text>Beta contains a distinctive platypus phrase.</text></revision></page></mediawiki>`))
 	firstDumpPath := filepath.Join(partsDir, "000.dump.bz2")
 	firstIndexPath := filepath.Join(partsDir, "000.index.bz2")
@@ -65,6 +65,10 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	}
 	if page.PageID != 2 || page.Content != "Beta contains a distinctive platypus phrase." {
 		t.Fatalf("unexpected page: %#v", page)
+	}
+	markdownPage, err := ReadPage(dir, "Alpha Page", 0, "", 0, 1000)
+	if err != nil || markdownPage.Format != "markdown" || !strings.Contains(markdownPage.Content, "[useful label](wiki:Useful_link)") || !strings.Contains(markdownPage.Content, "**template:** noise") || len(markdownPage.References) != 1 || markdownPage.References[0].Content != "A cited source." {
+		t.Fatalf("default Markdown page = %#v, %v", markdownPage, err)
 	}
 	pageByID, err := ReadPage(dir, "", 2, "wikitext", 0, 1000)
 	if err != nil || pageByID.Title != "Beta: Details" {
@@ -119,6 +123,78 @@ func TestPlainText(t *testing.T) {
 		if got := PlainText(input); got != want {
 			t.Errorf("PlainText(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestMarkdownPreservesAgentUsefulStructure(t *testing.T) {
+	t.Parallel()
+	source := `== History ==
+Text with [[Target page|a linked item]] and [https://example.test external source].<ref name="source">{{Cite web|title=Primary source|url=https://source.test/report|website=Example|date=2026}}</ref>
+
+* First item
+* Second item
+
+{| class="wikitable"
+|+ Population
+! Year !! People
+|-
+| 2020 || 10
+|-
+| 2021 || 12
+|}
+
+{{Infobox place
+| name = Test City
+| country = [[Denmark]]
+}}
+
+== References ==
+{{reflist}}`
+
+	got := Markdown(source, "https://en.wikipedia.org")
+	for _, want := range []string{
+		"## History",
+		"[a linked item](https://en.wikipedia.org/wiki/Target_page)",
+		"[external source](https://example.test)",
+		"[^1]",
+		"- First item",
+		"**Population**",
+		"| **Year** | **People** |",
+		"| 2020 | 10 |",
+		"| Infobox place | |",
+		"[Denmark](https://en.wikipedia.org/wiki/Denmark)",
+		"## References",
+		"[^1]: [Primary source](https://source.test/report). Example. 2026",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Markdown output does not contain %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"{{", "[[", "<ref"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("Markdown output retains %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestMarkdownReferencesSurvivePagination(t *testing.T) {
+	t.Parallel()
+	document := RenderMarkdown(`Lead sentence.<ref name="source">{{Cite web|title=Primary source|url=https://source.test/report}}</ref>`+strings.Repeat(" More text.", 100), "https://en.wikipedia.org")
+	if len(document.References) != 1 || document.References[0].Name != "source" || !strings.Contains(document.References[0].Content, "[Primary source](https://source.test/report)") {
+		t.Fatalf("references = %#v", document.References)
+	}
+	references := referencedMarkdownDefinitions(document.Content[:50], document.References)
+	if len(references) != 1 || references[0].ID != 1 {
+		t.Fatalf("paginated references = %#v", references)
+	}
+}
+
+func TestMarkdownMediaLinkUsesCaption(t *testing.T) {
+	t.Parallel()
+	got := Markdown(`[[File:Example.svg|thumb|20px|A useful diagram]]`, "https://en.wikipedia.org")
+	want := `[Image: A useful diagram](https://en.wikipedia.org/wiki/File:Example.svg)`
+	if got != want {
+		t.Fatalf("Markdown media link = %q, want %q", got, want)
 	}
 }
 

@@ -211,7 +211,7 @@ func newReadCommand(opts *options) *cobra.Command {
 		},
 	}
 	command.Flags().Uint64Var(&pageID, "page-id", 0, "read by numeric page ID")
-	command.Flags().StringVar(&format, "format", "text", "text or wikitext")
+	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or wikitext")
 	command.Flags().IntVar(&offset, "offset", 0, "character offset")
 	command.Flags().IntVar(&maxChars, "max-chars", 20_000, "maximum returned characters")
 	return command

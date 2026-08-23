@@ -8,9 +8,13 @@ the full-text body index continues building in the background.
 
 ![Wikipedia Multistream MCP dashboard in dark mode](docs/dashboard-dark.png)
 
-> Wikimedia marks the XML dump family as deprecated. This project deliberately
-> targets `pages-articles-multistream` because its companion offset index enables
-> efficient random access to compressed page groups.
+> Wikimedia has deprecated its legacy database-backup XML pipeline in favor of
+> [MediaWiki Content File Exports](https://wikitech.wikimedia.org/wiki/MediaWiki_Content_File_Exports),
+> which also use compressed XML. This project currently targets the legacy
+> `pages-articles-multistream` artifacts because their companion offset index
+> enables efficient random access to compressed page groups. The replacement
+> exports do not provide an equivalent multistream offset map, so adopting them
+> requires a local repacking/indexing migration rather than a URL change.
 
 ## Build and run
 
@@ -202,7 +206,7 @@ The server offers these action-specific tools:
 | `wiki_job_status` | Poll one job snapshot by ID or wiki. |
 | `wiki_job` | Status, pause, resume, cancel, or retry a job via `action`. |
 | `wiki_search` | Search titles, then full text when ready. |
-| `wiki_read` | Read an exact page as text or wikitext. |
+| `wiki_read` | Read an exact page as Markdown by default, plain text, or raw wikitext. |
 
 A download job ends after all compressed files pass size and checksum
 verification. The server then creates a separate indexing job. Fresh downloads
@@ -213,6 +217,14 @@ replaces the old one only after its title index is ready. Retrying failed
 indexing does not download the dump again. Once a title stage is published, its
 full-text stage returns to the end of the index queue so other downloaded wikis
 become searchable before long body builds monopolize the workers.
+
+`wiki_read` converts the stored wikitext to agent-friendly Markdown by default.
+It preserves headings, lists, links, tables, infobox fields, images as linked
+descriptions, and citations as footnotes. References used by a paginated chunk
+are also returned in the structured `references` field. This is a local syntax
+conversion, not a MediaWiki render: templates and Lua modules cannot be fully
+expanded without a wiki's rendering environment. Use `format: "wikitext"` when
+the exact source is required; `format: "text"` is intentionally lossy.
 
 ## Storage
 

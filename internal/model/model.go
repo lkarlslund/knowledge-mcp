@@ -165,13 +165,21 @@ type SearchResult struct {
 }
 
 type Page struct {
-	Wiki       string `json:"wiki"`
-	PageID     uint64 `json:"page_id"`
-	RevisionID uint64 `json:"revision_id"`
-	Title      string `json:"title"`
-	Timestamp  string `json:"timestamp,omitempty"`
-	Format     string `json:"format"`
-	Content    string `json:"content"`
-	Truncated  bool   `json:"truncated"`
-	NextOffset int    `json:"next_offset,omitempty"`
+	Wiki       string          `json:"wiki"`
+	PageID     uint64          `json:"page_id"`
+	RevisionID uint64          `json:"revision_id"`
+	Title      string          `json:"title"`
+	Timestamp  string          `json:"timestamp,omitempty"`
+	PageURL    string          `json:"page_url,omitempty"`
+	Format     string          `json:"format"`
+	Content    string          `json:"content"`
+	References []PageReference `json:"references,omitempty"`
+	Truncated  bool            `json:"truncated"`
+	NextOffset int             `json:"next_offset,omitempty"`
+}
+
+type PageReference struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name,omitempty"`
+	Content string `json:"content"`
 }

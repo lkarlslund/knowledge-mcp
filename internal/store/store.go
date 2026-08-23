@@ -564,7 +564,7 @@ func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, for
 		return model.Page{}, err
 	}
 	defer release()
-	page, err := reader.ReadPage(ctx, title, pageID, format, start, maxChars)
+	page, err := reader.ReadPage(ctx, title, pageID, format, start, maxChars, manifest.Site.OnlineSourceURL)
 	page.Wiki = wiki
 	return page, err
 }
