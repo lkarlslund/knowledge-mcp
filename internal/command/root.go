@@ -13,6 +13,7 @@ import (
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpclient"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/store"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikiindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
@@ -173,19 +174,22 @@ func newWikiCommand(opts *options) *cobra.Command {
 
 func newSearchCommand(opts *options) *cobra.Command {
 	var offset, limit int
+	var includeNonArticles, noSnippets bool
 	command := &cobra.Command{
 		Use:   "search WIKI QUERY",
 		Short: "Search titles or full text in a local wiki",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Search(cmd.Context(), args[0], args[1], offset, limit)
+				result, err := client.Search(cmd.Context(), args[0], args[1], model.SearchOptions{Offset: offset, Limit: limit, IncludeNonArticles: includeNonArticles, Snippets: !noSnippets})
 				return printResult(result, err)
 			})
 		},
 	}
 	command.Flags().IntVar(&offset, "offset", 0, "result offset")
 	command.Flags().IntVar(&limit, "limit", 10, "maximum results (up to 50)")
+	command.Flags().BoolVar(&includeNonArticles, "include-non-articles", false, "include project, category, draft, talk, and other namespaces")
+	command.Flags().BoolVar(&noSnippets, "no-snippets", false, "omit query-centered result snippets")
 	return command
 }
 

@@ -519,7 +519,7 @@ func isTerminal(state string) bool {
 	return state == model.StateDownloaded || state == model.StateReady || state == model.StateUpToDate || state == model.StateFailed || state == model.StateCanceled
 }
 
-func (s *Store) Search(ctx context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
+func (s *Store) Search(ctx context.Context, wiki, query string, options model.SearchOptions) (model.SearchResult, error) {
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
 	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
@@ -538,11 +538,14 @@ func (s *Store) Search(ctx context.Context, wiki, query string, offset, limit in
 		return model.SearchResult{}, err
 	}
 	defer release()
-	result, err := reader.Search(ctx, query, offset, limit, fullText)
+	result, err := reader.Search(ctx, query, options, fullText)
 	if err != nil {
 		return result, err
 	}
 	result.Wiki = wiki
+	for index := range result.Hits {
+		result.Hits[index].PageURL = wikiindex.PageURL(manifest.Site.OnlineSourceURL, result.Hits[index].Title)
+	}
 	return result, nil
 }
 

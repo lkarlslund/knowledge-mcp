@@ -21,7 +21,7 @@ type Service interface {
 	Submit(string, string) (model.Job, error)
 	Job(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
-	Search(context.Context, string, string, int, int) (model.SearchResult, error)
+	Search(context.Context, string, string, model.SearchOptions) (model.SearchResult, error)
 	Read(context.Context, string, string, uint64, string, int, int, bool) (model.Page, error)
 }
 
@@ -54,10 +54,12 @@ type jobInput struct {
 }
 
 type searchInput struct {
-	Wiki   string `json:"wiki" jsonschema:"installed Wikimedia database name"`
-	Query  string `json:"query" jsonschema:"plain text search query"`
-	Offset int    `json:"offset,omitempty" jsonschema:"zero-based result offset"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"result count; defaults to 10 and is capped at 50"`
+	Wiki               string `json:"wiki" jsonschema:"installed Wikimedia database name"`
+	Query              string `json:"query" jsonschema:"plain text search query"`
+	Offset             int    `json:"offset,omitempty" jsonschema:"zero-based result offset"`
+	Limit              int    `json:"limit,omitempty" jsonschema:"result count; defaults to 10 and is capped at 50"`
+	IncludeNonArticles bool   `json:"include_non_articles,omitempty" jsonschema:"include project, category, draft, talk, and other non-article namespaces; defaults to false"`
+	Snippets           *bool  `json:"snippets,omitempty" jsonschema:"include query-centered result passages; defaults to true"`
 }
 
 type readInput struct {
@@ -105,8 +107,9 @@ func New(service Service) *mcp.Server {
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed wiki. Uses title search as soon as published and full-text search when body indexing finishes.", Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
-		out, err := service.Search(ctx, in.Wiki, in.Query, in.Offset, in.Limit)
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed offline wiki snapshot. Results matching all query terms rank before relaxed matches and include canonical URLs, page IDs, and query-centered snippets. Encyclopedia articles are searched by default; set include_non_articles to include project, category, draft, talk, and other namespaces. Follow a relevant result with wiki_read using its page_id.", Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+		snippets := in.Snippets == nil || *in.Snippets
+		out, err := service.Search(ctx, in.Wiki, in.Query, model.SearchOptions{Offset: in.Offset, Limit: in.Limit, IncludeNonArticles: in.IncludeNonArticles, Snippets: snippets})
 		return nil, out, err
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Redirects are followed by default; redirects to sections return that section. Markdown preserves links, tables, and footnotes; referenced definitions are included with each paginated result.", Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {

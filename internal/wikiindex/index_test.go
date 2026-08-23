@@ -13,6 +13,7 @@ import (
 
 	"github.com/blevesearch/bleve/v2/mapping"
 	dsbzip2 "github.com/dsnet/compress/bzip2"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
 
 func TestTitleAndBodyIndexes(t *testing.T) {
@@ -22,11 +23,11 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err := os.MkdirAll(partsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;
+	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><ns>0</ns><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;
 == Details ==
-The useful redirected section.</text></revision></page><page><title>Alpha alias</title><id>3</id><redirect title="Alpha Page"/><revision><id>33</id><timestamp>2026-01-03T00:00:00Z</timestamp><text>#REDIRECT [[Alpha Page#Details]]
-unique_redirect_stub_noise</text></revision></page><page><title>Alpha double alias</title><id>4</id><redirect title="Alpha alias"/><revision><id>44</id><timestamp>2026-01-04T00:00:00Z</timestamp><text>#REDIRECT [[Alpha alias]]</text></revision></page>`))
-	second := compressForTest(t, []byte(`<page><title>Beta: Details</title><id>2</id><revision><id>22</id><timestamp>2026-01-02T00:00:00Z</timestamp><text>Beta contains a distinctive platypus phrase.</text></revision></page></mediawiki>`))
+The useful redirected section.</text></revision></page><page><title>Alpha alias</title><ns>0</ns><id>3</id><redirect title="Alpha Page"/><revision><id>33</id><timestamp>2026-01-03T00:00:00Z</timestamp><text>#REDIRECT [[Alpha Page#Details]]
+unique_redirect_stub_noise</text></revision></page><page><title>Alpha double alias</title><ns>0</ns><id>4</id><redirect title="Alpha alias"/><revision><id>44</id><timestamp>2026-01-04T00:00:00Z</timestamp><text>#REDIRECT [[Alpha alias]]</text></revision></page>`))
+	second := compressForTest(t, []byte(`<page><title>Beta: Details</title><ns>0</ns><id>2</id><revision><id>22</id><timestamp>2026-01-02T00:00:00Z</timestamp><text>Beta contains a distinctive platypus phrase.</text></revision></page><page><title>Mette Frederiksen</title><ns>0</ns><id>5</id><revision><id>55</id><text>The Danish prime minister discussed a Trump phone call about Greenland with foreign leaders.</text></revision></page><page><title>Phone call</title><ns>0</ns><id>6</id><revision><id>66</id><text>A phone call is a connection using a telephone.</text></revision></page><page><title>Wikipedia:Greenland phone call</title><ns>4</ns><id>7</id><revision><id>77</id><text>Trump Frederiksen phone call Greenland project coordination.</text></revision></page></mediawiki>`))
 	firstDumpPath := filepath.Join(partsDir, "000.dump.bz2")
 	firstIndexPath := filepath.Join(partsDir, "000.index.bz2")
 	secondDumpPath := filepath.Join(partsDir, "001.dump.bz2")
@@ -40,7 +41,7 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if err := os.WriteFile(secondDumpPath, second, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(secondIndexPath, compressForTest(t, []byte("0:2:Beta: Details\n")), 0o644); err != nil {
+	if err := os.WriteFile(secondIndexPath, compressForTest(t, []byte("0:2:Beta: Details\n0:5:Mette Frederiksen\n0:6:Phone call\n0:7:Wikipedia:Greenland phone call\n")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,8 +53,8 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if err != nil {
 		t.Fatalf("BuildTitle: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("page count = %d, want 4", count)
+	if count != 7 {
+		t.Fatalf("page count = %d, want 7", count)
 	}
 	titleResult, err := Search(dir, "Beta", 0, 10, false)
 	if err != nil {
@@ -107,6 +108,22 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	redirectNoise, err := Search(dir, "unique_redirect_stub_noise", 0, 10, true)
 	if err != nil || len(redirectNoise.Hits) != 0 {
 		t.Fatalf("redirect stub text was indexed: %#v, %v", redirectNoise.Hits, err)
+	}
+	relevance, err := Search(dir, "Trump Frederiksen phone call Greenland", 0, 10, true)
+	if err != nil || len(relevance.Hits) < 2 || relevance.Hits[0].PageID != 5 || relevance.Hits[0].MatchMode != "all_terms" || relevance.Hits[1].PageID != 6 || relevance.Hits[1].MatchMode != "relaxed" {
+		t.Fatalf("all-term relevance ordering = %#v, %v", relevance.Hits, err)
+	}
+	if relevance.Hits[0].Namespace != 0 || !strings.Contains(relevance.Hits[0].Snippet, "Trump phone call") {
+		t.Fatalf("relevant hit metadata = %#v", relevance.Hits[0])
+	}
+	fullReader, err := OpenReader(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withProjects, err := fullReader.Search(context.Background(), "Trump Frederiksen phone call Greenland", model.SearchOptions{Limit: 10, IncludeNonArticles: true}, true)
+	_ = fullReader.Close()
+	if err != nil || len(withProjects.Hits) < 2 || withProjects.Hits[0].Namespace != 4 {
+		t.Fatalf("non-article namespace search = %#v, %v", withProjects.Hits, err)
 	}
 }
 

@@ -150,18 +150,33 @@ type Job struct {
 }
 
 type SearchHit struct {
-	PageID  uint64  `json:"page_id"`
-	Title   string  `json:"title"`
-	Score   float64 `json:"score"`
-	Snippet string  `json:"snippet,omitempty"`
+	PageID    uint64  `json:"page_id"`
+	Title     string  `json:"title"`
+	PageURL   string  `json:"page_url,omitempty"`
+	Namespace int     `json:"namespace"`
+	Score     float64 `json:"score"`
+	MatchMode string  `json:"match_mode"`
+	Snippet   string  `json:"snippet,omitempty"`
 }
 
 type SearchResult struct {
-	Wiki       string      `json:"wiki"`
-	SearchMode string      `json:"search_mode"`
-	Total      uint64      `json:"total"`
-	Offset     int         `json:"offset"`
-	Hits       []SearchHit `json:"hits"`
+	Wiki                   string      `json:"wiki"`
+	Query                  string      `json:"query"`
+	SearchMode             string      `json:"search_mode"`
+	Total                  uint64      `json:"total"`
+	Offset                 int         `json:"offset"`
+	NextOffset             int         `json:"next_offset,omitempty"`
+	NamespaceFilterApplied bool        `json:"namespace_filter_applied"`
+	SnippetsComplete       bool        `json:"snippets_complete"`
+	SnippetErrors          int         `json:"snippet_errors,omitempty"`
+	Hits                   []SearchHit `json:"hits"`
+}
+
+type SearchOptions struct {
+	Offset             int
+	Limit              int
+	IncludeNonArticles bool
+	Snippets           bool
 }
 
 type Page struct {

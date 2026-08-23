@@ -84,9 +84,9 @@ func (c *Client) JobAction(id, action string) (model.Job, error) {
 	return out, err
 }
 
-func (c *Client) Search(ctx context.Context, wiki, query string, offset, limit int) (model.SearchResult, error) {
+func (c *Client) Search(ctx context.Context, wiki, query string, options model.SearchOptions) (model.SearchResult, error) {
 	var out model.SearchResult
-	err := c.Call(ctx, "wiki_search", map[string]any{"wiki": wiki, "query": query, "offset": offset, "limit": limit}, &out)
+	err := c.Call(ctx, "wiki_search", map[string]any{"wiki": wiki, "query": query, "offset": options.Offset, "limit": options.Limit, "include_non_articles": options.IncludeNonArticles, "snippets": options.Snippets}, &out)
 	return out, err
 }
 

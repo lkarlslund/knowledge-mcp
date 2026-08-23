@@ -106,7 +106,7 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if len(locals) != 1 || !locals[0].TitleReady || !locals[0].BodyReady {
 		t.Fatalf("unexpected local state: %#v", locals)
 	}
-	result, err := backend.Search(context.Background(), "testwiki", "capybara", 0, 10)
+	result, err := backend.Search(context.Background(), "testwiki", "capybara", model.SearchOptions{Limit: 10, Snippets: true})
 	if err != nil {
 		t.Fatal(err)
 	}
