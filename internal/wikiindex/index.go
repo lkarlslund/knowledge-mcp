@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"compress/bzip2"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"html"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,10 +50,19 @@ type bodyDocument struct {
 }
 
 type stream struct {
+	Index  int
 	Offset int64
 	End    int64
 	Part   int
 	Path   string
+}
+
+type bodyCheckpoint struct {
+	Version     int    `json:"version"`
+	Fingerprint string `json:"fingerprint"`
+	Total       int    `json:"total"`
+	Done        int64  `json:"done"`
+	Completed   []byte `json:"completed"`
 }
 
 type Part struct {
@@ -140,9 +153,6 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 }
 
 func BuildBody(ctx context.Context, parts []Part, destination string, progress BuildProgress) error {
-	if err := os.RemoveAll(destination); err != nil {
-		return err
-	}
 	var streams []stream
 	for _, part := range parts {
 		partStreams, err := readStreams(ctx, part)
@@ -151,9 +161,31 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 		}
 		streams = append(streams, partStreams...)
 	}
-	idx, err := bleve.New(destination, bodyMapping())
+	for i := range streams {
+		streams[i].Index = i
+	}
+	checkpointPath := destination + ".checkpoint.json"
+	checkpoint, resume := loadBodyCheckpoint(checkpointPath, destination, streams)
+	var idx bleve.Index
+	var err error
+	if resume {
+		idx, err = bleve.Open(destination)
+	} else {
+		if err := os.RemoveAll(destination); err != nil {
+			return err
+		}
+		_ = os.Remove(checkpointPath)
+		checkpoint = newBodyCheckpoint(streams)
+		idx, err = bleve.New(destination, bodyMapping())
+	}
 	if err != nil {
-		return fmt.Errorf("create body index: %w", err)
+		return fmt.Errorf("open body index: %w", err)
+	}
+	if !resume {
+		if err := saveBodyCheckpoint(checkpointPath, checkpoint); err != nil {
+			_ = idx.Close()
+			return fmt.Errorf("create body checkpoint: %w", err)
+		}
 	}
 	closed := false
 	defer func() {
@@ -199,9 +231,15 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 			}
 		}()
 	}
+	remaining := make([]stream, 0, len(streams)-int(checkpoint.Done))
+	for _, part := range streams {
+		if !checkpointComplete(checkpoint, part.Index) {
+			remaining = append(remaining, part)
+		}
+	}
 	go func() {
 		defer close(jobs)
-		for _, part := range streams {
+		for _, part := range remaining {
 			select {
 			case jobs <- part:
 			case <-workerCtx.Done():
@@ -215,7 +253,22 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 	}()
 
 	batch := idx.NewBatch()
-	batchCount, completedStreams := 0, int64(0)
+	batchCount := 0
+	pendingStreams := make([]int, 0, 64)
+	progress(checkpoint.Done, int64(len(streams)))
+	commit := func() error {
+		if batchCount > 0 {
+			if err := idx.Batch(batch); err != nil {
+				return fmt.Errorf("write body index: %w", err)
+			}
+			batch, batchCount = idx.NewBatch(), 0
+		}
+		for _, streamIndex := range pendingStreams {
+			checkpointMark(&checkpoint, streamIndex)
+		}
+		pendingStreams = pendingStreams[:0]
+		return saveBodyCheckpoint(checkpointPath, checkpoint)
+	}
 	for result := range results {
 		if result.err != nil {
 			cancel()
@@ -227,29 +280,100 @@ func BuildBody(ctx context.Context, parts []Part, destination string, progress B
 				return err
 			}
 			batchCount++
-			if batchCount >= 1000 {
-				if err := idx.Batch(batch); err != nil {
-					return fmt.Errorf("write body index: %w", err)
-				}
-				batch, batchCount = idx.NewBatch(), 0
+		}
+		pendingStreams = append(pendingStreams, result.part.Index)
+		if batchCount >= 1000 || len(pendingStreams) >= 64 {
+			if err := commit(); err != nil {
+				return err
 			}
 		}
-		completedStreams++
-		progress(completedStreams, int64(len(streams)))
+		progress(checkpoint.Done+int64(len(pendingStreams)), int64(len(streams)))
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if batchCount > 0 {
-		if err := idx.Batch(batch); err != nil {
-			return fmt.Errorf("write final body batch: %w", err)
+	if len(pendingStreams) > 0 {
+		if err := commit(); err != nil {
+			return fmt.Errorf("write final body checkpoint: %w", err)
 		}
 	}
 	if err := idx.Close(); err != nil {
 		return fmt.Errorf("close body index: %w", err)
 	}
 	closed = true
+	if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove body checkpoint: %w", err)
+	}
 	return nil
+}
+
+func newBodyCheckpoint(streams []stream) bodyCheckpoint {
+	return bodyCheckpoint{
+		Version:     1,
+		Fingerprint: bodyCheckpointFingerprint(streams),
+		Total:       len(streams),
+		Completed:   make([]byte, (len(streams)+7)/8),
+	}
+}
+
+func loadBodyCheckpoint(path, destination string, streams []stream) (bodyCheckpoint, bool) {
+	var checkpoint bodyCheckpoint
+	if info, err := os.Stat(destination); err != nil || !info.IsDir() {
+		return checkpoint, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &checkpoint) != nil {
+		return bodyCheckpoint{}, false
+	}
+	wantBytes := (len(streams) + 7) / 8
+	if checkpoint.Version != 1 || checkpoint.Total != len(streams) || len(checkpoint.Completed) != wantBytes || checkpoint.Fingerprint != bodyCheckpointFingerprint(streams) {
+		return bodyCheckpoint{}, false
+	}
+	var done int64
+	for _, value := range checkpoint.Completed {
+		done += int64(bits.OnesCount8(value))
+	}
+	if done > int64(len(streams)) {
+		return bodyCheckpoint{}, false
+	}
+	checkpoint.Done = done
+	return checkpoint, true
+}
+
+func saveBodyCheckpoint(path string, checkpoint bodyCheckpoint) error {
+	data, err := json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+
+func bodyCheckpointFingerprint(streams []stream) string {
+	hash := sha256.New()
+	for _, part := range streams {
+		_, _ = fmt.Fprintf(hash, "%d:%d:%d\x00", part.Part, part.Offset, part.End)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func checkpointComplete(checkpoint bodyCheckpoint, index int) bool {
+	return index >= 0 && index < checkpoint.Total && checkpoint.Completed[index/8]&(1<<uint(index%8)) != 0
+}
+
+func checkpointMark(checkpoint *bodyCheckpoint, index int) {
+	if checkpointComplete(*checkpoint, index) {
+		return
+	}
+	checkpoint.Completed[index/8] |= 1 << uint(index%8)
+	checkpoint.Done++
 }
 
 func Search(generationPath, query string, offset, limit int, fullText bool) (model.SearchResult, error) {

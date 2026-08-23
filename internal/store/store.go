@@ -29,6 +29,7 @@ type Store struct {
 	downloadQueue chan string
 	indexQueue    chan string
 	running       map[string]context.CancelFunc
+	watchers      map[chan struct{}]struct{}
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 }
@@ -54,7 +55,7 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
 		return nil, errors.New("download and index worker counts must be positive")
 	}
-	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc)}
+	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{})}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
@@ -141,8 +142,35 @@ func (s *Store) ListJobs() []model.Job {
 	for _, job := range s.jobs {
 		result = append(result, *job)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
+	sort.Slice(result, func(i, j int) bool {
+		activeI, activeJ := !isTerminal(result[i].State), !isTerminal(result[j].State)
+		if activeI != activeJ {
+			return activeI
+		}
+		if activeI && !result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].CreatedAt.Before(result[j].CreatedAt)
+		}
+		if !activeI && !result[i].UpdatedAt.Equal(result[j].UpdatedAt) {
+			return result[i].UpdatedAt.After(result[j].UpdatedAt)
+		}
+		return result[i].ID < result[j].ID
+	})
 	return result
+}
+
+func (s *Store) Subscribe(ctx context.Context) <-chan struct{} {
+	updates := make(chan struct{}, 1)
+	s.mu.Lock()
+	s.watchers[updates] = struct{}{}
+	s.mu.Unlock()
+	go func() {
+		<-ctx.Done()
+		s.mu.Lock()
+		delete(s.watchers, updates)
+		close(updates)
+		s.mu.Unlock()
+	}()
+	return updates
 }
 
 func (s *Store) ListUpgrades(ctx context.Context) ([]model.OnlineWiki, error) {
@@ -366,7 +394,7 @@ func (s *Store) JobAction(id, action string) (model.Job, error) {
 }
 
 func isTerminal(state string) bool {
-	return state == model.StateDownloaded || state == model.StateReady || state == model.StateUpToDate || state == model.StateFailed
+	return state == model.StateDownloaded || state == model.StateReady || state == model.StateUpToDate || state == model.StateFailed || state == model.StateCanceled
 }
 
 func (s *Store) Search(wiki, query string, offset, limit int) (model.SearchResult, error) {
@@ -800,7 +828,16 @@ func (s *Store) saveJobsLocked() error {
 		jobs = append(jobs, &jobCopy)
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedAt.Before(jobs[j].CreatedAt) })
-	return writeJSON(s.jobsPath(), jobs)
+	if err := writeJSON(s.jobsPath(), jobs); err != nil {
+		return err
+	}
+	for watcher := range s.watchers {
+		select {
+		case watcher <- struct{}{}:
+		default:
+		}
+	}
+	return nil
 }
 
 func readManifest(path string) (model.Manifest, error) {

@@ -3,18 +3,20 @@ package dashboard
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
 
-//go:embed index.html
-var indexHTML []byte
+//go:embed index.html assets
+var dashboardFiles embed.FS
 
 type Service interface {
 	ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error)
@@ -23,6 +25,12 @@ type Service interface {
 	ListJobs() []model.Job
 	Submit(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
+	Subscribe(context.Context) <-chan struct{}
+}
+
+type stateSnapshot struct {
+	Local []model.LocalWiki `json:"local"`
+	Jobs  []model.Job       `json:"jobs"`
 }
 
 func Handler(service Service) http.Handler {
@@ -30,7 +38,38 @@ func Handler(service Service) http.Handler {
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+		indexHTML, err := dashboardFiles.ReadFile("index.html")
+		if err != nil {
+			http.Error(w, "dashboard unavailable", http.StatusInternalServerError)
+			return
+		}
 		_, _ = w.Write(indexHTML)
+	})
+	mux.Handle("GET /assets/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		http.FileServer(http.FS(dashboardFiles)).ServeHTTP(w, r)
+	}))
+	mux.HandleFunc("GET /api/dashboard/events", func(w http.ResponseWriter, r *http.Request) {
+		connection, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = connection.Close(websocket.StatusNormalClosure, "dashboard closed") }()
+		writeSnapshot := func() error {
+			local, localErr := service.ListLocal()
+			if localErr != nil {
+				return localErr
+			}
+			return wsjson.Write(r.Context(), connection, stateSnapshot{Local: local, Jobs: service.ListJobs()})
+		}
+		if err := writeSnapshot(); err != nil {
+			return
+		}
+		for range service.Subscribe(r.Context()) {
+			if err := writeSnapshot(); err != nil {
+				return
+			}
+		}
 	})
 	mux.HandleFunc("GET /api/dashboard/local", func(w http.ResponseWriter, _ *http.Request) {
 		result, err := service.ListLocal()

@@ -3,6 +3,8 @@ package wikiindex
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -83,6 +85,67 @@ func TestPlainText(t *testing.T) {
 	}
 }
 
+func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "dump.bz2")
+	indexPath := filepath.Join(dir, "index.bz2")
+	var dump, sourceIndex bytes.Buffer
+	const streamCount = 130
+	for pageID := 1; pageID <= streamCount; pageID++ {
+		offset := dump.Len()
+		page := fmt.Sprintf(`<page><title>Page %d</title><id>%d</id><revision><id>%d</id><text>resume token %d</text></revision></page>`, pageID, pageID, pageID+1000, pageID)
+		dump.Write(compressForTest(t, []byte(page)))
+		fmt.Fprintf(&sourceIndex, "%d:%d:Page %d\n", offset, pageID, pageID)
+	}
+	if err := os.WriteFile(dumpPath, dump.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, compressForTest(t, sourceIndex.Bytes()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := filepath.Join(dir, BodyIndexDir)
+	ctx, cancel := context.WithCancel(context.Background())
+	err := BuildBody(ctx, []Part{{DumpPath: dumpPath, IndexPath: indexPath}}, destination, func(done, _ int64) {
+		if done >= 64 {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("first BuildBody error = %v, want context.Canceled", err)
+	}
+	checkpoint, ok := loadBodyCheckpoint(destination+".checkpoint.json", destination, mustReadStreams(t, Part{DumpPath: dumpPath, IndexPath: indexPath}))
+	if !ok || checkpoint.Done < 64 || checkpoint.Done >= streamCount {
+		t.Fatalf("checkpoint = %#v, valid %v", checkpoint, ok)
+	}
+
+	firstProgress := int64(-1)
+	if err := BuildBody(context.Background(), []Part{{DumpPath: dumpPath, IndexPath: indexPath}}, destination, func(done, _ int64) {
+		if firstProgress < 0 {
+			firstProgress = done
+		}
+	}); err != nil {
+		t.Fatalf("resumed BuildBody: %v", err)
+	}
+	if firstProgress != checkpoint.Done {
+		t.Fatalf("resumed progress = %d, want saved checkpoint %d", firstProgress, checkpoint.Done)
+	}
+	if _, err := os.Stat(destination + ".checkpoint.json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed checkpoint still exists: %v", err)
+	}
+
+	for _, pageID := range []int{1, streamCount} {
+		result, err := Search(dir, fmt.Sprintf("resume token %d", pageID), 0, 10, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Hits) == 0 || result.Hits[0].PageID != uint64(pageID) {
+			t.Fatalf("resumed index missing page %d: %#v", pageID, result.Hits)
+		}
+	}
+}
+
 func TestParseIndexLineWithColonInTitle(t *testing.T) {
 	t.Parallel()
 	offset, id, title, err := parseIndexLine("123:456:Category:Example")
@@ -108,4 +171,16 @@ func compressForTest(t *testing.T, data []byte) []byte {
 		t.Fatal(err)
 	}
 	return out.Bytes()
+}
+
+func mustReadStreams(t *testing.T, part Part) []stream {
+	t.Helper()
+	streams, err := readStreams(context.Background(), part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range streams {
+		streams[i].Index = i
+	}
+	return streams
 }

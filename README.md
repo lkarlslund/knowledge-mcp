@@ -40,8 +40,13 @@ no authentication layer.
 
 Open `http://127.0.0.1:8765/` for the lightweight local dashboard. It shows
 downloaded wikis, available upgrades, current/recent job progress, and online
-dumps, and can submit download or update jobs. The page polls job snapshots; it
-never holds a request open for background work.
+dumps, and can submit download or update jobs. Alpine.js receives live local and
+job snapshots over a WebSocket; Bootstrap, Bootstrap Icons, and Alpine.js are
+pinned and embedded in the binary, with no CDN dependency.
+
+The job table has live Running, Queued, Failed, and Completed filters. Rows use
+a stable submission order while active, rather than moving whenever progress is
+reported.
 
 ## CLI
 
@@ -152,8 +157,11 @@ Large wikis such as `enwiki` are discovered and downloaded as ordered multipart
 dump/index pairs.
 
 Large sequential index scans use a parallel bzip2 decoder, and body indexing
-also processes independent multistream chunks concurrently. Exact page reads
-use a single-stream decoder to avoid parallel setup overhead.
+also processes independent multistream chunks concurrently. Its partial Bleve
+index has a compact bitset checkpoint: committed streams are skipped after a
+service restart, and the checkpoint is removed only when the body index is
+complete. Exact page reads use a single-stream decoder to avoid parallel setup
+overhead.
 
 ## Development
 

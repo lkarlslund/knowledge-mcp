@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/blevesearch/bleve/v2 v2.6.0
+	github.com/coder/websocket v1.8.15
 	github.com/cosnicolaou/pbzip2 v1.0.6
 	github.com/dsnet/compress v0.0.1
 	github.com/modelcontextprotocol/go-sdk v1.7.0

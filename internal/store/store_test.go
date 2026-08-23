@@ -211,6 +211,43 @@ func TestLocalStorageBreakdown(t *testing.T) {
 	}
 }
 
+func TestListJobsUsesStablePipelineOrder(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	backend := &Store{jobs: map[string]*model.Job{
+		"new-active": {ID: "new-active", State: model.StateDownloading, CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(4 * time.Minute)},
+		"old-active": {ID: "old-active", State: model.StateBodyIndexing, CreatedAt: now, UpdatedAt: now.Add(5 * time.Minute)},
+		"old-done":   {ID: "old-done", State: model.StateReady, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(2 * time.Minute)},
+		"new-done":   {ID: "new-done", State: model.StateDownloaded, CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(3 * time.Minute)},
+	}}
+	jobs := backend.ListJobs()
+	want := []string{"old-active", "new-active", "new-done", "old-done"}
+	for i, id := range want {
+		if jobs[i].ID != id {
+			t.Fatalf("jobs[%d] = %q, want %q; all: %#v", i, jobs[i].ID, id, jobs)
+		}
+	}
+}
+
+func TestJobPersistenceNotifiesSubscribers(t *testing.T) {
+	t.Parallel()
+	backend := &Store{root: t.TempDir(), jobs: map[string]*model.Job{}, watchers: map[chan struct{}]struct{}{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	updates := backend.Subscribe(ctx)
+	backend.mu.Lock()
+	err := backend.saveJobsLocked()
+	backend.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("subscriber received no persisted-state notification")
+	}
+	cancel()
+}
+
 func compress(t *testing.T, data []byte) []byte {
 	t.Helper()
 	var out bytes.Buffer

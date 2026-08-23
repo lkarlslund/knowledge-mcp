@@ -6,7 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
 
@@ -31,6 +34,14 @@ func (f *fakeService) Submit(wiki, kind string) (model.Job, error) {
 func (f *fakeService) JobAction(id, action string) (model.Job, error) {
 	f.submitted = id + "/" + action
 	return model.Job{ID: id, State: action}, nil
+}
+func (f *fakeService) Subscribe(ctx context.Context) <-chan struct{} {
+	updates := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		close(updates)
+	}()
+	return updates
 }
 
 func TestDashboardAndMaintenanceAPI(t *testing.T) {
@@ -64,5 +75,42 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 	handler.ServeHTTP(jobResponse, jobRequest)
 	if jobResponse.Code != http.StatusOK || service.submitted != "job-1/pause" {
 		t.Fatalf("job action response %d, submitted %q", jobResponse.Code, service.submitted)
+	}
+}
+
+func TestEmbeddedAssetsAndWebSocketSnapshot(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(Handler(&fakeService{}))
+	defer server.Close()
+
+	assetRequest, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL+"/assets/alpinejs-3.16.2.min.js", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetResponse, err := http.DefaultClient.Do(assetRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = assetResponse.Body.Close()
+	if assetResponse.StatusCode != http.StatusOK || !strings.Contains(assetResponse.Header.Get("Cache-Control"), "immutable") {
+		t.Fatalf("asset response = %d, cache %q", assetResponse.StatusCode, assetResponse.Header.Get("Cache-Control"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connection, response, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/dashboard/events", nil)
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.CloseNow() }()
+	var snapshot stateSnapshot
+	if err := wsjson.Read(ctx, connection, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Local) != 1 || len(snapshot.Jobs) != 1 {
+		t.Fatalf("unexpected snapshot: %#v", snapshot)
 	}
 }
