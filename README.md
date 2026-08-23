@@ -8,14 +8,6 @@ the full-text body index continues building in the background.
 
 ![Wikipedia Multistream MCP dashboard in dark mode](docs/dashboard-dark.png)
 
-> Wikimedia has deprecated its legacy database-backup XML pipeline in favor of
-> [MediaWiki Content File Exports](https://wikitech.wikimedia.org/wiki/MediaWiki_Content_File_Exports),
-> which also use compressed XML. This project currently targets the legacy
-> `pages-articles-multistream` artifacts because their companion offset index
-> enables efficient random access to compressed page groups. The replacement
-> exports do not provide an equivalent multistream offset map, so adopting them
-> requires a local repacking/indexing migration rather than a URL change.
-
 ## Build and run
 
 Go 1.25 or newer is required.
