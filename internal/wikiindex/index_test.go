@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,18 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if len(bodyResult.Hits) != 1 || bodyResult.Hits[0].PageID != 2 {
 		t.Fatalf("unexpected body hits: %#v", bodyResult.Hits)
 	}
+	exactResult, err := Search(dir, "Mette Frederiksen", 0, 10, true)
+	if err != nil {
+		t.Fatalf("exact-title Search: %v", err)
+	}
+	if len(exactResult.Hits) == 0 || exactResult.Hits[0].PageID != 5 {
+		t.Fatalf("exact-title hits: %#v", exactResult.Hits)
+	}
+	for _, hit := range exactResult.Hits {
+		if math.IsNaN(hit.Score) || math.IsInf(hit.Score, 0) {
+			t.Fatalf("exact-title hit has non-finite score: %#v", hit)
+		}
+	}
 	redirectNoise, err := Search(dir, "unique_redirect_stub_noise", 0, 10, true)
 	if err != nil || len(redirectNoise.Hits) != 0 {
 		t.Fatalf("redirect stub text was indexed: %#v, %v", redirectNoise.Hits, err)
@@ -205,6 +218,9 @@ func TestLeanMappings(t *testing.T) {
 			for _, field := range document.Fields {
 				if field.IncludeTermVectors || field.IncludeInAll || field.DocValues {
 					t.Errorf("%s.%s retains redundant index data: %#v", name, property, field)
+				}
+				if property == "title_exact" && field.SkipFreqNorm {
+					t.Errorf("%s.%s skips frequency normalization required for scoring", name, property)
 				}
 			}
 		}

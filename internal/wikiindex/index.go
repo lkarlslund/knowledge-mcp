@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"math/bits"
 	"net/url"
 	"os"
@@ -35,8 +36,8 @@ import (
 const (
 	TitleIndexDir            = "titles.bleve"
 	BodyIndexDir             = "bodies.bleve"
-	CurrentTitleIndexVersion = 5
-	CurrentBodyIndexVersion  = 7
+	CurrentTitleIndexVersion = 6
+	CurrentBodyIndexVersion  = 8
 	DefaultReadMaxChars      = 100_000
 	MaximumReadMaxChars      = 1_000_000
 	titleBatchDocs           = 50_000
@@ -950,7 +951,11 @@ func searchTier(ctx context.Context, idx bleve.Index, query blevequery.Query, of
 		pageID, _ := strconv.ParseUint(hit.ID, 10, 64)
 		title, _ := hit.Fields["title"].(string)
 		namespace, _ := hit.Fields["namespace"].(float64)
-		hits = append(hits, model.SearchHit{PageID: pageID, Title: title, Namespace: int(namespace), Score: hit.Score, MatchMode: matchMode})
+		score := hit.Score
+		if math.IsNaN(score) || math.IsInf(score, 0) {
+			score = 0
+		}
+		hits = append(hits, model.SearchHit{PageID: pageID, Title: title, Namespace: int(namespace), Score: score, MatchMode: matchMode})
 	}
 	return response.Total, hits, nil
 }
@@ -1483,7 +1488,7 @@ func titleMapping() mapping.IndexMapping {
 	storedText.Store, storedText.IncludeTermVectors, storedText.IncludeInAll, storedText.DocValues = true, false, false, false
 	exact := bleve.NewTextFieldMapping()
 	exact.Analyzer = keyword.Name
-	exact.Store, exact.IncludeTermVectors, exact.IncludeInAll, exact.DocValues, exact.SkipFreqNorm = false, false, false, false, true
+	exact.Store, exact.IncludeTermVectors, exact.IncludeInAll, exact.DocValues, exact.SkipFreqNorm = false, false, false, false, false
 	number := bleve.NewNumericFieldMapping()
 	number.Store, number.Index, number.IncludeInAll, number.DocValues = true, false, false, false
 	doc.AddFieldMappingsAt("title", storedText)
@@ -1507,7 +1512,7 @@ func bodyMapping() mapping.IndexMapping {
 	doc.AddFieldMappingsAt("title", title)
 	exact := bleve.NewTextFieldMapping()
 	exact.Analyzer = keyword.Name
-	exact.Store, exact.IncludeTermVectors, exact.IncludeInAll, exact.DocValues, exact.SkipFreqNorm = false, false, false, false, true
+	exact.Store, exact.IncludeTermVectors, exact.IncludeInAll, exact.DocValues, exact.SkipFreqNorm = false, false, false, false, false
 	namespace := bleve.NewNumericFieldMapping()
 	namespace.Store, namespace.Index, namespace.IncludeInAll, namespace.DocValues = true, true, false, false
 	doc.AddFieldMappingsAt("title_exact", exact)
