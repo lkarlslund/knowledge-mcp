@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -145,6 +146,42 @@ func TestMigrateLegacyStagePreservesPartialDownloads(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("%s = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestJobPauseResumeCancelAndRetry(t *testing.T) {
+	t.Parallel()
+	job := &model.Job{ID: "job-1", Wiki: "testwiki", Kind: "download", State: model.StateDownloading, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	backend := &Store{
+		root:          t.TempDir(),
+		jobs:          map[string]*model.Job{job.ID: job},
+		active:        map[string]string{job.Wiki: job.ID},
+		downloadQueue: make(chan string, 4),
+		indexQueue:    make(chan string, 4),
+		running:       make(map[string]context.CancelFunc),
+	}
+	paused, err := backend.JobAction(job.ID, "pause")
+	if err != nil || paused.State != model.StatePaused {
+		t.Fatalf("pause = %#v, %v", paused, err)
+	}
+	backend.setJob(job.ID, model.StateDownloading, "downloading", 1, 2, "bytes", 1, "late progress", "")
+	if afterProgress, _ := backend.Job(job.ID, ""); afterProgress.State != model.StatePaused {
+		t.Fatalf("late progress overwrote pause: %#v", afterProgress)
+	}
+	resumed, err := backend.JobAction(job.ID, "resume")
+	if err != nil || resumed.State != model.StateQueued {
+		t.Fatalf("resume = %#v, %v", resumed, err)
+	}
+	if queued := <-backend.downloadQueue; queued != job.ID {
+		t.Fatalf("queued ID = %q", queued)
+	}
+	canceled, err := backend.JobAction(job.ID, "cancel")
+	if err != nil || canceled.State != model.StateCanceled {
+		t.Fatalf("cancel = %#v, %v", canceled, err)
+	}
+	retried, err := backend.JobAction(job.ID, "retry")
+	if err != nil || retried.State != model.StateQueued {
+		t.Fatalf("retry = %#v, %v", retried, err)
 	}
 }
 

@@ -62,7 +62,7 @@ func NewClient(parallel ...int) *Client {
 func NewClientWithBaseURL(baseURL string, parallel ...int) *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 30 * time.Second
-	connections := 4
+	connections := 3
 	if len(parallel) > 0 && parallel[0] > 0 {
 		connections = parallel[0]
 	}
@@ -617,7 +617,7 @@ func saveResumeState(path string, state resumeState) error {
 }
 
 func (c *Client) doDownloadRequest(ctx context.Context, req *http.Request) (*http.Response, func(), error) {
-	for attempt := range 6 {
+	for attempt := 0; ; attempt++ {
 		select {
 		case c.downloadSlots <- struct{}{}:
 		case <-ctx.Done():
@@ -634,12 +634,9 @@ func (c *Client) doDownloadRequest(ctx context.Context, req *http.Request) (*htt
 		}
 		_ = resp.Body.Close()
 		release()
-		if attempt == 5 {
-			return nil, nil, fmt.Errorf("download throttled after retries: %s", resp.Status)
-		}
-		delay := time.Duration(1<<attempt) * time.Second
+		delay := time.Duration(1<<min(attempt, 5)) * time.Second
 		if seconds, parseErr := strconv.Atoi(resp.Header.Get("Retry-After")); parseErr == nil && seconds > 0 {
-			delay = time.Duration(seconds) * time.Second
+			delay = min(time.Duration(seconds)*time.Second, time.Minute)
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -651,7 +648,6 @@ func (c *Client) doDownloadRequest(ctx context.Context, req *http.Request) (*htt
 			return nil, nil, ctx.Err()
 		}
 	}
-	panic("unreachable")
 }
 
 func verifySHA1(path, expected string) error {

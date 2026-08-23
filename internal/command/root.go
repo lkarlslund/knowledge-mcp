@@ -67,7 +67,7 @@ func newServeCommand() *cobra.Command {
 	command.Flags().StringVar(&dataDir, "data-dir", "./data", "runtime data directory")
 	command.Flags().IntVar(&downloadWorkers, "download-workers", 3, "concurrent download/update jobs")
 	command.Flags().IntVar(&indexWorkers, "index-workers", 2, "concurrent indexing jobs")
-	command.Flags().IntVar(&downloadConnections, "download-connections", 4, "parallel HTTP ranges per large file")
+	command.Flags().IntVar(&downloadConnections, "download-connections", 3, "parallel HTTP ranges shared by downloads")
 	return command
 }
 
@@ -153,7 +153,20 @@ func newWikiCommand(opts *options) *cobra.Command {
 		},
 	}
 	status.Flags().StringVar(&statusWiki, "wiki", "", "return the latest job for this wiki")
-	wiki.AddCommand(available, list, submit("download"), submit("update"), status)
+	var jobAction string
+	job := &cobra.Command{
+		Use:   "job JOB_ID",
+		Short: "Inspect or control a background job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
+				result, err := client.JobAction(args[0], jobAction)
+				return printResult(result, err)
+			})
+		},
+	}
+	job.Flags().StringVar(&jobAction, "action", "status", "status, pause, resume, cancel, or retry")
+	wiki.AddCommand(available, list, submit("download"), submit("update"), status, job)
 	return wiki
 }
 

@@ -22,6 +22,7 @@ type Service interface {
 	ListUpgrades(context.Context) ([]model.OnlineWiki, error)
 	ListJobs() []model.Job
 	Submit(string, string) (model.Job, error)
+	JobAction(string, string) (model.Job, error)
 }
 
 func Handler(service Service) http.Handler {
@@ -60,6 +61,19 @@ func Handler(service Service) http.Handler {
 			return
 		}
 		job, err := service.Submit(parts[0], parts[1])
+		writeJSON(w, job, err)
+	})
+	mux.HandleFunc("POST /api/dashboard/job/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Wikipedia-MCP") != "1" {
+			writeJSONStatus(w, nil, errors.New("missing maintenance request header"), http.StatusForbidden)
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/dashboard/job/"), "/")
+		if len(parts) != 2 || parts[0] == "" {
+			writeJSONStatus(w, nil, errors.New("expected /api/dashboard/job/{id}/{pause|resume|cancel|retry}"), http.StatusBadRequest)
+			return
+		}
+		job, err := service.JobAction(parts[0], parts[1])
 		writeJSON(w, job, err)
 	})
 	return mux

@@ -28,6 +28,10 @@ func (f *fakeService) Submit(wiki, kind string) (model.Job, error) {
 	f.submitted = wiki + "/" + kind
 	return model.Job{ID: "job-2", Wiki: wiki, Kind: kind}, nil
 }
+func (f *fakeService) JobAction(id, action string) (model.Job, error) {
+	f.submitted = id + "/" + action
+	return model.Job{ID: id, State: action}, nil
+}
 
 func TestDashboardAndMaintenanceAPI(t *testing.T) {
 	t.Parallel()
@@ -53,5 +57,12 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || service.submitted != "testwiki/update" {
 		t.Fatalf("maintenance response %d, submitted %q", response.Code, service.submitted)
+	}
+	jobRequest := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/job/job-1/pause", nil)
+	jobRequest.Header.Set("X-Wikipedia-MCP", "1")
+	jobResponse := httptest.NewRecorder()
+	handler.ServeHTTP(jobResponse, jobRequest)
+	if jobResponse.Code != http.StatusOK || service.submitted != "job-1/pause" {
+		t.Fatalf("job action response %d, submitted %q", jobResponse.Code, service.submitted)
 	}
 }

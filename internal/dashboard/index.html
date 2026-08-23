@@ -55,7 +55,7 @@ function duration(seconds) {
   if (seconds < 3600) return `${Math.floor(seconds/60)}m ${Math.ceil(seconds%60)}s`;
   return `${Math.floor(seconds/3600)}h ${Math.ceil((seconds%3600)/60)}m`;
 }
-const terminal = s => ['downloaded','ready','up_to_date','failed'].includes(s);
+const terminal = s => ['downloaded','ready','up_to_date','failed','canceled'].includes(s);
 
 async function api(path, options) {
   const response = await fetch(path, options);
@@ -73,6 +73,14 @@ async function maintain(wiki, action, button) {
     await loadAvailable();
   } catch (error) { showError(error); }
   finally { button.disabled = busyWikis.has(wiki); }
+}
+
+async function jobAction(id, action, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/dashboard/job/${encodeURIComponent(id)}/${action}`, {method:'POST',headers:{'X-Wikipedia-MCP':'1'}});
+    await loadState();
+  } catch (error) { showError(error); }
 }
 
 function table(headers, rows) {
@@ -95,7 +103,7 @@ async function loadState() {
         up?.update_available ? `<button data-wiki="${esc(w.wiki)}" data-action="update"${disabled}>Update</button>` : 'Current';
       return `<tr><td><strong>${esc(w.wiki)}</strong></td><td>${esc(w.dump_date)}</td><td>${esc(w.state)}</td><td>${Number(w.page_count).toLocaleString()}</td><td>${esc(w.search_mode)}</td><td>${bytes(w.disk_bytes)}</td><td>${up?.update_available ? esc(up.dump_date) : '—'}</td><td>${action}</td></tr>`;
     }));
-    $('jobs').innerHTML = table(['Wiki','Kind','State','Progress','Message','Updated'], jobs.slice(0,25).map(j => {
+    $('jobs').innerHTML = table(['Wiki','Kind','State','Progress','Message','Updated','Action'], jobs.slice(0,25).map(j => {
       const max = Number(j.total || 0), value = Math.min(Number(j.completed || 0), max || Number(j.completed || 0));
       let detail = '';
       if (j.units === 'bytes' && max) {
@@ -105,7 +113,12 @@ async function loadState() {
       else if (value) detail = `${value.toLocaleString()} ${esc(j.units || '')}`;
       const progress = terminal(j.state) ? detail : `${max ? `<progress value="${value}" max="${max}"></progress> ` : ''}${detail}`;
       const cls = j.state === 'failed' ? 'failed' : terminal(j.state) ? 'ready' : 'working';
-      return `<tr><td>${esc(j.wiki)}</td><td>${esc(j.kind)}</td><td class="${cls}">${esc(j.state)}</td><td>${progress}</td><td>${esc(j.error || j.message)}</td><td>${esc(new Date(j.updated_at).toLocaleString())}</td></tr>`;
+      let action = '—';
+      if (['discovering','downloading','title_indexing','body_indexing'].includes(j.state)) action = `<button data-job="${esc(j.id)}" data-job-action="pause">Pause</button> <button data-job="${esc(j.id)}" data-job-action="cancel">Cancel</button>`;
+      else if (j.state === 'queued') action = `<button data-job="${esc(j.id)}" data-job-action="cancel">Cancel</button>`;
+      else if (j.state === 'paused') action = `<button data-job="${esc(j.id)}" data-job-action="resume">Resume</button> <button data-job="${esc(j.id)}" data-job-action="cancel">Cancel</button>`;
+      else if (['failed','canceled'].includes(j.state)) action = `<button data-job="${esc(j.id)}" data-job-action="retry">Retry</button>`;
+      return `<tr><td>${esc(j.wiki)}</td><td>${esc(j.kind)}</td><td class="${cls}">${esc(j.state)}</td><td>${progress}</td><td>${esc(j.error || j.message)}</td><td>${esc(new Date(j.updated_at).toLocaleString())}</td><td>${action}</td></tr>`;
     }));
     bindButtons(); $('error').textContent = '';
   } catch (error) { showError(error); }
@@ -131,6 +144,9 @@ function bindButtons() {
   document.querySelectorAll('button[data-action]').forEach(button => {
     button.disabled = busyWikis.has(button.dataset.wiki);
     button.onclick = () => maintain(button.dataset.wiki, button.dataset.action, button);
+  });
+  document.querySelectorAll('button[data-job-action]').forEach(button => {
+    button.onclick = () => jobAction(button.dataset.job, button.dataset.jobAction, button);
   });
 }
 function showError(error) { $('error').textContent = error.message || String(error); }

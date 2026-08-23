@@ -29,10 +29,11 @@ The backend listens on `http://127.0.0.1:8765/mcp` and stores runtime data in
 Downloads and indexing use independent worker pools, so indexing one wiki does
 not block downloads of others. The defaults allow three download/update jobs
 and two indexing jobs at once; tune them with `--download-workers` and
-`--index-workers`. Files of at least 64 MiB use up to four parallel HTTP ranges,
+`--index-workers`. Files of at least 64 MiB use up to three parallel HTTP ranges,
 shared globally across active downloads; tune that limit independently with
-`--download-connections`. HTTP 429/503 responses back off and retry. Range
-progress is persisted beside the staging file and safely resumes after restarts.
+`--download-connections`. HTTP 429/503 responses back off and keep retrying for
+the lifetime of the job. Range progress is persisted beside the staging file
+and safely resumes after restarts.
 
 The listener is intentionally restricted to an explicit loopback IP. There is
 no authentication layer.
@@ -57,6 +58,12 @@ request. Download and update jobs continue in the backend and must be polled.
 # Poll once by ID or by wiki. Repeat from your shell as needed.
 ./wikipedia-multistream-mcp wiki status JOB_ID
 ./wikipedia-multistream-mcp wiki status --wiki dawiki
+
+# Control a job without losing its staged files.
+./wikipedia-multistream-mcp wiki job JOB_ID --action pause
+./wikipedia-multistream-mcp wiki job JOB_ID --action resume
+./wikipedia-multistream-mcp wiki job JOB_ID --action cancel
+./wikipedia-multistream-mcp wiki job JOB_ID --action retry
 
 # List installed datasets and their title/full-text readiness.
 ./wikipedia-multistream-mcp wiki list
@@ -113,6 +120,7 @@ The server offers these action-specific tools:
 | `wiki_download` | Submit a first-time background download. |
 | `wiki_update` | Submit an update or finish a missing body index. |
 | `wiki_job_status` | Poll one job snapshot by ID or wiki. |
+| `wiki_job` | Status, pause, resume, cancel, or retry a job via `action`. |
 | `wiki_search` | Search titles, then full text when ready. |
 | `wiki_read` | Read an exact page as text or wikitext. |
 

@@ -22,6 +22,9 @@ func (fakeService) Submit(wiki, kind string) (model.Job, error) {
 func (fakeService) Job(id, wiki string) (model.Job, error) {
 	return model.Job{ID: id, Wiki: wiki}, nil
 }
+func (fakeService) JobAction(id, action string) (model.Job, error) {
+	return model.Job{ID: id, State: action}, nil
+}
 func (fakeService) Search(wiki, query string, offset, limit int) (model.SearchResult, error) {
 	return model.SearchResult{Wiki: wiki}, nil
 }
@@ -53,6 +56,7 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		"wiki_download":       false,
 		"wiki_update":         false,
 		"wiki_job_status":     false,
+		"wiki_job":            false,
 		"wiki_search":         false,
 		"wiki_read":           false,
 	}

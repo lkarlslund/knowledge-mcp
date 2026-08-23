@@ -74,6 +74,12 @@ func (c *Client) Job(id, wiki string) (model.Job, error) {
 	return out, err
 }
 
+func (c *Client) JobAction(id, action string) (model.Job, error) {
+	var out model.Job
+	err := c.Call(context.Background(), "wiki_job", map[string]any{"job_id": id, "action": action}, &out)
+	return out, err
+}
+
 func (c *Client) Search(wiki, query string, offset, limit int) (model.SearchResult, error) {
 	var out model.SearchResult
 	err := c.Call(context.Background(), "wiki_search", map[string]any{"wiki": wiki, "query": query, "offset": offset, "limit": limit}, &out)

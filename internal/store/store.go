@@ -28,6 +28,7 @@ type Store struct {
 	active        map[string]string
 	downloadQueue chan string
 	indexQueue    chan string
+	running       map[string]context.CancelFunc
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 }
@@ -53,7 +54,7 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
 		return nil, errors.New("download and index worker counts must be positive")
 	}
-	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256)}
+	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc)}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
@@ -290,6 +291,83 @@ func (s *Store) Job(id, wiki string) (model.Job, error) {
 	return *job, nil
 }
 
+func (s *Store) JobAction(id, action string) (model.Job, error) {
+	if action == "status" {
+		return s.Job(id, "")
+	}
+	s.mu.Lock()
+	job, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return model.Job{}, errors.New("job not found")
+	}
+	now := time.Now().UTC()
+	var cancel context.CancelFunc
+	switch action {
+	case "pause":
+		if job.State == model.StateQueued {
+			s.mu.Unlock()
+			return model.Job{}, errors.New("only a running job can be paused; cancel a queued job instead")
+		}
+		if isTerminal(job.State) || job.State == model.StatePaused {
+			s.mu.Unlock()
+			return model.Job{}, fmt.Errorf("job cannot be paused from state %s", job.State)
+		}
+		job.State, job.Phase, job.Message, job.UpdatedAt = model.StatePaused, "paused", "paused by user; partial work is preserved", now
+		cancel = s.running[id]
+	case "resume":
+		if job.State != model.StatePaused {
+			s.mu.Unlock()
+			return model.Job{}, fmt.Errorf("job cannot be resumed from state %s", job.State)
+		}
+		if _, stillStopping := s.running[id]; stillStopping {
+			s.mu.Unlock()
+			return model.Job{}, errors.New("job is still pausing; retry resume shortly")
+		}
+		job.State, job.Phase, job.Message, job.Error, job.UpdatedAt = model.StateQueued, "queued", "resuming preserved work", "", now
+		s.active[job.Wiki] = job.ID
+	case "cancel":
+		if isTerminal(job.State) || job.State == model.StateCanceled {
+			s.mu.Unlock()
+			return model.Job{}, fmt.Errorf("job cannot be canceled from state %s", job.State)
+		}
+		job.State, job.Phase, job.Message, job.Error, job.UpdatedAt = model.StateCanceled, "canceled", "canceled by user; partial work is preserved for retry", "", now
+		cancel = s.running[id]
+		delete(s.active, job.Wiki)
+	case "retry":
+		if job.State != model.StateFailed && job.State != model.StateCanceled {
+			s.mu.Unlock()
+			return model.Job{}, fmt.Errorf("job cannot be retried from state %s", job.State)
+		}
+		if activeID := s.active[job.Wiki]; activeID != "" && activeID != job.ID {
+			s.mu.Unlock()
+			return model.Job{}, fmt.Errorf("wiki %s already has active job %s", job.Wiki, activeID)
+		}
+		job.State, job.Phase, job.Message, job.Error, job.UpdatedAt = model.StateQueued, "queued", "retrying preserved work", "", now
+		s.active[job.Wiki] = job.ID
+	default:
+		s.mu.Unlock()
+		return model.Job{}, errors.New("action must be status, pause, resume, cancel, or retry")
+	}
+	if err := s.saveJobsLocked(); err != nil {
+		s.mu.Unlock()
+		return model.Job{}, err
+	}
+	result := *job
+	if action == "resume" || action == "retry" {
+		s.enqueue(job)
+	}
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return result, nil
+}
+
+func isTerminal(state string) bool {
+	return state == model.StateDownloaded || state == model.StateReady || state == model.StateUpToDate || state == model.StateFailed
+}
+
 func (s *Store) Search(wiki, query string, offset, limit int) (model.SearchResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -330,7 +408,20 @@ func (s *Store) worker(ctx context.Context, queue <-chan string) {
 		case <-ctx.Done():
 			return
 		case id := <-queue:
-			s.runJob(ctx, id)
+			s.mu.Lock()
+			job := s.jobs[id]
+			if job == nil || job.State != model.StateQueued {
+				s.mu.Unlock()
+				continue
+			}
+			jobCtx, cancel := context.WithCancel(ctx)
+			s.running[id] = cancel
+			s.mu.Unlock()
+			s.runJob(jobCtx, id)
+			cancel()
+			s.mu.Lock()
+			delete(s.running, id)
+			s.mu.Unlock()
 		}
 	}
 }
@@ -443,6 +534,9 @@ func (s *Store) finishDownloadAndQueueIndex(id, wiki, sourceJobID, message strin
 	defer s.mu.Unlock()
 	downloadJob := s.jobs[id]
 	if downloadJob == nil {
+		return
+	}
+	if downloadJob.State == model.StatePaused || downloadJob.State == model.StateCanceled {
 		return
 	}
 	now := time.Now().UTC()
@@ -616,6 +710,9 @@ func (s *Store) setJob(id, state, phase string, completed, total int64, units st
 	if job == nil {
 		return
 	}
+	if job.State == model.StatePaused || job.State == model.StateCanceled {
+		return
+	}
 	job.State, job.Phase, job.Completed, job.Total, job.Units, job.Rate, job.Message, job.Error = state, phase, completed, total, units, rate, message, errText
 	job.UpdatedAt = time.Now().UTC()
 	_ = s.saveJobsLocked()
@@ -630,6 +727,10 @@ func (s *Store) failJob(id string, err error) {
 func (s *Store) failJobLocked(id string, err error) {
 	job := s.jobs[id]
 	if job == nil {
+		return
+	}
+	if job.State == model.StatePaused || job.State == model.StateCanceled {
+		_ = s.saveJobsLocked()
 		return
 	}
 	if errors.Is(err, context.Canceled) {
@@ -651,6 +752,9 @@ func (s *Store) finishJob(id, state, message string) {
 func (s *Store) finishJobLocked(id, state, message string) {
 	job := s.jobs[id]
 	if job == nil {
+		return
+	}
+	if job.State == model.StatePaused || job.State == model.StateCanceled {
 		return
 	}
 	job.State, job.Phase, job.Message, job.UpdatedAt = state, "complete", message, time.Now().UTC()
@@ -676,7 +780,9 @@ func (s *Store) loadJobs() error {
 		return fmt.Errorf("decode jobs: %w", err)
 	}
 	for _, job := range jobs {
-		if job.State != model.StateDownloaded && job.State != model.StateReady && job.State != model.StateUpToDate && job.State != model.StateFailed {
+		if job.State == model.StatePaused {
+			s.active[job.Wiki] = job.ID
+		} else if job.State != model.StateDownloaded && job.State != model.StateReady && job.State != model.StateUpToDate && job.State != model.StateFailed && job.State != model.StateCanceled {
 			job.State, job.Phase, job.Message = model.StateQueued, "queued", "resuming after server restart"
 			s.active[job.Wiki] = job.ID
 			s.enqueue(job)

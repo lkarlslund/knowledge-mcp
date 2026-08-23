@@ -20,6 +20,7 @@ type Service interface {
 	ListLocal() ([]model.LocalWiki, error)
 	Submit(string, string) (model.Job, error)
 	Job(string, string) (model.Job, error)
+	JobAction(string, string) (model.Job, error)
 	Search(string, string, int, int) (model.SearchResult, error)
 	Read(string, string, uint64, string, int, int) (model.Page, error)
 }
@@ -45,6 +46,11 @@ type submitInput struct {
 type jobStatusInput struct {
 	JobID string `json:"job_id,omitempty" jsonschema:"job identifier returned by wiki_download or wiki_update"`
 	Wiki  string `json:"wiki,omitempty" jsonschema:"wiki whose latest job should be returned when job_id is omitted"`
+}
+
+type jobInput struct {
+	JobID  string `json:"job_id" jsonschema:"job identifier returned by a background operation"`
+	Action string `json:"action" jsonschema:"one of status, pause, resume, cancel, or retry"`
 }
 
 type searchInput struct {
@@ -86,6 +92,13 @@ func New(service Service) *mcp.Server {
 			return nil, model.Job{}, errors.New("provide job_id or wiki")
 		}
 		out, err := service.Job(in.JobID, in.Wiki)
+		return nil, out, err
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job", Description: "Inspect or control a background job using action status, pause, resume, cancel, or retry."}, func(_ context.Context, _ *mcp.CallToolRequest, in jobInput) (*mcp.CallToolResult, model.Job, error) {
+		if in.JobID == "" {
+			return nil, model.Job{}, errors.New("provide job_id")
+		}
+		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed wiki. Uses title search as soon as published and full-text search when body indexing finishes."}, func(_ context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {

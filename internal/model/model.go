@@ -8,6 +8,8 @@ const (
 	StateDownloading   = "downloading"
 	StateVerifying     = "verifying"
 	StateDownloaded    = "downloaded"
+	StatePaused        = "paused"
+	StateCanceled      = "canceled"
 	StateTitleIndexing = "title_indexing"
 	StateTitleReady    = "title_ready"
 	StateBodyIndexing  = "body_indexing"
