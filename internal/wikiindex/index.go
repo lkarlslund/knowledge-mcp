@@ -962,16 +962,51 @@ func querySnippet(content, query string, maximum int) string {
 	}
 	terms := strings.Fields(strings.ToLower(query))
 	lower := strings.ToLower(string(runes))
-	center := 0
+	candidates := []int{0}
 	for _, term := range terms {
-		if byteIndex := strings.Index(lower, term); byteIndex >= 0 {
-			center = len([]rune(lower[:byteIndex]))
+		remaining, byteBase := lower, 0
+		for range 64 {
+			byteIndex := strings.Index(remaining, term)
+			if byteIndex < 0 {
+				break
+			}
+			absolute := byteBase + byteIndex
+			candidates = append(candidates, len([]rune(lower[:absolute])))
+			advance := byteIndex + len(term)
+			byteBase += advance
+			remaining = remaining[advance:]
+		}
+	}
+	bestCenter, bestScore := 0, -1
+	for _, center := range candidates {
+		start := max(0, center-maximum/3)
+		end := min(len(runes), start+maximum)
+		window := strings.ToLower(string(runes[start:end]))
+		score := 0
+		for _, term := range terms {
+			if strings.Contains(window, term) {
+				score += 100 + min(strings.Count(window, term), 10)
+			}
+		}
+		if score > bestScore {
+			bestCenter, bestScore = center, score
+		}
+	}
+	start := max(0, bestCenter-maximum/3)
+	end := min(len(runes), start+maximum)
+	start = max(0, end-maximum)
+	for index := start; index < min(end, start+maximum/5); index++ {
+		if index > 0 && unicode.IsSpace(runes[index]) && (runes[index-1] == '.' || runes[index-1] == '!' || runes[index-1] == '?') {
+			start = index + 1
 			break
 		}
 	}
-	start := max(0, center-maximum/3)
-	end := min(len(runes), start+maximum)
-	start = max(0, end-maximum)
+	for index := end; index > max(start, end-maximum/5); index-- {
+		if unicode.IsSpace(runes[index-1]) && index >= 2 && (runes[index-2] == '.' || runes[index-2] == '!' || runes[index-2] == '?') {
+			end = index - 1
+			break
+		}
+	}
 	for start > 0 && start < len(runes) && !unicode.IsSpace(runes[start-1]) {
 		start++
 	}

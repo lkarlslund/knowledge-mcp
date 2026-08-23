@@ -289,6 +289,17 @@ func TestMarkdownReferencesSurvivePagination(t *testing.T) {
 	}
 }
 
+func TestQuerySnippetPrefersPassageContainingMoreQueryTerms(t *testing.T) {
+	t.Parallel()
+	content := "Trump appears alone near the beginning. " + strings.Repeat("Unrelated background material. ", 30) + "Frederiksen discussed a Trump phone call concerning Greenland with allies. " + strings.Repeat("Trailing material. ", 30)
+	snippet := querySnippet(content, "Trump Frederiksen phone call Greenland", 220)
+	for _, term := range []string{"Trump", "Frederiksen", "phone call", "Greenland"} {
+		if !strings.Contains(snippet, term) {
+			t.Fatalf("snippet %q does not contain %q", snippet, term)
+		}
+	}
+}
+
 func TestMarkdownMediaLinkUsesCaption(t *testing.T) {
 	t.Parallel()
 	tests := map[string]string{
