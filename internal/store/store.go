@@ -569,6 +569,17 @@ func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, opt
 	defer release()
 	page, err := reader.ReadPage(ctx, title, pageID, options, manifest.Site.OnlineSourceURL)
 	page.Wiki = wiki
+	if errors.Is(err, wikiindex.ErrPageNotFound) && strings.TrimSpace(title) != "" {
+		result, searchErr := reader.Search(ctx, title, model.SearchOptions{Limit: 5}, false)
+		if searchErr == nil && len(result.Hits) > 0 {
+			candidates := make([]string, 0, len(result.Hits))
+			for _, hit := range result.Hits {
+				candidates = append(candidates, fmt.Sprintf("%q (page_id %d)", hit.Title, hit.PageID))
+			}
+			return page, fmt.Errorf("page %q not found in %s; do not guess another title: call wiki_search, select the relevant hit, and retry wiki_read with its page_id; title-search candidates: %s", title, wiki, strings.Join(candidates, ", "))
+		}
+		return page, fmt.Errorf("page %q not found in %s; do not guess another title: call wiki_search, select a relevant hit, and retry wiki_read with its page_id", title, wiki)
+	}
 	return page, err
 }
 

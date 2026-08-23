@@ -82,6 +82,9 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if err != nil || pageByID.Title != "Beta: Details" {
 		t.Fatalf("ReadPage by document ID = %#v, %v", pageByID, err)
 	}
+	if _, err := ReadPage(dir, "Missing page", 0, "text", 0, 1000); !errors.Is(err, ErrPageNotFound) {
+		t.Fatalf("missing ReadPage error = %v, want ErrPageNotFound", err)
+	}
 	redirectedPage, err := ReadPage(dir, "Alpha double alias", 0, "markdown", 0, 1000)
 	if err != nil {
 		t.Fatalf("ReadPage redirect: %v", err)

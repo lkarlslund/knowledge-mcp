@@ -129,6 +129,8 @@ type TitleBuildProgress func(pages uint64, compressedDone, compressedTotal int64
 
 var redirectDirectiveRE = regexp.MustCompile(`(?i)^#redirect\s*:?\s*\[\[([^\]|]+)`)
 
+var ErrPageNotFound = errors.New("page not found")
+
 func BuildTitle(ctx context.Context, parts []Part, destination string, progress TitleBuildProgress) (uint64, error) {
 	checkpointPath := destination + ".checkpoint.json"
 	checkpoint, compressedTotal, resume := loadTitleCheckpoint(checkpointPath, destination, parts)
@@ -1200,7 +1202,7 @@ func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xml
 		return xmlPage{}, err
 	}
 	if len(res.Hits) == 0 {
-		return xmlPage{}, errors.New("page not found")
+		return xmlPage{}, ErrPageNotFound
 	}
 	hit := res.Hits[0]
 	wantedTitle := strings.ReplaceAll(strings.TrimSpace(title), "_", " ")

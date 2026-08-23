@@ -112,6 +112,9 @@ func TestToolsAndStructuredCall(t *testing.T) {
 			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":50000`) {
 				t.Errorf("wiki_read schema lacks conditional/bound constraints: %s, %v", schemaJSON, marshalErr)
 			}
+			if !strings.Contains(tool.Description, "Do not guess titles") || !strings.Contains(tool.Description, "page_id") {
+				t.Errorf("wiki_read description lacks search-derived page ID guidance: %q", tool.Description)
+			}
 		}
 		if tool.Annotations.ReadOnlyHint != expectation.readOnly {
 			t.Errorf("tool %s readOnlyHint = %v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, expectation.readOnly)
