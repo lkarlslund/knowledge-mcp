@@ -611,8 +611,8 @@ func (s *Store) runIndexJob(ctx context.Context, id string) {
 	if !manifest.TitleReady {
 		temporary := filepath.Join(path, wikiindex.TitleIndexDir+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
-		count, buildErr := wikiindex.BuildTitle(ctx, generationParts(path, manifest.PartCount), temporary, func(done, total int64) {
-			s.setJob(id, model.StateTitleIndexing, "title_indexing", done, total, "pages", 0, "building title index", "")
+		count, buildErr := wikiindex.BuildTitle(ctx, generationParts(path, manifest.PartCount), temporary, func(pages uint64, compressedDone, compressedTotal int64) {
+			s.setTitleProgress(id, pages, compressedDone, compressedTotal)
 		})
 		if buildErr != nil {
 			s.failJob(id, buildErr)
@@ -743,6 +743,25 @@ func (s *Store) setJob(id, state, phase string, completed, total int64, units st
 		return
 	}
 	job.State, job.Phase, job.Completed, job.Total, job.Units, job.Rate, job.Message, job.Error = state, phase, completed, total, units, rate, message, errText
+	job.ProgressPercent, job.ProgressApprox = 0, false
+	job.UpdatedAt = time.Now().UTC()
+	_ = s.saveJobsLocked()
+}
+
+func (s *Store) setTitleProgress(id string, pages uint64, compressedDone, compressedTotal int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.jobs[id]
+	if job == nil || job.State == model.StatePaused || job.State == model.StateCanceled {
+		return
+	}
+	job.State, job.Phase = model.StateTitleIndexing, "title_indexing"
+	job.Completed, job.Total, job.Units, job.Rate = int64(pages), 0, "pages", 0
+	job.Message, job.Error = "building title index", ""
+	job.ProgressPercent, job.ProgressApprox = 0, true
+	if compressedTotal > 0 {
+		job.ProgressPercent = min(100, float64(compressedDone)/float64(compressedTotal)*100)
+	}
 	job.UpdatedAt = time.Now().UTC()
 	_ = s.saveJobsLocked()
 }

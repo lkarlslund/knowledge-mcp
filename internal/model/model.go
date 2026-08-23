@@ -88,21 +88,23 @@ type LocalWiki struct {
 }
 
 type Job struct {
-	ID             string    `json:"id"`
-	Wiki           string    `json:"wiki"`
-	Kind           string    `json:"kind"`
-	State          string    `json:"state"`
-	Phase          string    `json:"phase"`
-	Completed      int64     `json:"completed"`
-	Total          int64     `json:"total"`
-	Units          string    `json:"units,omitempty"`
-	Rate           float64   `json:"rate,omitempty"`
-	Message        string    `json:"message,omitempty"`
-	Error          string    `json:"error,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	TitleAvailable bool      `json:"title_available"`
-	SourceJobID    string    `json:"source_job_id,omitempty"`
+	ID              string    `json:"id"`
+	Wiki            string    `json:"wiki"`
+	Kind            string    `json:"kind"`
+	State           string    `json:"state"`
+	Phase           string    `json:"phase"`
+	Completed       int64     `json:"completed"`
+	Total           int64     `json:"total"`
+	Units           string    `json:"units,omitempty"`
+	Rate            float64   `json:"rate,omitempty"`
+	ProgressPercent float64   `json:"progress_percent,omitempty"`
+	ProgressApprox  bool      `json:"progress_approximate,omitempty"`
+	Message         string    `json:"message,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	TitleAvailable  bool      `json:"title_available"`
+	SourceJobID     string    `json:"source_job_id,omitempty"`
 }
 
 type SearchHit struct {

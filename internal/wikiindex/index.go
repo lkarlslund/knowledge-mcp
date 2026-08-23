@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/blevesearch/bleve/v2"
@@ -65,6 +66,30 @@ type bodyCheckpoint struct {
 	Completed   []byte `json:"completed"`
 }
 
+type titlePartCheckpoint struct {
+	Lines    int64 `json:"lines"`
+	Complete bool  `json:"complete,omitempty"`
+}
+
+type titleCheckpoint struct {
+	Version        int                   `json:"version"`
+	Fingerprint    string                `json:"fingerprint"`
+	Pages          uint64                `json:"pages"`
+	CompressedDone int64                 `json:"compressed_done"`
+	Parts          []titlePartCheckpoint `json:"parts"`
+}
+
+type countingReader struct {
+	reader io.Reader
+	bytes  atomic.Int64
+}
+
+func (r *countingReader) Read(buffer []byte) (int, error) {
+	n, err := r.reader.Read(buffer)
+	r.bytes.Add(int64(n))
+	return n, err
+}
+
 type Part struct {
 	Number    int
 	DumpPath  string
@@ -82,14 +107,34 @@ type xmlPage struct {
 }
 
 type BuildProgress func(done, total int64)
+type TitleBuildProgress func(pages uint64, compressedDone, compressedTotal int64)
 
-func BuildTitle(ctx context.Context, parts []Part, destination string, progress BuildProgress) (uint64, error) {
-	if err := os.RemoveAll(destination); err != nil {
-		return 0, err
+func BuildTitle(ctx context.Context, parts []Part, destination string, progress TitleBuildProgress) (uint64, error) {
+	checkpointPath := destination + ".checkpoint.json"
+	checkpoint, compressedTotal, resume := loadTitleCheckpoint(checkpointPath, destination, parts)
+	var idx bleve.Index
+	var err error
+	if resume {
+		idx, err = bleve.Open(destination)
+	} else {
+		if err := os.RemoveAll(destination); err != nil {
+			return 0, err
+		}
+		_ = os.Remove(checkpointPath)
+		checkpoint, compressedTotal, err = newTitleCheckpoint(parts)
+		if err != nil {
+			return 0, err
+		}
+		idx, err = bleve.New(destination, titleMapping())
 	}
-	idx, err := bleve.New(destination, titleMapping())
 	if err != nil {
-		return 0, fmt.Errorf("create title index: %w", err)
+		return 0, fmt.Errorf("open title index: %w", err)
+	}
+	if !resume {
+		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
+			_ = idx.Close()
+			return 0, fmt.Errorf("create title checkpoint: %w", err)
+		}
 	}
 	closed := false
 	defer func() {
@@ -97,21 +142,57 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 			_ = idx.Close()
 		}
 	}()
-	batch := idx.NewBatch()
-	var count uint64
-	for _, part := range parts {
+	count := checkpoint.Pages
+	progress(count, checkpoint.CompressedDone, compressedTotal)
+	compressedBefore := int64(0)
+	for partIndex, part := range parts {
+		partSize, err := fileSize(part.IndexPath)
+		if err != nil {
+			return 0, err
+		}
+		if checkpoint.Parts[partIndex].Complete {
+			compressedBefore += partSize
+			continue
+		}
 		f, err := os.Open(part.IndexPath)
 		if err != nil {
 			return 0, err
 		}
-		scanner := bufio.NewScanner(pbzip2.NewReader(ctx, f))
+		compressed := &countingReader{reader: f}
+		scanner := bufio.NewScanner(pbzip2.NewReader(ctx, compressed))
 		scanner.Buffer(make([]byte, 64<<10), 4<<20)
+		batch := idx.NewBatch()
+		batchCount := 0
+		lines := int64(0)
+		commit := func(complete bool) error {
+			if batchCount > 0 {
+				if err := idx.Batch(batch); err != nil {
+					return fmt.Errorf("write title index: %w", err)
+				}
+				batch, batchCount = idx.NewBatch(), 0
+			}
+			checkpoint.Pages = count
+			checkpoint.Parts[partIndex] = titlePartCheckpoint{Lines: lines, Complete: complete}
+			checkpoint.CompressedDone = max(checkpoint.CompressedDone, compressedBefore+compressed.bytes.Load())
+			if complete {
+				checkpoint.CompressedDone = compressedBefore + partSize
+			}
+			if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
+				return fmt.Errorf("save title checkpoint: %w", err)
+			}
+			progress(count, checkpoint.CompressedDone, compressedTotal)
+			return nil
+		}
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
 				_ = f.Close()
 				return 0, ctx.Err()
 			default:
+			}
+			lines++
+			if lines <= checkpoint.Parts[partIndex].Lines {
+				continue
 			}
 			offset, pageID, title, parseErr := parseIndexLine(scanner.Text())
 			if parseErr != nil {
@@ -124,13 +205,12 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 				return 0, err
 			}
 			count++
-			if count%5000 == 0 {
-				if err := idx.Batch(batch); err != nil {
+			batchCount++
+			if batchCount >= 5000 {
+				if err := commit(false); err != nil {
 					_ = f.Close()
-					return 0, fmt.Errorf("write title index: %w", err)
+					return 0, err
 				}
-				batch = idx.NewBatch()
-				progress(int64(count), 0)
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -140,15 +220,19 @@ func BuildTitle(ctx context.Context, parts []Part, destination string, progress 
 		if err := f.Close(); err != nil {
 			return 0, err
 		}
+		if err := commit(true); err != nil {
+			return 0, err
+		}
+		compressedBefore += partSize
 	}
-	if err := idx.Batch(batch); err != nil {
-		return 0, fmt.Errorf("write final title batch: %w", err)
-	}
-	progress(int64(count), int64(count))
+	progress(count, compressedTotal, compressedTotal)
 	if err := idx.Close(); err != nil {
 		return 0, fmt.Errorf("close title index: %w", err)
 	}
 	closed = true
+	if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("remove title checkpoint: %w", err)
+	}
 	return count, nil
 }
 
@@ -316,6 +400,55 @@ func newBodyCheckpoint(streams []stream) bodyCheckpoint {
 	}
 }
 
+func newTitleCheckpoint(parts []Part) (titleCheckpoint, int64, error) {
+	total, fingerprint, err := titleCheckpointMetadata(parts)
+	if err != nil {
+		return titleCheckpoint{}, 0, err
+	}
+	return titleCheckpoint{Version: 1, Fingerprint: fingerprint, Parts: make([]titlePartCheckpoint, len(parts))}, total, nil
+}
+
+func loadTitleCheckpoint(path, destination string, parts []Part) (titleCheckpoint, int64, bool) {
+	total, fingerprint, err := titleCheckpointMetadata(parts)
+	if err != nil {
+		return titleCheckpoint{}, 0, false
+	}
+	if info, err := os.Stat(destination); err != nil || !info.IsDir() {
+		return titleCheckpoint{}, total, false
+	}
+	var checkpoint titleCheckpoint
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &checkpoint) != nil {
+		return titleCheckpoint{}, total, false
+	}
+	if checkpoint.Version != 1 || checkpoint.Fingerprint != fingerprint || len(checkpoint.Parts) != len(parts) || checkpoint.CompressedDone < 0 || checkpoint.CompressedDone > total {
+		return titleCheckpoint{}, total, false
+	}
+	return checkpoint, total, true
+}
+
+func titleCheckpointMetadata(parts []Part) (int64, string, error) {
+	hash := sha256.New()
+	var total int64
+	for _, part := range parts {
+		size, err := fileSize(part.IndexPath)
+		if err != nil {
+			return 0, "", err
+		}
+		total += size
+		_, _ = fmt.Fprintf(hash, "%d:%d\x00", part.Number, size)
+	}
+	return total, hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
 func loadBodyCheckpoint(path, destination string, streams []stream) (bodyCheckpoint, bool) {
 	var checkpoint bodyCheckpoint
 	if info, err := os.Stat(destination); err != nil || !info.IsDir() {
@@ -341,6 +474,10 @@ func loadBodyCheckpoint(path, destination string, streams []stream) (bodyCheckpo
 }
 
 func saveBodyCheckpoint(path string, checkpoint bodyCheckpoint) error {
+	return saveCheckpoint(path, checkpoint)
+}
+
+func saveCheckpoint(path string, checkpoint any) error {
 	data, err := json.Marshal(checkpoint)
 	if err != nil {
 		return err

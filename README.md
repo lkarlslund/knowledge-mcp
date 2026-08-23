@@ -157,11 +157,14 @@ Large wikis such as `enwiki` are discovered and downloaded as ordered multipart
 dump/index pairs.
 
 Large sequential index scans use a parallel bzip2 decoder, and body indexing
-also processes independent multistream chunks concurrently. Its partial Bleve
-index has a compact bitset checkpoint: committed streams are skipped after a
-service restart, and the checkpoint is removed only when the body index is
-complete. Exact page reads use a single-stream decoder to avoid parallel setup
-overhead.
+also processes independent multistream chunks concurrently. Title progress
+shows the exact number of pages processed and an approximate percentage based
+on compressed index bytes consumed. Its partial Bleve index is checkpointed by
+committed line count per dump part, so completed parts are skipped and only the
+current part's prefix is replayed after a restart. Body indexing uses a compact
+bitset checkpoint and skips committed streams. Checkpoints are removed only
+when their indexes are complete. Exact page reads use a single-stream decoder
+to avoid parallel setup overhead.
 
 ## Development
 

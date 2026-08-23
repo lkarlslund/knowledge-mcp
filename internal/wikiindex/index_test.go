@@ -42,7 +42,7 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 		{Number: 0, DumpPath: firstDumpPath, IndexPath: firstIndexPath},
 		{Number: 1, DumpPath: secondDumpPath, IndexPath: secondIndexPath},
 	}
-	count, err := BuildTitle(context.Background(), parts, filepath.Join(dir, TitleIndexDir), func(int64, int64) {})
+	count, err := BuildTitle(context.Background(), parts, filepath.Join(dir, TitleIndexDir), func(uint64, int64, int64) {})
 	if err != nil {
 		t.Fatalf("BuildTitle: %v", err)
 	}
@@ -143,6 +143,59 @@ func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 		if len(result.Hits) == 0 || result.Hits[0].PageID != uint64(pageID) {
 			t.Fatalf("resumed index missing page %d: %#v", pageID, result.Hits)
 		}
+	}
+}
+
+func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "index.bz2")
+	var sourceIndex bytes.Buffer
+	const pageCount = 5100
+	for pageID := 1; pageID <= pageCount; pageID++ {
+		fmt.Fprintf(&sourceIndex, "0:%d:Checkpoint Page %d\n", pageID, pageID)
+	}
+	if err := os.WriteFile(indexPath, compressForTest(t, sourceIndex.Bytes()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parts := []Part{{IndexPath: indexPath}}
+	destination := filepath.Join(dir, TitleIndexDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := BuildTitle(ctx, parts, destination, func(pages uint64, _, _ int64) {
+		if pages >= 5000 {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("first BuildTitle error = %v, want context.Canceled", err)
+	}
+	checkpoint, _, ok := loadTitleCheckpoint(destination+".checkpoint.json", destination, parts)
+	if !ok || checkpoint.Pages != 5000 || checkpoint.Parts[0].Lines != 5000 || checkpoint.Parts[0].Complete {
+		t.Fatalf("checkpoint = %#v, valid %v", checkpoint, ok)
+	}
+
+	firstProgress := uint64(0)
+	count, err := BuildTitle(context.Background(), parts, destination, func(pages uint64, _, _ int64) {
+		if firstProgress == 0 {
+			firstProgress = pages
+		}
+	})
+	if err != nil {
+		t.Fatalf("resumed BuildTitle: %v", err)
+	}
+	if firstProgress != checkpoint.Pages || count != pageCount {
+		t.Fatalf("resumed pages = %d, final count = %d; want %d and %d", firstProgress, count, checkpoint.Pages, pageCount)
+	}
+	if _, err := os.Stat(destination + ".checkpoint.json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed checkpoint still exists: %v", err)
+	}
+	result, err := Search(dir, "Checkpoint Page 5100", 0, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Hits) == 0 || result.Hits[0].PageID != pageCount {
+		t.Fatalf("resumed title index missing final page: %#v", result.Hits)
 	}
 }
 
