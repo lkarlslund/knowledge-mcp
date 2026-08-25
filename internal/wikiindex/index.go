@@ -26,7 +26,10 @@ import (
 	"unicode"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
+	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
+	unicodeTokenizer "github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
 	"github.com/blevesearch/bleve/v2/mapping"
 	blevequery "github.com/blevesearch/bleve/v2/search/query"
 	"github.com/cosnicolaou/pbzip2"
@@ -37,7 +40,7 @@ const (
 	TitleIndexDir            = "titles.bleve"
 	BodyIndexDir             = "bodies.bleve"
 	CurrentTitleIndexVersion = 6
-	CurrentBodyIndexVersion  = 8
+	CurrentBodyIndexVersion  = 9
 	DefaultReadMaxChars      = 100_000
 	MaximumReadMaxChars      = 1_000_000
 	titleBatchDocs           = 50_000
@@ -713,7 +716,14 @@ func OpenReader(generationPath string, fullText bool) (*Reader, error) {
 			shards = append(shards, body)
 		}
 		reader.bodyShards = shards
-		reader.body = bleve.NewIndexAlias(shards...)
+		alias := bleve.NewIndexAlias(shards...)
+		if err := alias.SetIndexMapping(bodyMapping()); err != nil {
+			for _, opened := range shards {
+				_ = opened.Close()
+			}
+			return nil, fmt.Errorf("configure full_text scoring: %w", err)
+		}
+		reader.body = alias
 		if _, err := os.Stat(filepath.Join(generationPath, TitleIndexDir)); errors.Is(err, os.ErrNotExist) {
 			return reader, nil
 		}
@@ -786,31 +796,29 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	if idx == nil {
 		return model.SearchResult{}, errors.New("title index is not open")
 	}
-	strict := searchQuery(query, fullText, true)
-	relaxedBase := searchQuery(query, fullText, false)
+	ranked := rankingQuery(query, fullText)
 	if fullText && !options.IncludeNonArticles {
-		strict = namespaceZeroQuery(strict)
-		relaxedBase = namespaceZeroQuery(relaxedBase)
+		ranked = namespaceZeroQuery(ranked)
 	}
-	relaxed := blevequery.NewBooleanQuery(nil, []blevequery.Query{relaxedBase}, []blevequery.Query{strict})
-	strictTotal, strictHits, err := searchTier(ctx, idx, strict, options.Offset, options.Limit, "all_terms")
+	// Retrieve a substantially wider pool than the caller requested. BM25 and
+	// the inexpensive phrase/all-term signals rank this pool; redirect
+	// canonicalization and deduplication happen before the requested page is cut.
+	candidateLimit := max(250, options.Offset+options.Limit+64)
+	candidateLimit = min(candidateLimit, 5_000)
+	total, candidates, err := searchTier(ctx, idx, ranked, 0, candidateLimit, map[bool]string{true: "bm25", false: "title"}[fullText])
 	if err != nil {
 		return model.SearchResult{}, err
 	}
-	relaxedTotal, _, err := searchTier(ctx, idx, relaxed, 0, 0, "relaxed")
-	if err != nil {
-		return model.SearchResult{}, err
+	if exact, ok := r.exactCanonicalSearchHit(ctx, query, options.IncludeNonArticles); ok {
+		candidates = append([]model.SearchHit{exact}, candidates...)
 	}
-	hits := strictHits
-	if len(hits) < options.Limit {
-		relaxedOffset := max(0, options.Offset-int(strictTotal))
-		_, relaxedHits, searchErr := searchTier(ctx, idx, relaxed, relaxedOffset, options.Limit-len(hits), "relaxed")
-		if searchErr != nil {
-			return model.SearchResult{}, searchErr
-		}
-		hits = append(hits, relaxedHits...)
+	candidates = deduplicateSearchHits(candidates)
+	start := min(options.Offset, len(candidates))
+	end := min(start+options.Limit, len(candidates))
+	hits := candidates[start:end]
+	if total < uint64(len(candidates)) {
+		total = uint64(len(candidates))
 	}
-	total := strictTotal + relaxedTotal
 	result := model.SearchResult{Query: query, SearchMode: mode, Total: total, Offset: options.Offset, NamespaceFilterApplied: fullText && !options.IncludeNonArticles, SnippetsAvailable: fullText, SnippetsComplete: fullText, Hits: hits}
 	if options.Offset+len(hits) < int(total) {
 		result.NextOffset = options.Offset + len(hits)
@@ -832,6 +840,64 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 		}
 	}
 	return result, nil
+}
+
+func (r *Reader) exactCanonicalSearchHit(ctx context.Context, query string, includeNonArticles bool) (model.SearchHit, bool) {
+	if r.title == nil {
+		return model.SearchHit{}, false
+	}
+	page, err := r.loadPage(ctx, query, 0)
+	if err != nil {
+		return model.SearchHit{}, false
+	}
+	matchedTitle := page.Title
+	redirected := false
+	visited := map[uint64]struct{}{page.ID: {}}
+	for range 8 {
+		target := redirectTarget(page)
+		if target == "" {
+			break
+		}
+		targetTitle, _ := splitRedirectTarget(target)
+		next, loadErr := r.loadPage(ctx, targetTitle, 0)
+		if loadErr != nil {
+			return model.SearchHit{}, false
+		}
+		if _, exists := visited[next.ID]; exists {
+			return model.SearchHit{}, false
+		}
+		visited[next.ID] = struct{}{}
+		page, redirected = next, true
+	}
+	if !includeNonArticles && page.Namespace != 0 {
+		return model.SearchHit{}, false
+	}
+	mode := "exact_title"
+	if redirected {
+		mode = "exact_redirect"
+	}
+	return model.SearchHit{PageID: page.ID, Title: page.Title, Namespace: page.Namespace, Score: math.MaxFloat64, MatchMode: mode, MatchedTitle: matchedTitle}, true
+}
+
+func deduplicateSearchHits(hits []model.SearchHit) []model.SearchHit {
+	seenPageIDs := make(map[uint64]struct{}, len(hits))
+	seenTitles := make(map[string]struct{}, len(hits))
+	result := make([]model.SearchHit, 0, len(hits))
+	for _, hit := range hits {
+		if _, exists := seenPageIDs[hit.PageID]; exists {
+			continue
+		}
+		if _, exists := seenTitles[normalizeTitle(hit.Title)]; exists {
+			continue
+		}
+		seenPageIDs[hit.PageID] = struct{}{}
+		seenTitles[normalizeTitle(hit.Title)] = struct{}{}
+		if hit.MatchedTitle != "" {
+			seenTitles[normalizeTitle(hit.MatchedTitle)] = struct{}{}
+		}
+		result = append(result, hit)
+	}
+	return result
 }
 
 func (r *Reader) loadPagesByID(ctx context.Context, pageIDs []uint64) map[uint64]xmlPage {
@@ -890,41 +956,37 @@ func (r *Reader) loadPagesByID(ctx context.Context, pageIDs []uint64) map[uint64
 	return loaded
 }
 
-func searchQuery(query string, fullText, strict bool) blevequery.Query {
-	if fullText && strict {
-		terms := strings.Fields(query)
-		must := make([]blevequery.Query, 0, len(terms))
-		for _, term := range terms {
-			titleTerm := bleve.NewMatchQuery(term)
-			titleTerm.SetField("title")
-			titleTerm.SetBoost(3)
-			bodyTerm := bleve.NewMatchQuery(term)
-			bodyTerm.SetField("body")
-			must = append(must, bleve.NewDisjunctionQuery(titleTerm, bodyTerm))
-		}
-		exact := bleve.NewTermQuery(normalizeTitle(query))
-		exact.SetField("title_exact")
-		exact.SetBoost(12)
-		return bleve.NewDisjunctionQuery(exact, bleve.NewConjunctionQuery(must...))
-	}
-	operator := blevequery.MatchQueryOperatorOr
-	if strict {
-		operator = blevequery.MatchQueryOperatorAnd
-	}
+func rankingQuery(query string, fullText bool) blevequery.Query {
 	title := bleve.NewMatchQuery(query)
 	title.SetField("title")
-	title.SetBoost(3)
-	title.SetOperator(operator)
+	title.SetBoost(4)
+	title.SetOperator(blevequery.MatchQueryOperatorOr)
 	queries := []blevequery.Query{title}
 	if fullText {
 		exact := bleve.NewTermQuery(normalizeTitle(query))
 		exact.SetField("title_exact")
-		exact.SetBoost(12)
+		exact.SetBoost(20)
 		body := bleve.NewMatchQuery(query)
 		body.SetField("body")
-		body.SetOperator(operator)
-		queries = append([]blevequery.Query{exact}, queries...)
-		queries = append(queries, body)
+		body.SetOperator(blevequery.MatchQueryOperatorOr)
+		titlePhrase := bleve.NewMatchPhraseQuery(query)
+		titlePhrase.SetField("title")
+		titlePhrase.SetBoost(8)
+		bodyPhrase := bleve.NewMatchPhraseQuery(query)
+		bodyPhrase.SetField("body")
+		bodyPhrase.SetBoost(3)
+		must := make([]blevequery.Query, 0, len(strings.Fields(query)))
+		for _, term := range strings.Fields(query) {
+			titleTerm := bleve.NewMatchQuery(term)
+			titleTerm.SetField("title")
+			titleTerm.SetBoost(4)
+			bodyTerm := bleve.NewMatchQuery(term)
+			bodyTerm.SetField("body")
+			must = append(must, bleve.NewDisjunctionQuery(titleTerm, bodyTerm))
+		}
+		allTerms := bleve.NewConjunctionQuery(must...)
+		allTerms.SetBoost(2)
+		queries = []blevequery.Query{exact, titlePhrase, bodyPhrase, allTerms, title, body}
 	}
 	return bleve.NewDisjunctionQuery(queries...)
 }
@@ -1504,7 +1566,8 @@ func titleMapping() mapping.IndexMapping {
 }
 
 func bodyMapping() mapping.IndexMapping {
-	m := bleve.NewIndexMapping()
+	m := newMultilingualMapping()
+	m.ScoringModel = "bm25"
 	m.IndexDynamic, m.StoreDynamic, m.DocValuesDynamic = false, false, false
 	doc := bleve.NewDocumentMapping()
 	title := bleve.NewTextFieldMapping()
@@ -1522,6 +1585,22 @@ func bodyMapping() mapping.IndexMapping {
 	doc.AddFieldMappingsAt("body", body)
 	doc.AddSubDocumentMapping("_all", bleve.NewDocumentDisabledMapping())
 	m.DefaultMapping = doc
+	return m
+}
+
+const multilingualAnalyzerName = "unicode_lowercase"
+
+func newMultilingualMapping() *mapping.IndexMappingImpl {
+	m := bleve.NewIndexMapping()
+	err := m.AddCustomAnalyzer(multilingualAnalyzerName, map[string]interface{}{
+		"type":          custom.Name,
+		"tokenizer":     unicodeTokenizer.Name,
+		"token_filters": []string{lowercase.Name},
+	})
+	if err != nil {
+		panic("define multilingual analyzer: " + err.Error())
+	}
+	m.DefaultAnalyzer = multilingualAnalyzerName
 	return m
 }
 

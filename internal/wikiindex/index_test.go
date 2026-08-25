@@ -124,12 +124,21 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 			t.Fatalf("exact-title hit has non-finite score: %#v", hit)
 		}
 	}
+	redirectResult, err := Search(dir, "Alpha alias", 0, 10, true)
+	if err != nil || len(redirectResult.Hits) == 0 || redirectResult.Hits[0].PageID != 1 || redirectResult.Hits[0].Title != "Alpha Page" || redirectResult.Hits[0].MatchedTitle != "Alpha alias" || redirectResult.Hits[0].MatchMode != "exact_redirect" {
+		t.Fatalf("exact redirect search = %#v, %v", redirectResult.Hits, err)
+	}
+	for _, hit := range redirectResult.Hits[1:] {
+		if hit.PageID == redirectResult.Hits[0].PageID {
+			t.Fatalf("canonical result was not deduplicated: %#v", redirectResult.Hits)
+		}
+	}
 	redirectNoise, err := Search(dir, "unique_redirect_stub_noise", 0, 10, true)
 	if err != nil || len(redirectNoise.Hits) != 0 {
 		t.Fatalf("redirect stub text was indexed: %#v, %v", redirectNoise.Hits, err)
 	}
 	relevance, err := Search(dir, "Trump Frederiksen phone call Greenland", 0, 10, true)
-	if err != nil || len(relevance.Hits) < 2 || relevance.Hits[0].PageID != 5 || relevance.Hits[0].MatchMode != "all_terms" || relevance.Hits[1].PageID != 6 || relevance.Hits[1].MatchMode != "relaxed" {
+	if err != nil || len(relevance.Hits) < 2 || relevance.Hits[0].PageID != 5 || relevance.Hits[0].MatchMode != "bm25" || relevance.Hits[1].PageID != 6 || relevance.Hits[1].MatchMode != "bm25" {
 		t.Fatalf("all-term relevance ordering = %#v, %v", relevance.Hits, err)
 	}
 	if relevance.Hits[0].Namespace != 0 || !strings.Contains(relevance.Hits[0].Snippet, "Trump phone call") {

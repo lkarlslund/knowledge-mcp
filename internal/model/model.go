@@ -150,13 +150,14 @@ type Job struct {
 }
 
 type SearchHit struct {
-	PageID    uint64  `json:"page_id"`
-	Title     string  `json:"title"`
-	PageURL   string  `json:"page_url,omitempty"`
-	Namespace int     `json:"namespace"`
-	Score     float64 `json:"score"`
-	MatchMode string  `json:"match_mode"`
-	Snippet   string  `json:"snippet,omitempty"`
+	PageID       uint64  `json:"page_id"`
+	Title        string  `json:"title"`
+	MatchedTitle string  `json:"matched_title,omitempty"`
+	PageURL      string  `json:"page_url,omitempty"`
+	Namespace    int     `json:"namespace"`
+	Score        float64 `json:"score"`
+	MatchMode    string  `json:"match_mode"`
+	Snippet      string  `json:"snippet,omitempty"`
 }
 
 type SearchResult struct {

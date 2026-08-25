@@ -126,7 +126,7 @@ func New(service Service) *mcp.Server {
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed offline wiki snapshot. Results matching all query terms rank before relaxed matches and include canonical URLs, page IDs, and query-centered snippets. Encyclopedia articles are searched by default; set include_non_articles to include project, category, draft, talk, and other namespaces. Follow a relevant result with wiki_read using its page_id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed offline wiki snapshot. Full-text results use BM25 retrieval with title, phrase, and all-term relevance signals; exact titles and redirects resolve to the canonical page and duplicate aliases are collapsed. Results include canonical URLs, page IDs, match metadata, and query-centered snippets. Encyclopedia articles are searched by default; set include_non_articles to include project, category, draft, talk, and other namespaces. Follow a relevant result with wiki_read using its page_id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
 		if strings.TrimSpace(in.Wiki) == "" || strings.TrimSpace(in.Query) == "" {
 			return nil, model.SearchResult{}, errors.New("provide wiki and a non-empty query")
 		}
