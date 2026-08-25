@@ -24,7 +24,7 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err := os.MkdirAll(partsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><ns>0</ns><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]], [[Beta: Details#Overview|known page]], and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;
+	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><ns>0</ns><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has an Alpha alias, a [[Useful link|useful label]], [[Beta: Details#Overview|known page]], and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;
 == Details ==
 The useful redirected section.</text></revision></page><page><title>Alpha alias</title><ns>0</ns><id>3</id><redirect title="Alpha Page"/><revision><id>33</id><timestamp>2026-01-03T00:00:00Z</timestamp><text>#REDIRECT [[Alpha Page#Details]]
 unique_redirect_stub_noise</text></revision></page><page><title>Alpha double alias</title><ns>0</ns><id>4</id><redirect title="Alpha alias"/><revision><id>44</id><timestamp>2026-01-04T00:00:00Z</timestamp><text>#REDIRECT [[Alpha alias]]</text></revision></page>`))
@@ -136,6 +136,15 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 			t.Fatalf("canonical result was not deduplicated: %#v", redirectResult.Hits)
 		}
 	}
+	embeddedReader, err := OpenReader(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embeddedRedirect, _ := embeddedReader.embeddedCanonicalSearchHits(context.Background(), "about Alpha alias", false)
+	_ = embeddedReader.Close()
+	if len(embeddedRedirect) == 0 || embeddedRedirect[0].PageID != 1 || embeddedRedirect[0].MatchedTitle != "Alpha alias" || embeddedRedirect[0].MatchMode != "embedded_redirect" {
+		t.Fatalf("embedded redirect search = %#v", embeddedRedirect)
+	}
 	redirectNoise, err := Search(dir, "unique_redirect_stub_noise", 0, 10, true)
 	if err != nil || len(redirectNoise.Hits) != 0 {
 		t.Fatalf("redirect stub text was indexed: %#v, %v", redirectNoise.Hits, err)
@@ -230,6 +239,24 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	whole, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true}, "")
 	if err != nil || reconstructed.String() != whole.Content {
 		t.Fatalf("paginated reconstruction differs: got %q want %q, %v", reconstructed.String(), whole.Content, err)
+	}
+}
+
+func TestFuseSearchHitsPreservesPrimaryAndRecoversBroadCandidates(t *testing.T) {
+	t.Parallel()
+	primary := []model.SearchHit{{PageID: 1, MatchMode: "bm25"}, {PageID: 2, MatchMode: "bm25"}}
+	broad := []model.SearchHit{{PageID: 2, MatchMode: "bm25_recall"}, {PageID: 3, MatchMode: "bm25_recall"}}
+	got := fuseSearchHits(primary, broad)
+	if len(got) != 3 || got[0].PageID != 1 || got[1].PageID != 2 || got[2].PageID != 3 {
+		t.Fatalf("fused hits = %#v", got)
+	}
+	if got[0].MatchMode != "bm25" || got[2].MatchMode != "bm25_recall" {
+		t.Fatalf("fused match modes = %#v", got)
+	}
+	for _, hit := range got {
+		if hit.Score <= 0 || math.IsNaN(hit.Score) || math.IsInf(hit.Score, 0) {
+			t.Fatalf("invalid fused score: %#v", hit)
+		}
 	}
 }
 

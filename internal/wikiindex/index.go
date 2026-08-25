@@ -2,6 +2,7 @@ package wikiindex
 
 import (
 	"bufio"
+	"cmp"
 	"compress/bzip2"
 	"context"
 	"crypto/sha256"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -801,24 +803,76 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 		return model.SearchResult{}, errors.New("title index is not open")
 	}
 	ranked := rankingQuery(query, fullText)
+	var recall blevequery.Query
+	if fullText {
+		recall = strictRecallQuery(query)
+	}
 	if fullText && !options.IncludeNonArticles {
 		ranked = namespaceZeroQuery(ranked)
+		recall = namespaceZeroQuery(recall)
 	}
 	// Retrieve a substantially wider pool than the caller requested. BM25 and
 	// the inexpensive phrase/all-term signals rank this pool; redirect
 	// canonicalization and deduplication happen before the requested page is cut.
 	const candidateLimit = 250
-	candidates, err := searchTier(ctx, idx, ranked, 0, candidateLimit, map[bool]string{true: "bm25", false: "title"}[fullText])
-	if err != nil {
-		return model.SearchResult{}, err
+	var candidates []model.SearchHit
+	if fullText {
+		type candidateResult struct {
+			hits  []model.SearchHit
+			broad bool
+			err   error
+		}
+		results := make(chan candidateResult, 2)
+		go func() {
+			hits, searchErr := searchTier(ctx, idx, ranked, 0, candidateLimit, "bm25")
+			results <- candidateResult{hits: hits, err: searchErr}
+		}()
+		go func() {
+			hits, searchErr := searchTier(ctx, idx, recall, 0, candidateLimit, "all_terms_recall")
+			results <- candidateResult{hits: hits, broad: true, err: searchErr}
+		}()
+		var broadCandidates []model.SearchHit
+		for range 2 {
+			result := <-results
+			if result.err != nil {
+				return model.SearchResult{}, result.err
+			}
+			if result.broad {
+				broadCandidates = result.hits
+			} else {
+				candidates = result.hits
+			}
+		}
+		candidates = fuseSearchHits(candidates, broadCandidates)
+	} else {
+		var err error
+		candidates, err = searchTier(ctx, idx, ranked, 0, candidateLimit, "title")
+		if err != nil {
+			return model.SearchResult{}, err
+		}
 	}
-	matchedRedirectPageID := uint64(0)
+	matchedRedirectPageIDs := make(map[uint64]struct{})
 	if exact, matchedPageID, ok := r.exactCanonicalSearchHit(ctx, query, options.IncludeNonArticles); ok {
 		exact.Score = highestSearchScore(candidates) + 1
 		candidates = append([]model.SearchHit{exact}, candidates...)
-		matchedRedirectPageID = matchedPageID
+		if matchedPageID != 0 {
+			matchedRedirectPageIDs[matchedPageID] = struct{}{}
+		}
+	} else if fullText {
+		embedded, matchedPageIDs := r.embeddedCanonicalSearchHits(ctx, query, options.IncludeNonArticles)
+		if len(embedded) > 0 {
+			insertAt := min(1, len(candidates))
+			tierScore := embeddedSearchScore(candidates, insertAt)
+			for index := range embedded {
+				embedded[index].Score = tierScore
+			}
+			candidates = slices.Insert(candidates, insertAt, embedded...)
+		}
+		for _, pageID := range matchedPageIDs {
+			matchedRedirectPageIDs[pageID] = struct{}{}
+		}
 	}
-	candidates = deduplicateSearchHits(candidates, matchedRedirectPageID)
+	candidates = deduplicateSearchHits(candidates, matchedRedirectPageIDs)
 	total := uint64(len(candidates))
 	start := min(options.Offset, len(candidates))
 	end := min(start+options.Limit, len(candidates))
@@ -899,11 +953,21 @@ func highestSearchScore(hits []model.SearchHit) float64 {
 	return highest
 }
 
-func deduplicateSearchHits(hits []model.SearchHit, matchedRedirectPageID uint64) []model.SearchHit {
+func embeddedSearchScore(hits []model.SearchHit, insertAt int) float64 {
+	if len(hits) == 0 {
+		return 1
+	}
+	if insertAt >= len(hits) {
+		return hits[len(hits)-1].Score / 2
+	}
+	return (hits[insertAt-1].Score + hits[insertAt].Score) / 2
+}
+
+func deduplicateSearchHits(hits []model.SearchHit, excludedPageIDs map[uint64]struct{}) []model.SearchHit {
 	seenPageIDs := make(map[uint64]struct{}, len(hits))
 	result := make([]model.SearchHit, 0, len(hits))
 	for _, hit := range hits {
-		if hit.PageID == matchedRedirectPageID {
+		if _, excluded := excludedPageIDs[hit.PageID]; excluded {
 			continue
 		}
 		if _, exists := seenPageIDs[hit.PageID]; exists {
@@ -913,6 +977,177 @@ func deduplicateSearchHits(hits []model.SearchHit, matchedRedirectPageID uint64)
 		result = append(result, hit)
 	}
 	return result
+}
+
+func fuseSearchHits(primary, broad []model.SearchHit) []model.SearchHit {
+	const rankOffset = 60.0
+	const protectedPrimaryHits = 10
+	type fusedHit struct {
+		hit   model.SearchHit
+		score float64
+	}
+	protected := min(protectedPrimaryHits, len(primary))
+	result := make([]model.SearchHit, 0, len(primary)+len(broad))
+	seen := make(map[uint64]struct{}, len(primary)+len(broad))
+	for _, hit := range primary[:protected] {
+		result = append(result, hit)
+		seen[hit.PageID] = struct{}{}
+	}
+	fused := make(map[uint64]fusedHit, len(primary)+len(broad))
+	for index, hit := range primary[protected:] {
+		fused[hit.PageID] = fusedHit{hit: hit, score: 1 / (rankOffset + float64(index+1))}
+	}
+	for index, hit := range broad {
+		if _, exists := seen[hit.PageID]; exists {
+			continue
+		}
+		item, exists := fused[hit.PageID]
+		if !exists {
+			item.hit = hit
+		}
+		item.score += 1 / (rankOffset + float64(index+1))
+		fused[hit.PageID] = item
+	}
+	tail := make([]model.SearchHit, 0, len(fused))
+	for _, item := range fused {
+		item.hit.Score = item.score
+		tail = append(tail, item.hit)
+	}
+	slices.SortFunc(tail, func(left, right model.SearchHit) int {
+		if left.Score != right.Score {
+			return cmp.Compare(right.Score, left.Score)
+		}
+		return cmp.Compare(left.PageID, right.PageID)
+	})
+	result = append(result, tail...)
+	for index := range result {
+		result[index].Score = 1 / (rankOffset + float64(index+1))
+	}
+	return result
+}
+
+func (r *Reader) embeddedCanonicalSearchHits(ctx context.Context, query string, includeNonArticles bool) ([]model.SearchHit, []uint64) {
+	if r.title == nil {
+		return nil, nil
+	}
+	tokens := embeddedTitleTokens(query)
+	if len(tokens) < 3 {
+		return nil, nil
+	}
+	minimumSpan := max(2, (len(tokens)*2+4)/5)
+	maximumSpan := min(len(tokens)-1, 8)
+	type phrase struct {
+		title string
+		span  int
+	}
+	phrases := make(map[string]phrase)
+	queries := make([]blevequery.Query, 0)
+	for span := maximumSpan; span >= minimumSpan; span-- {
+		for start := 0; start+span <= len(tokens); start++ {
+			title := strings.Join(tokens[start:start+span], " ")
+			normalized := normalizeTitle(title)
+			if _, exists := phrases[normalized]; exists {
+				continue
+			}
+			phrases[normalized] = phrase{title: title, span: span}
+			term := bleve.NewTermQuery(normalized)
+			term.SetField("title_exact")
+			queries = append(queries, term)
+		}
+	}
+	if len(queries) == 0 {
+		return nil, nil
+	}
+	request := bleve.NewSearchRequestOptions(bleve.NewDisjunctionQuery(queries...), len(queries), 0, false)
+	request.Fields = []string{"title"}
+	response, err := r.title.SearchInContext(ctx, request)
+	if err != nil || len(response.Hits) == 0 {
+		return nil, nil
+	}
+	bestSpan := 0
+	matches := make([]phrase, 0, len(response.Hits))
+	for _, hit := range response.Hits {
+		title, ok := hit.Fields["title"].(string)
+		if !ok {
+			continue
+		}
+		candidate, ok := phrases[normalizeTitle(title)]
+		if !ok || candidate.span < bestSpan {
+			continue
+		}
+		if candidate.span > bestSpan {
+			bestSpan = candidate.span
+			matches = matches[:0]
+		}
+		candidate.title = title
+		matches = append(matches, candidate)
+	}
+	hits := make([]model.SearchHit, 0, min(3, len(matches)))
+	matchedRedirectPageIDs := make([]uint64, 0, min(3, len(matches)))
+	seen := make(map[uint64]struct{})
+	for _, match := range matches {
+		if match.span == 2 && match.span*3 < len(tokens)*2 {
+			continue
+		}
+		if !r.distinctiveBodyTerms(ctx, match.title, match.span) {
+			continue
+		}
+		hit, matchedPageID, ok := r.exactCanonicalSearchHit(ctx, match.title, includeNonArticles)
+		if !ok || hit.MatchMode != "exact_redirect" {
+			continue
+		}
+		if _, exists := seen[hit.PageID]; exists {
+			continue
+		}
+		seen[hit.PageID] = struct{}{}
+		hit.MatchMode = "embedded_redirect"
+		hits = append(hits, hit)
+		if matchedPageID != 0 {
+			matchedRedirectPageIDs = append(matchedRedirectPageIDs, matchedPageID)
+		}
+		if len(hits) == 3 {
+			break
+		}
+	}
+	return hits, matchedRedirectPageIDs
+}
+
+func (r *Reader) distinctiveBodyTerms(ctx context.Context, phrase string, terms int) bool {
+	if r.body == nil {
+		return false
+	}
+	documents, err := r.body.DocCount()
+	if err != nil {
+		return false
+	}
+	query := bleve.NewMatchQuery(phrase)
+	query.SetField("body")
+	query.SetOperator(blevequery.MatchQueryOperatorAnd)
+	request := bleve.NewSearchRequestOptions(query, 0, 0, false)
+	response, err := r.body.SearchInContext(ctx, request)
+	if err != nil || response.Total == 0 {
+		return false
+	}
+	divisor := uint64(1_000)
+	if terms == 2 {
+		divisor = 20_000
+	}
+	maximumMatches := max(uint64(32), documents/divisor)
+	return response.Total <= maximumMatches
+}
+
+func embeddedTitleTokens(query string) []string {
+	fields := strings.Fields(query)
+	tokens := make([]string, 0, len(fields))
+	for _, field := range fields {
+		token := strings.TrimFunc(field, func(char rune) bool {
+			return !unicode.IsLetter(char) && !unicode.IsNumber(char)
+		})
+		if token != "" {
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
 }
 
 func (r *Reader) loadPagesByID(ctx context.Context, pageIDs []uint64) map[uint64]xmlPage {
@@ -1017,6 +1252,20 @@ func rankingQuery(query string, fullText bool) blevequery.Query {
 		queries = []blevequery.Query{titlePhrase, bodyPhrase, allTerms, title, body}
 	}
 	return bleve.NewDisjunctionQuery(queries...)
+}
+
+func strictRecallQuery(query string) blevequery.Query {
+	terms := strings.Fields(query)
+	must := make([]blevequery.Query, 0, len(terms))
+	for _, term := range terms {
+		title := bleve.NewMatchQuery(term)
+		title.SetField("title")
+		title.SetBoost(3)
+		body := bleve.NewMatchQuery(term)
+		body.SetField("body")
+		must = append(must, bleve.NewDisjunctionQuery(title, body))
+	}
+	return bleve.NewConjunctionQuery(must...)
 }
 
 func namespaceZeroQuery(query blevequery.Query) blevequery.Query {
