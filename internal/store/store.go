@@ -567,6 +567,7 @@ func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, opt
 		return model.Page{}, err
 	}
 	defer release()
+	options.LinkWiki = wiki
 	page, err := reader.ReadPage(ctx, title, pageID, options, manifest.Site.OnlineSourceURL)
 	page.Wiki = wiki
 	if errors.Is(err, wikiindex.ErrPageNotFound) && strings.TrimSpace(title) != "" {

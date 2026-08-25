@@ -24,7 +24,7 @@ func TestTitleAndBodyIndexes(t *testing.T) {
 	if err := os.MkdirAll(partsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><ns>0</ns><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]] and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;
+	first := compressForTest(t, []byte(`<mediawiki><page><title>Alpha Page</title><ns>0</ns><id>1</id><revision><id>11</id><timestamp>2026-01-01T00:00:00Z</timestamp><text>Alpha has a [[Useful link|useful label]], [[Beta: Details#Overview|known page]], and {{template|noise}}.&lt;ref name="proof"&gt;A cited source.&lt;/ref&gt;
 == Details ==
 The useful redirected section.</text></revision></page><page><title>Alpha alias</title><ns>0</ns><id>3</id><redirect title="Alpha Page"/><revision><id>33</id><timestamp>2026-01-03T00:00:00Z</timestamp><text>#REDIRECT [[Alpha Page#Details]]
 unique_redirect_stub_noise</text></revision></page><page><title>Alpha double alias</title><ns>0</ns><id>4</id><redirect title="Alpha alias"/><revision><id>44</id><timestamp>2026-01-04T00:00:00Z</timestamp><text>#REDIRECT [[Alpha alias]]</text></revision></page>`))
@@ -162,6 +162,21 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 		t.Fatal(err)
 	}
 	defer func() { _ = readReader.Close() }()
+	linkedPage, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", LinkWiki: "enwiki", MaxChars: 1000, FollowRedirects: true}, "https://en.wikipedia.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`[known page](wiki-read://read?wiki=enwiki&page_id=2&section=Overview "Call wiki_read with wiki=enwiki and page_id=2 and section=Overview")`,
+		`[useful label](wiki-read://read?wiki=enwiki&title=Useful+link "Call wiki_read with wiki=enwiki and title=Useful link")`,
+	} {
+		if !strings.Contains(linkedPage.Content, want) {
+			t.Errorf("linked Markdown does not contain %q:\n%s", want, linkedPage.Content)
+		}
+	}
+	if strings.Contains(linkedPage.Content, "https://en.wikipedia.org/wiki/") {
+		t.Errorf("linked Markdown retained an online internal URL:\n%s", linkedPage.Content)
+	}
 	sectionPage, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", Section: "Details", MaxChars: 1000, FollowRedirects: true, IncludeOutline: true}, "https://en.wikipedia.org")
 	if err != nil || sectionPage.SectionFound == nil || !*sectionPage.SectionFound || len(sectionPage.Sections) != 1 || sectionPage.Sections[0].Anchor != "Details" || strings.Contains(sectionPage.Content, "Alpha has") {
 		t.Fatalf("explicit section page = %#v, %v", sectionPage, err)

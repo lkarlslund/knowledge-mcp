@@ -231,6 +231,7 @@ type PageSection struct {
 
 type ReadOptions struct {
 	Format               string
+	LinkWiki             string
 	Section              string
 	Offset               int
 	MaxChars             int

@@ -131,6 +131,7 @@ type BuildProgress func(done, total int64)
 type TitleBuildProgress func(pages uint64, compressedDone, compressedTotal int64)
 
 var redirectDirectiveRE = regexp.MustCompile(`(?i)^#redirect\s*:?\s*\[\[([^\]|]+)`)
+var wikiLinkDestinationRE = regexp.MustCompile(`\(wiki:([^)]+)\)`)
 
 var ErrPageNotFound = errors.New("page not found")
 
@@ -1148,7 +1149,11 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 	outline := pageSectionOutline(content)
 	switch options.Format {
 	case "", "markdown":
-		document := RenderMarkdown(content, baseURL)
+		linkBaseURL := baseURL
+		if options.LinkWiki != "" {
+			linkBaseURL = ""
+		}
+		document := RenderMarkdown(content, linkBaseURL)
 		options.Format, content, references = "markdown", document.Content, document.References
 		if section != "" {
 			var found bool
@@ -1221,6 +1226,18 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 		referenceBudget -= allowed
 		referencesTruncated = referencesTruncated || truncated
 	}
+	if options.Format == "markdown" && options.LinkWiki != "" {
+		documents := make([]string, 1, len(pageReferences)+1)
+		documents[0] = excerpt
+		for _, reference := range pageReferences {
+			documents = append(documents, reference.Content)
+		}
+		documents = r.rewriteWikiReadLinks(ctx, options.LinkWiki, source.ID, documents)
+		excerpt = documents[0]
+		for index := range pageReferences {
+			pageReferences[index].Content = documents[index+1]
+		}
+	}
 	pageURLTarget := source.Title
 	returnedSection := ""
 	if section != "" {
@@ -1242,6 +1259,95 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 		page.RequestedTitle, page.RequestedPageID = requestedTitle, requestedPageID
 	}
 	return page, nil
+}
+
+func (r *Reader) rewriteWikiReadLinks(ctx context.Context, wiki string, currentPageID uint64, documents []string) []string {
+	targets := make(map[string]string)
+	for _, document := range documents {
+		for _, match := range wikiLinkDestinationRE.FindAllStringSubmatch(document, -1) {
+			title, _ := decodeWikiLinkTarget(match[1])
+			if title != "" && len(targets) < 256 {
+				targets[normalizeTitle(title)] = title
+			}
+		}
+	}
+	pageIDs := r.resolveWikiLinkPageIDs(ctx, targets)
+	for index, document := range documents {
+		documents[index] = wikiLinkDestinationRE.ReplaceAllStringFunc(document, func(link string) string {
+			raw := link[len("(wiki:") : len(link)-1]
+			title, section := decodeWikiLinkTarget(raw)
+			resolvedPageID := pageIDs[normalizeTitle(title)]
+			if title == "" {
+				resolvedPageID = currentPageID
+			}
+			destination, hint := wikiReadLink(wiki, title, resolvedPageID, section)
+			return "(" + destination + ` "` + escapeMarkdownLinkTitle(hint) + `")`
+		})
+	}
+	return documents
+}
+
+func decodeWikiLinkTarget(raw string) (string, string) {
+	title, section, _ := strings.Cut(raw, "#")
+	if decoded, err := url.PathUnescape(title); err == nil {
+		title = decoded
+	}
+	if decoded, err := url.PathUnescape(section); err == nil {
+		section = decoded
+	}
+	return strings.ReplaceAll(title, "_", " "), strings.ReplaceAll(section, "_", " ")
+}
+
+func (r *Reader) resolveWikiLinkPageIDs(ctx context.Context, targets map[string]string) map[string]uint64 {
+	resolved := make(map[string]uint64, len(targets))
+	if r.title == nil || len(targets) == 0 {
+		return resolved
+	}
+	queries := make([]blevequery.Query, 0, len(targets))
+	for normalized := range targets {
+		term := bleve.NewTermQuery(normalized)
+		term.SetField("title_exact")
+		queries = append(queries, term)
+	}
+	request := bleve.NewSearchRequestOptions(bleve.NewDisjunctionQuery(queries...), min(len(targets)*20, 5_000), 0, false)
+	request.Fields = []string{"title"}
+	response, err := r.title.SearchInContext(ctx, request)
+	if err != nil {
+		return resolved
+	}
+	for _, hit := range response.Hits {
+		title, _ := hit.Fields["title"].(string)
+		normalized := normalizeTitle(title)
+		if _, wanted := targets[normalized]; !wanted {
+			continue
+		}
+		pageID, parseErr := strconv.ParseUint(hit.ID, 10, 64)
+		if parseErr == nil {
+			resolved[normalized] = pageID
+		}
+	}
+	return resolved
+}
+
+func wikiReadLink(wiki, title string, pageID uint64, section string) (string, string) {
+	destination := "wiki-read://read?wiki=" + url.QueryEscape(wiki)
+	hint := "Call wiki_read with wiki=" + wiki
+	if pageID != 0 {
+		destination += "&page_id=" + strconv.FormatUint(pageID, 10)
+		hint += " and page_id=" + strconv.FormatUint(pageID, 10)
+	} else {
+		destination += "&title=" + url.QueryEscape(title)
+		hint += " and title=" + title
+	}
+	if section != "" {
+		destination += "&section=" + url.QueryEscape(section)
+		hint += " and section=" + section
+	}
+	return destination, hint
+}
+
+func escapeMarkdownLinkTitle(title string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(title)
 }
 
 func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xmlPage, error) {
