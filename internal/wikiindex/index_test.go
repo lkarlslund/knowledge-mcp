@@ -173,6 +173,14 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 		t.Fatal(err)
 	}
 	defer func() { _ = readReader.Close() }()
+	firstPooledRead, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true}, "")
+	if err != nil || firstPooledRead.PageID != 1 {
+		t.Fatalf("first pooled page read = %#v, %v", firstPooledRead, err)
+	}
+	secondPooledRead, err := readReader.ReadPage(context.Background(), "Beta: Details", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true}, "")
+	if err != nil || secondPooledRead.PageID != 2 {
+		t.Fatalf("second pooled page read = %#v, %v", secondPooledRead, err)
+	}
 	linkedPage, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", LinkWiki: "enwiki", MaxChars: 1000, FollowRedirects: true}, "https://en.wikipedia.org")
 	if err != nil {
 		t.Fatal(err)

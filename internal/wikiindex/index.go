@@ -49,6 +49,7 @@ const (
 	bodyBatchStreams         = 512
 	bodyShardCount           = 4
 	bodyShardStreams         = bodyBatchStreams / bodyShardCount
+	snippetDecodeWorkers     = 4
 )
 
 type titleDocument struct {
@@ -948,25 +949,41 @@ func (r *Reader) loadPagesByID(ctx context.Context, pageIDs []uint64) map[uint64
 		}
 		groups[key][pageID] = struct{}{}
 	}
-	for key, wanted := range groups {
-		if ctx.Err() != nil {
-			break
-		}
-		dump, openErr := os.Open(filepath.Join(r.generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", key.part)))
-		if openErr != nil {
-			continue
-		}
-		pages, decodeErr := r.decodeSelectedStream(ctx, io.NewSectionReader(dump, key.offset, key.end-key.offset), wanted)
-		_ = dump.Close()
-		if decodeErr != nil {
-			continue
-		}
-		for _, page := range pages {
-			if _, ok := wanted[page.ID]; ok {
-				loaded[page.ID] = page
-			}
-		}
+	type decodeJob struct {
+		location location
+		wanted   map[uint64]struct{}
 	}
+	jobs := make(chan decodeJob)
+	var loadedMu sync.Mutex
+	var workers sync.WaitGroup
+	for range min(snippetDecodeWorkers, len(groups)) {
+		workers.Go(func() {
+			for job := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				dump, openErr := os.Open(filepath.Join(r.generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", job.location.part)))
+				if openErr != nil {
+					continue
+				}
+				pages, decodeErr := r.decodeSelectedStream(ctx, io.NewSectionReader(dump, job.location.offset, job.location.end-job.location.offset), job.wanted)
+				_ = dump.Close()
+				if decodeErr != nil {
+					continue
+				}
+				loadedMu.Lock()
+				for _, page := range pages {
+					loaded[page.ID] = page
+				}
+				loadedMu.Unlock()
+			}
+		})
+	}
+	for key, wanted := range groups {
+		jobs <- decodeJob{location: key, wanted: wanted}
+	}
+	close(jobs)
+	workers.Wait()
 	return loaded
 }
 
@@ -986,7 +1003,18 @@ func rankingQuery(query string, fullText bool) blevequery.Query {
 		bodyPhrase := bleve.NewMatchPhraseQuery(query)
 		bodyPhrase.SetField("body")
 		bodyPhrase.SetBoost(3)
-		queries = []blevequery.Query{titlePhrase, bodyPhrase, title, body}
+		must := make([]blevequery.Query, 0, len(strings.Fields(query)))
+		for _, term := range strings.Fields(query) {
+			titleTerm := bleve.NewMatchQuery(term)
+			titleTerm.SetField("title")
+			titleTerm.SetBoost(4)
+			bodyTerm := bleve.NewMatchQuery(term)
+			bodyTerm.SetField("body")
+			must = append(must, bleve.NewDisjunctionQuery(titleTerm, bodyTerm))
+		}
+		allTerms := bleve.NewConjunctionQuery(must...)
+		allTerms.SetBoost(2)
+		queries = []blevequery.Query{titlePhrase, bodyPhrase, allTerms, title, body}
 	}
 	return bleve.NewDisjunctionQuery(queries...)
 }
@@ -1725,9 +1753,6 @@ func decodeSelectedXMLPages(decoder *xml.Decoder, wanted map[uint64]struct{}) ([
 		}
 		if selected {
 			pages = append(pages, page)
-			if len(pages) == len(wanted) {
-				return pages, nil
-			}
 		}
 	}
 }
