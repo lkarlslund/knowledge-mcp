@@ -33,6 +33,7 @@ import (
 	"github.com/blevesearch/bleve/v2/mapping"
 	blevequery "github.com/blevesearch/bleve/v2/search/query"
 	"github.com/cosnicolaou/pbzip2"
+	dsbzip2 "github.com/dsnet/compress/bzip2"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
 
@@ -698,6 +699,7 @@ type Reader struct {
 	title          bleve.Index
 	body           bleve.Index
 	bodyShards     []bleve.Index
+	bzipReaders    sync.Pool
 	mu             sync.RWMutex
 	closed         bool
 }
@@ -805,19 +807,24 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	// the inexpensive phrase/all-term signals rank this pool; redirect
 	// canonicalization and deduplication happen before the requested page is cut.
 	const candidateLimit = 250
-	_, candidates, err := searchTier(ctx, idx, ranked, 0, candidateLimit, map[bool]string{true: "bm25", false: "title"}[fullText])
+	candidates, err := searchTier(ctx, idx, ranked, 0, candidateLimit, map[bool]string{true: "bm25", false: "title"}[fullText])
 	if err != nil {
 		return model.SearchResult{}, err
 	}
-	if exact, ok := r.exactCanonicalSearchHit(ctx, query, options.IncludeNonArticles); ok {
+	matchedRedirectPageID := uint64(0)
+	if exact, matchedPageID, ok := r.exactCanonicalSearchHit(ctx, query, options.IncludeNonArticles); ok {
 		exact.Score = highestSearchScore(candidates) + 1
 		candidates = append([]model.SearchHit{exact}, candidates...)
+		matchedRedirectPageID = matchedPageID
 	}
-	candidates = deduplicateSearchHits(candidates)
+	candidates = deduplicateSearchHits(candidates, matchedRedirectPageID)
 	total := uint64(len(candidates))
 	start := min(options.Offset, len(candidates))
 	end := min(start+options.Limit, len(candidates))
 	hits := candidates[start:end]
+	if err := loadSearchHitMetadata(ctx, idx, hits); err != nil {
+		return model.SearchResult{}, err
+	}
 	result := model.SearchResult{Query: query, SearchMode: mode, Total: total, Offset: options.Offset, NamespaceFilterApplied: fullText && !options.IncludeNonArticles, SnippetsAvailable: fullText, SnippetsComplete: fullText, Hits: hits}
 	if options.Offset+len(hits) < int(total) {
 		result.NextOffset = options.Offset + len(hits)
@@ -841,15 +848,16 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	return result, nil
 }
 
-func (r *Reader) exactCanonicalSearchHit(ctx context.Context, query string, includeNonArticles bool) (model.SearchHit, bool) {
+func (r *Reader) exactCanonicalSearchHit(ctx context.Context, query string, includeNonArticles bool) (model.SearchHit, uint64, bool) {
 	if r.title == nil {
-		return model.SearchHit{}, false
+		return model.SearchHit{}, 0, false
 	}
 	page, err := r.loadPage(ctx, query, 0)
 	if err != nil {
-		return model.SearchHit{}, false
+		return model.SearchHit{}, 0, false
 	}
 	matchedTitle := page.Title
+	matchedPageID := page.ID
 	redirected := false
 	visited := map[uint64]struct{}{page.ID: {}}
 	for range 8 {
@@ -860,22 +868,24 @@ func (r *Reader) exactCanonicalSearchHit(ctx context.Context, query string, incl
 		targetTitle, _ := splitRedirectTarget(target)
 		next, loadErr := r.loadPage(ctx, targetTitle, 0)
 		if loadErr != nil {
-			return model.SearchHit{}, false
+			return model.SearchHit{}, 0, false
 		}
 		if _, exists := visited[next.ID]; exists {
-			return model.SearchHit{}, false
+			return model.SearchHit{}, 0, false
 		}
 		visited[next.ID] = struct{}{}
 		page, redirected = next, true
 	}
 	if !includeNonArticles && page.Namespace != 0 {
-		return model.SearchHit{}, false
+		return model.SearchHit{}, 0, false
 	}
 	mode := "exact_title"
 	if redirected {
 		mode = "exact_redirect"
+	} else {
+		matchedPageID = 0
 	}
-	return model.SearchHit{PageID: page.ID, Title: page.Title, Namespace: page.Namespace, MatchMode: mode, MatchedTitle: matchedTitle}, true
+	return model.SearchHit{PageID: page.ID, Title: page.Title, Namespace: page.Namespace, MatchMode: mode, MatchedTitle: matchedTitle}, matchedPageID, true
 }
 
 func highestSearchScore(hits []model.SearchHit) float64 {
@@ -888,22 +898,17 @@ func highestSearchScore(hits []model.SearchHit) float64 {
 	return highest
 }
 
-func deduplicateSearchHits(hits []model.SearchHit) []model.SearchHit {
+func deduplicateSearchHits(hits []model.SearchHit, matchedRedirectPageID uint64) []model.SearchHit {
 	seenPageIDs := make(map[uint64]struct{}, len(hits))
-	seenTitles := make(map[string]struct{}, len(hits))
 	result := make([]model.SearchHit, 0, len(hits))
 	for _, hit := range hits {
+		if hit.PageID == matchedRedirectPageID {
+			continue
+		}
 		if _, exists := seenPageIDs[hit.PageID]; exists {
 			continue
 		}
-		if _, exists := seenTitles[normalizeTitle(hit.Title)]; exists {
-			continue
-		}
 		seenPageIDs[hit.PageID] = struct{}{}
-		seenTitles[normalizeTitle(hit.Title)] = struct{}{}
-		if hit.MatchedTitle != "" {
-			seenTitles[normalizeTitle(hit.MatchedTitle)] = struct{}{}
-		}
 		result = append(result, hit)
 	}
 	return result
@@ -951,7 +956,7 @@ func (r *Reader) loadPagesByID(ctx context.Context, pageIDs []uint64) map[uint64
 		if openErr != nil {
 			continue
 		}
-		pages, decodeErr := decodeStream(ctx, io.NewSectionReader(dump, key.offset, key.end-key.offset))
+		pages, decodeErr := r.decodeSelectedStream(ctx, io.NewSectionReader(dump, key.offset, key.end-key.offset), wanted)
 		_ = dump.Close()
 		if decodeErr != nil {
 			continue
@@ -972,9 +977,6 @@ func rankingQuery(query string, fullText bool) blevequery.Query {
 	title.SetOperator(blevequery.MatchQueryOperatorOr)
 	queries := []blevequery.Query{title}
 	if fullText {
-		exact := bleve.NewTermQuery(normalizeTitle(query))
-		exact.SetField("title_exact")
-		exact.SetBoost(20)
 		body := bleve.NewMatchQuery(query)
 		body.SetField("body")
 		body.SetOperator(blevequery.MatchQueryOperatorOr)
@@ -984,18 +986,7 @@ func rankingQuery(query string, fullText bool) blevequery.Query {
 		bodyPhrase := bleve.NewMatchPhraseQuery(query)
 		bodyPhrase.SetField("body")
 		bodyPhrase.SetBoost(3)
-		must := make([]blevequery.Query, 0, len(strings.Fields(query)))
-		for _, term := range strings.Fields(query) {
-			titleTerm := bleve.NewMatchQuery(term)
-			titleTerm.SetField("title")
-			titleTerm.SetBoost(4)
-			bodyTerm := bleve.NewMatchQuery(term)
-			bodyTerm.SetField("body")
-			must = append(must, bleve.NewDisjunctionQuery(titleTerm, bodyTerm))
-		}
-		allTerms := bleve.NewConjunctionQuery(must...)
-		allTerms.SetBoost(2)
-		queries = []blevequery.Query{exact, titlePhrase, bodyPhrase, allTerms, title, body}
+		queries = []blevequery.Query{titlePhrase, bodyPhrase, title, body}
 	}
 	return bleve.NewDisjunctionQuery(queries...)
 }
@@ -1011,26 +1002,55 @@ func namespaceZeroQuery(query blevequery.Query) blevequery.Query {
 	return filtered
 }
 
-func searchTier(ctx context.Context, idx bleve.Index, query blevequery.Query, offset, limit int, matchMode string) (uint64, []model.SearchHit, error) {
+func searchTier(ctx context.Context, idx bleve.Index, query blevequery.Query, offset, limit int, matchMode string) ([]model.SearchHit, error) {
 	req := bleve.NewSearchRequestOptions(query, limit, max(0, offset), false)
-	req.Fields = []string{"title", "namespace"}
 	req.SortBy([]string{"-_score", "_id"})
 	response, err := idx.SearchInContext(ctx, req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("search: %w", err)
+		return nil, fmt.Errorf("search: %w", err)
 	}
 	hits := make([]model.SearchHit, 0, len(response.Hits))
 	for _, hit := range response.Hits {
 		pageID, _ := strconv.ParseUint(hit.ID, 10, 64)
-		title, _ := hit.Fields["title"].(string)
-		namespace, _ := hit.Fields["namespace"].(float64)
 		score := hit.Score
 		if math.IsNaN(score) || math.IsInf(score, 0) {
 			score = 0
 		}
-		hits = append(hits, model.SearchHit{PageID: pageID, Title: title, Namespace: int(namespace), Score: score, MatchMode: matchMode})
+		hits = append(hits, model.SearchHit{PageID: pageID, Score: score, MatchMode: matchMode})
 	}
-	return response.Total, hits, nil
+	return hits, nil
+}
+
+func loadSearchHitMetadata(ctx context.Context, idx bleve.Index, hits []model.SearchHit) error {
+	if len(hits) == 0 {
+		return nil
+	}
+	docIDs := make([]string, 0, len(hits))
+	positions := make(map[uint64]int, len(hits))
+	for index, hit := range hits {
+		docIDs = append(docIDs, strconv.FormatUint(hit.PageID, 10))
+		positions[hit.PageID] = index
+	}
+	request := bleve.NewSearchRequestOptions(bleve.NewDocIDQuery(docIDs), len(docIDs), 0, false)
+	request.Fields = []string{"title", "namespace"}
+	response, err := idx.SearchInContext(ctx, request)
+	if err != nil {
+		return fmt.Errorf("load search result metadata: %w", err)
+	}
+	for _, hit := range response.Hits {
+		pageID, parseErr := strconv.ParseUint(hit.ID, 10, 64)
+		position, exists := positions[pageID]
+		if parseErr != nil || !exists {
+			continue
+		}
+		if title, ok := hit.Fields["title"].(string); ok {
+			hits[position].Title = title
+		}
+		if namespace, ok := hit.Fields["namespace"].(float64); ok {
+			hits[position].Namespace = int(namespace)
+		}
+	}
+	return nil
 }
 
 func querySnippet(content, query string, maximum int) string {
@@ -1398,15 +1418,12 @@ func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xml
 		return xmlPage{}, err
 	}
 	defer func() { _ = dump.Close() }()
-	pages, err := decodeStream(ctx, io.NewSectionReader(dump, streamOffset, streamEnd-streamOffset))
+	pages, err := r.decodeSelectedStream(ctx, io.NewSectionReader(dump, streamOffset, streamEnd-streamOffset), map[uint64]struct{}{wantedID: {}})
 	if err != nil {
 		return xmlPage{}, fmt.Errorf("decode page stream: %w", err)
 	}
-	for _, source := range pages {
-		if source.ID != wantedID {
-			continue
-		}
-		return source, nil
+	if len(pages) == 1 {
+		return pages[0], nil
 	}
 	return xmlPage{}, errors.New("page was absent from its indexed stream")
 }
@@ -1625,7 +1642,36 @@ func (r contextReader) Read(buffer []byte) (int, error) {
 }
 
 func decodeStream(ctx context.Context, r io.Reader) ([]xmlPage, error) {
-	decoder := xml.NewDecoder(bzip2.NewReader(contextReader{ctx: ctx, reader: r}))
+	return decodeXMLPages(xml.NewDecoder(bzip2.NewReader(contextReader{ctx: ctx, reader: r})))
+}
+
+func (r *Reader) decodeSelectedStream(ctx context.Context, source io.Reader, wanted map[uint64]struct{}) ([]xmlPage, error) {
+	compressed, err := r.borrowBzipReader(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	pages, err := decodeSelectedXMLPages(xml.NewDecoder(compressed), wanted)
+	r.releaseBzipReader(compressed)
+	return pages, err
+}
+
+func (r *Reader) borrowBzipReader(ctx context.Context, source io.Reader) (*dsbzip2.Reader, error) {
+	compressed, _ := r.bzipReaders.Get().(*dsbzip2.Reader)
+	if compressed == nil {
+		return dsbzip2.NewReader(contextReader{ctx: ctx, reader: source}, nil)
+	}
+	if err := compressed.Reset(contextReader{ctx: ctx, reader: source}); err != nil {
+		return nil, err
+	}
+	return compressed, nil
+}
+
+func (r *Reader) releaseBzipReader(compressed *dsbzip2.Reader) {
+	_ = compressed.Close()
+	r.bzipReaders.Put(compressed)
+}
+
+func decodeXMLPages(decoder *xml.Decoder) ([]xmlPage, error) {
 	// Individual multistream blocks are XML fragments: only the first has the
 	// opening mediawiki element and only the last has its closing element.
 	decoder.Strict = false
@@ -1651,6 +1697,94 @@ func decodeStream(ctx context.Context, r io.Reader) ([]xmlPage, error) {
 			return nil, err
 		}
 		pages = append(pages, page)
+	}
+}
+
+func decodeSelectedXMLPages(decoder *xml.Decoder, wanted map[uint64]struct{}) ([]xmlPage, error) {
+	decoder.Strict = false
+	pages := make([]xmlPage, 0, len(wanted))
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return pages, nil
+		}
+		if err != nil {
+			var syntaxErr *xml.SyntaxError
+			if len(pages) > 0 && errors.As(err, &syntaxErr) && (strings.Contains(syntaxErr.Msg, "unexpected end element") || strings.Contains(syntaxErr.Msg, "unexpected EOF")) {
+				return pages, nil
+			}
+			return nil, err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "page" {
+			continue
+		}
+		page, selected, decodeErr := decodeSelectedXMLPage(decoder, start, wanted)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if selected {
+			pages = append(pages, page)
+			if len(pages) == len(wanted) {
+				return pages, nil
+			}
+		}
+	}
+}
+
+func decodeSelectedXMLPage(decoder *xml.Decoder, pageStart xml.StartElement, wanted map[uint64]struct{}) (xmlPage, bool, error) {
+	var page xmlPage
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return xmlPage{}, false, err
+		}
+		switch element := token.(type) {
+		case xml.EndElement:
+			if element.Name.Local == pageStart.Name.Local {
+				_, selected := wanted[page.ID]
+				return page, selected, nil
+			}
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "title":
+				if err := decoder.DecodeElement(&page.Title, &element); err != nil {
+					return xmlPage{}, false, err
+				}
+			case "ns":
+				if err := decoder.DecodeElement(&page.Namespace, &element); err != nil {
+					return xmlPage{}, false, err
+				}
+			case "id":
+				if page.ID == 0 {
+					if err := decoder.DecodeElement(&page.ID, &element); err != nil {
+						return xmlPage{}, false, err
+					}
+				} else if err := decoder.Skip(); err != nil {
+					return xmlPage{}, false, err
+				}
+			case "redirect":
+				var redirect struct {
+					Title string `xml:"title,attr"`
+				}
+				if err := decoder.DecodeElement(&redirect, &element); err != nil {
+					return xmlPage{}, false, err
+				}
+				page.Redirect = &redirect
+			case "revision":
+				if _, selected := wanted[page.ID]; selected {
+					if err := decoder.DecodeElement(&page.Revision, &element); err != nil {
+						return xmlPage{}, false, err
+					}
+				} else if err := decoder.Skip(); err != nil {
+					return xmlPage{}, false, err
+				}
+			default:
+				if err := decoder.Skip(); err != nil {
+					return xmlPage{}, false, err
+				}
+			}
+		}
 	}
 }
 
