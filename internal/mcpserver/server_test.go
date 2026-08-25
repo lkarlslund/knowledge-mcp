@@ -193,7 +193,7 @@ func TestHTTPHandlerIsStatelessAndRejectsCrossOriginRequests(t *testing.T) {
 	t.Parallel()
 	handler := httpHandler(fakeService{})
 
-	get := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/mcp", nil)
+	get := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://127.0.0.1/mcp", nil)
 	get.Host = "127.0.0.1"
 	getResponse := httptest.NewRecorder()
 	handler.ServeHTTP(getResponse, get)
@@ -201,7 +201,7 @@ func TestHTTPHandlerIsStatelessAndRejectsCrossOriginRequests(t *testing.T) {
 		t.Fatalf("stateless GET status = %d, want 405", getResponse.Code)
 	}
 
-	crossOrigin := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", strings.NewReader(`{}`))
+	crossOrigin := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "http://127.0.0.1/mcp", strings.NewReader(`{}`))
 	crossOrigin.Host = "127.0.0.1"
 	crossOrigin.Header.Set("Origin", "https://attacker.example")
 	crossOriginResponse := httptest.NewRecorder()
