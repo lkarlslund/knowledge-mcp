@@ -128,6 +128,9 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if err != nil || len(redirectResult.Hits) == 0 || redirectResult.Hits[0].PageID != 1 || redirectResult.Hits[0].Title != "Alpha Page" || redirectResult.Hits[0].MatchedTitle != "Alpha alias" || redirectResult.Hits[0].MatchMode != "exact_redirect" {
 		t.Fatalf("exact redirect search = %#v, %v", redirectResult.Hits, err)
 	}
+	if math.IsNaN(redirectResult.Hits[0].Score) || math.IsInf(redirectResult.Hits[0].Score, 0) || redirectResult.Hits[0].Score <= 0 || redirectResult.Hits[0].Score >= 1_000 {
+		t.Fatalf("exact redirect score is not a finite hard-tier score: %#v", redirectResult.Hits)
+	}
 	for _, hit := range redirectResult.Hits[1:] {
 		if hit.PageID == redirectResult.Hits[0].PageID {
 			t.Fatalf("canonical result was not deduplicated: %#v", redirectResult.Hits)
@@ -150,6 +153,14 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	fullReader, err := OpenReader(dir, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	paged, err := fullReader.Search(context.Background(), "phone call", model.SearchOptions{Limit: 1}, true)
+	if err != nil || paged.Total != 2 || len(paged.Hits) != 1 || paged.NextOffset != 1 {
+		t.Fatalf("bounded first search page = %#v, %v", paged, err)
+	}
+	pagedNext, err := fullReader.Search(context.Background(), "phone call", model.SearchOptions{Offset: paged.NextOffset, Limit: 1}, true)
+	if err != nil || pagedNext.Total != paged.Total || len(pagedNext.Hits) != 1 || pagedNext.Hits[0].PageID == paged.Hits[0].PageID || pagedNext.NextOffset != 0 {
+		t.Fatalf("bounded second search page = %#v, %v", pagedNext, err)
 	}
 	withProjects, err := fullReader.Search(context.Background(), "Trump Frederiksen phone call Greenland", model.SearchOptions{Limit: 10, IncludeNonArticles: true}, true)
 	_ = fullReader.Close()

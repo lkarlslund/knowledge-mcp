@@ -804,22 +804,20 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	// Retrieve a substantially wider pool than the caller requested. BM25 and
 	// the inexpensive phrase/all-term signals rank this pool; redirect
 	// canonicalization and deduplication happen before the requested page is cut.
-	candidateLimit := max(250, options.Offset+options.Limit+64)
-	candidateLimit = min(candidateLimit, 5_000)
-	total, candidates, err := searchTier(ctx, idx, ranked, 0, candidateLimit, map[bool]string{true: "bm25", false: "title"}[fullText])
+	const candidateLimit = 250
+	_, candidates, err := searchTier(ctx, idx, ranked, 0, candidateLimit, map[bool]string{true: "bm25", false: "title"}[fullText])
 	if err != nil {
 		return model.SearchResult{}, err
 	}
 	if exact, ok := r.exactCanonicalSearchHit(ctx, query, options.IncludeNonArticles); ok {
+		exact.Score = highestSearchScore(candidates) + 1
 		candidates = append([]model.SearchHit{exact}, candidates...)
 	}
 	candidates = deduplicateSearchHits(candidates)
+	total := uint64(len(candidates))
 	start := min(options.Offset, len(candidates))
 	end := min(start+options.Limit, len(candidates))
 	hits := candidates[start:end]
-	if total < uint64(len(candidates)) {
-		total = uint64(len(candidates))
-	}
 	result := model.SearchResult{Query: query, SearchMode: mode, Total: total, Offset: options.Offset, NamespaceFilterApplied: fullText && !options.IncludeNonArticles, SnippetsAvailable: fullText, SnippetsComplete: fullText, Hits: hits}
 	if options.Offset+len(hits) < int(total) {
 		result.NextOffset = options.Offset + len(hits)
@@ -877,7 +875,17 @@ func (r *Reader) exactCanonicalSearchHit(ctx context.Context, query string, incl
 	if redirected {
 		mode = "exact_redirect"
 	}
-	return model.SearchHit{PageID: page.ID, Title: page.Title, Namespace: page.Namespace, Score: math.MaxFloat64, MatchMode: mode, MatchedTitle: matchedTitle}, true
+	return model.SearchHit{PageID: page.ID, Title: page.Title, Namespace: page.Namespace, MatchMode: mode, MatchedTitle: matchedTitle}, true
+}
+
+func highestSearchScore(hits []model.SearchHit) float64 {
+	highest := 0.0
+	for _, hit := range hits {
+		if !math.IsNaN(hit.Score) && !math.IsInf(hit.Score, 0) && hit.Score > highest {
+			highest = hit.Score
+		}
+	}
+	return highest
 }
 
 func deduplicateSearchHits(hits []model.SearchHit) []model.SearchHit {
