@@ -26,7 +26,7 @@ import (
 
 const (
 	sharedShards    = 16
-	sharedBatchSize = sharedShards * (16 << 20)
+	sharedBatchSize = 64 << 20
 )
 
 type sharedDataset struct {
@@ -51,7 +51,7 @@ type SharedIndex struct {
 	root         string
 	indexes      []bleve.Index
 	alias        bleve.Index
-	shardMu      []sync.Mutex
+	shardMu      []sync.RWMutex
 	manifest     sharedManifest
 	mu           sync.RWMutex
 	storageMu    sync.Mutex
@@ -67,14 +67,14 @@ func OpenShared(root string) (*SharedIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	shared := &SharedIndex{root: root, manifest: manifest, shardMu: make([]sync.Mutex, sharedShards)}
+	shared := &SharedIndex{root: root, manifest: manifest, shardMu: make([]sync.RWMutex, sharedShards)}
 	for shard := range sharedShards {
 		path := sharedShardPath(root, shard)
 		var idx bleve.Index
 		if _, statErr := os.Stat(path); statErr == nil {
-			idx, err = openWritableIndex(path)
+			idx, err = openWritableIndexUsing(path, sharedScorchConfig())
 		} else if errors.Is(statErr, os.ErrNotExist) {
-			idx, err = newIndex(path, indexMapping(true))
+			idx, err = newIndexUsing(path, indexMapping(true), sharedScorchConfig())
 		} else {
 			err = statErr
 		}
@@ -202,6 +202,10 @@ func (s *SharedIndex) diskBytes() int64 {
 }
 
 func (s *SharedIndex) Build(ctx context.Context, providerID, dataset, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, progress BodyProgress) (uint64, int64, error) {
+	return s.build(ctx, providerID, dataset, fingerprint, corpus, scanOptions, sharedBatchSize, progress)
+}
+
+func (s *SharedIndex) build(ctx context.Context, providerID, dataset, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, batchSize int, progress BodyProgress) (uint64, int64, error) {
 	generation := sharedGeneration(providerID, dataset, fingerprint)
 	checkpointPath := sharedCheckpointPath(s.root, providerID, dataset)
 	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
@@ -268,7 +272,7 @@ func (s *SharedIndex) Build(ctx context.Context, providerID, dataset, fingerprin
 		size := len(record.Title) + len(record.Body) + len(record.URL) + len(record.Locator)
 		batches[shard].bytes += size
 		pendingBytes, indexedBytes, documents = pendingBytes+size, indexedBytes+int64(size), documents+1
-		if pendingBytes >= sharedBatchSize && position.Boundary {
+		if pendingBytes >= batchSize && position.Boundary {
 			if err := flush(position); err != nil {
 				return err
 			}
@@ -360,7 +364,9 @@ func (s *SharedIndex) deleteGeneration(ctx context.Context, generation string) e
 		for {
 			term := bleve.NewTermQuery(generation)
 			term.SetField("generation")
+			s.shardMu[shard].RLock()
 			response, err := idx.SearchInContext(ctx, bleve.NewSearchRequestOptions(term, 10_000, 0, false))
+			s.shardMu[shard].RUnlock()
 			if err != nil {
 				return fmt.Errorf("find retired generation in shard %d: %w", shard, err)
 			}
@@ -414,6 +420,14 @@ func (s *SharedIndex) Search(ctx context.Context, dataset, text string, options 
 	if len(active) == 0 {
 		return model.SearchResult{}, errors.New("no datasets are shared-search ready")
 	}
+	for shard := range s.shardMu {
+		s.shardMu[shard].RLock()
+	}
+	defer func() {
+		for shard := len(s.shardMu) - 1; shard >= 0; shard-- {
+			s.shardMu[shard].RUnlock()
+		}
+	}()
 	filters := make([]blevequery.Query, 0, len(active))
 	searched := make([]string, 0, len(active))
 	for _, entry := range active {
@@ -541,4 +555,11 @@ func removeString(values []string, value string) []string {
 		}
 	}
 	return result
+}
+
+func sharedScorchConfig() map[string]any {
+	return map[string]any{
+		"scorchPersisterOptions": map[string]any{"NumPersisterWorkers": 1, "MaxSizeInMemoryMergePerWorker": 64 << 20, "PersisterNapUnderNumFiles": 0},
+		"scorchMergePlanOptions": map[string]any{"FloorSegmentFileSize": 10 << 20},
+	}
 }

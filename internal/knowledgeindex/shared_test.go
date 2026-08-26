@@ -2,6 +2,8 @@ package knowledgeindex
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
@@ -91,6 +93,43 @@ func TestSharedIndexSearchesAcrossDatasetsAndPersistsRemoval(t *testing.T) {
 	}
 	if _, err := reopened.Search(context.Background(), "alpha", "discovery", model.SearchOptions{Limit: 10}); err == nil {
 		t.Fatal("removed dataset remained addressable")
+	}
+}
+
+func TestSharedIndexSearchesWhileAnotherGenerationCommits(t *testing.T) {
+	root := t.TempDir()
+	index, err := OpenShared(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = index.Close() }()
+	current := &testCorpus{records: []provider.Record{{ID: "current", Title: "Current", Body: "stable searchable phrase", Primary: true}}}
+	documents, indexedBytes, err := index.build(context.Background(), "example", "alpha", "release-1", current, provider.ScanOptions{}, 4<<10, func(uint64, int64, int64, string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Activate("example", "alpha", "release-1", documents, indexedBytes); err != nil {
+		t.Fatal(err)
+	}
+	records := make([]provider.Record, 250)
+	for item := range records {
+		records[item] = provider.Record{ID: fmt.Sprintf("next-%03d", item), Title: fmt.Sprintf("Next %d", item), Body: strings.Repeat("concurrent indexing payload ", 80), Primary: true}
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, buildErr := index.build(context.Background(), "example", "beta", "release-1", &testCorpus{records: records}, provider.ScanOptions{}, 8<<10, func(uint64, int64, int64, string) {})
+		done <- buildErr
+	}()
+	for {
+		select {
+		case buildErr := <-done:
+			if buildErr != nil {
+				t.Fatal(buildErr)
+			}
+			return
+		default:
+			assertSharedHit(t, index, "alpha", "stable searchable", "alpha", "current")
+		}
 	}
 }
 

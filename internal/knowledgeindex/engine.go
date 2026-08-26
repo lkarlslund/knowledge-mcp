@@ -639,11 +639,20 @@ func indexMapping(body bool) mapping.IndexMapping {
 }
 
 func newIndex(path string, indexMapping mapping.IndexMapping) (bleve.Index, error) {
-	return bleve.NewUsing(path, indexMapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultMemKVStore, scorchConfig())
+	return newIndexUsing(path, indexMapping, scorchConfig())
 }
 
 func openWritableIndex(path string) (bleve.Index, error) {
-	return bleve.OpenUsing(path, scorchConfig())
+	return openWritableIndexUsing(path, scorchConfig())
+
+}
+
+func newIndexUsing(path string, indexMapping mapping.IndexMapping, config map[string]any) (bleve.Index, error) {
+	return bleve.NewUsing(path, indexMapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultMemKVStore, config)
+}
+
+func openWritableIndexUsing(path string, config map[string]any) (bleve.Index, error) {
+	return bleve.OpenUsing(path, config)
 }
 
 func scorchConfig() map[string]any {
