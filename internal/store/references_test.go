@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
-	wikimediaprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/wikimedia"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
+	wikimediaprovider "github.com/lkarlslund/knowledge-mcp/internal/provider/wikimedia"
+	"github.com/lkarlslund/knowledge-mcp/internal/wikimedia"
 )
 
 func TestRewriteKnowledgeLinksHidesRouting(t *testing.T) {

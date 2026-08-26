@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
 	"github.com/orisano/gosax"
 )
 

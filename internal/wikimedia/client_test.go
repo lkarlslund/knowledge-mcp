@@ -17,7 +17,7 @@ import (
 	"time"
 
 	dsbzip2 "github.com/dsnet/compress/bzip2"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
 )
 
 func TestCatalogMetadataAndDownload(t *testing.T) {

@@ -20,8 +20,8 @@ import (
 	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
 	"github.com/blevesearch/bleve/v2/mapping"
 	blevequery "github.com/blevesearch/bleve/v2/search/query"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
 )
 
 const (

@@ -1,0 +1,18 @@
+[Unit]
+Description=Knowledge MCP server
+Documentation=https://github.com/lkarlslund/knowledge-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/knowledge-mcp
+ExecStart=%h/.local/lib/knowledge-mcp/knowledge-mcp serve --listen 127.0.0.1:8765 --data-dir %h/.local/share/knowledge-mcp/data --download-workers 3 --index-workers 2 --download-connections 3
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

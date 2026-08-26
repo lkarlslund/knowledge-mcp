@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	documentrefs "github.com/lkarlslund/wikipedia-multistream-mcp/internal/references"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	documentrefs "github.com/lkarlslund/knowledge-mcp/internal/references"
 )
 
 var legacyKnowledgeLinkPattern = regexp.MustCompile(`knowledge-read://read\?[^)\s"]+(?:\s+"[^"]*")?`)

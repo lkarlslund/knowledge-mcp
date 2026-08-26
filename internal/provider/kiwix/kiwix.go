@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	"github.com/lkarlslund/knowledge-mcp/internal/knowledgeindex"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
 	"golang.org/x/text/language"
 	"golang.org/x/text/language/display"
 )

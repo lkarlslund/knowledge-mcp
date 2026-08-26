@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

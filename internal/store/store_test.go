@@ -15,12 +15,12 @@ import (
 	"time"
 
 	dsbzip2 "github.com/dsnet/compress/bzip2"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
-	wikimediaprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/wikimedia"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikiindex"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
+	"github.com/lkarlslund/knowledge-mcp/internal/knowledgeindex"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
+	wikimediaprovider "github.com/lkarlslund/knowledge-mcp/internal/provider/wikimedia"
+	"github.com/lkarlslund/knowledge-mcp/internal/wikiindex"
+	"github.com/lkarlslund/knowledge-mcp/internal/wikimedia"
 )
 
 func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {

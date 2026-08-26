@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/mcpserver"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

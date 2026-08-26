@@ -11,8 +11,8 @@ import (
 	"time"
 
 	jsonschema "github.com/google/jsonschema-go/jsonschema"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/dashboard"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/dashboard"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -85,7 +85,7 @@ type readInput struct {
 }
 
 func New(service Service) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "knowledge-dataset-mcp", Version: Version}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}})
+	server := mcp.NewServer(&mcp.Implementation{Name: "knowledge-mcp", Version: Version}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}})
 	listAvailableSchema := mustSchemaFor[listAvailableInput]()
 	setIntegerBounds(listAvailableSchema, "offset", 0, nil)
 	setIntegerBounds(listAvailableSchema, "limit", 1, intPointer(50))

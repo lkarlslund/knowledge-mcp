@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/command"
+	"github.com/lkarlslund/knowledge-mcp/internal/command"
 )
 
 func main() {

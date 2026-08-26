@@ -1,4 +1,4 @@
-# Knowledge Dataset MCP
+# Knowledge MCP
 
 A local-first MCP server for downloading, indexing, searching, and reading large
 reference datasets. Providers own discovery, variants, acquisition, raw-record
@@ -20,15 +20,15 @@ identifiers, persist across service restarts, and expire after seven inactive da
 Markdown is the default read format, with embedded links carrying another opaque
 reference that an agent can follow with `knowledge_read`.
 
-![Knowledge Dataset MCP dashboard in dark mode](docs/dashboard-dark.png)
+![Knowledge MCP dashboard in dark mode](docs/dashboard-dark.png)
 
 ## Build and run
 
 Go 1.25 or newer is required.
 
 ```sh
-go build -o wikipedia-multistream-mcp .
-./wikipedia-multistream-mcp serve
+go build -o knowledge-mcp .
+./knowledge-mcp serve
 ```
 
 The server listens on `http://127.0.0.1:8765`; its MCP endpoint is
@@ -36,7 +36,7 @@ The server listens on `http://127.0.0.1:8765`; its MCP endpoint is
 `http://127.0.0.1:8765/`. Runtime data defaults to `./data`.
 
 ```sh
-./wikipedia-multistream-mcp serve \
+./knowledge-mcp serve \
   --listen 127.0.0.1:9000 \
   --data-dir /srv/knowledge-data \
   --download-workers 3 \
@@ -64,37 +64,36 @@ All non-server commands call the running MCP backend once.
 
 ```sh
 # Discover datasets from all providers.
-./wikipedia-multistream-mcp dataset available
-./wikipedia-multistream-mcp dataset available rfc
-./wikipedia-multistream-mcp dataset available devdocs
-./wikipedia-multistream-mcp dataset available pubmed
+./knowledge-mcp dataset available
+./knowledge-mcp dataset available rfc
+./knowledge-mcp dataset available devdocs
+./knowledge-mcp dataset available pubmed
 
 # Download the RFC text variant, then poll/control its jobs.
-./wikipedia-multistream-mcp dataset download rfc --variant text
-./wikipedia-multistream-mcp dataset download pubmed --variant baseline
-./wikipedia-multistream-mcp dataset download eurlex-in-force --variant en
-./wikipedia-multistream-mcp dataset status JOB_ID
-./wikipedia-multistream-mcp dataset status --dataset rfc
-./wikipedia-multistream-mcp dataset job JOB_ID --action pause
-./wikipedia-multistream-mcp dataset job JOB_ID --action resume
-./wikipedia-multistream-mcp dataset job JOB_ID --action cancel
-./wikipedia-multistream-mcp dataset job JOB_ID --action retry
+./knowledge-mcp dataset download rfc --variant text
+./knowledge-mcp dataset download pubmed --variant baseline
+./knowledge-mcp dataset download eurlex-in-force --variant en
+./knowledge-mcp dataset status JOB_ID
+./knowledge-mcp dataset status --dataset rfc
+./knowledge-mcp dataset job JOB_ID --action pause
+./knowledge-mcp dataset job JOB_ID --action resume
+./knowledge-mcp dataset job JOB_ID --action cancel
+./knowledge-mcp dataset job JOB_ID --action retry
 
 # Installed datasets, updates, search, and reads.
-./wikipedia-multistream-mcp dataset list
-./wikipedia-multistream-mcp dataset update rfc
-./wikipedia-multistream-mcp search rfc "HTTP status codes"
-./wikipedia-multistream-mcp search rfc "RFC 9110" --mode full_text
-./wikipedia-multistream-mcp read rfc --id 9110
+./knowledge-mcp dataset list
+./knowledge-mcp dataset update rfc
+./knowledge-mcp search rfc "HTTP status codes"
+./knowledge-mcp search rfc "RFC 9110" --mode full_text
+./knowledge-mcp read rfc --id 9110
 
 # Wikimedia remains a provider, not a special core concept.
-./wikipedia-multistream-mcp dataset download dawiki --variant content-current
-./wikipedia-multistream-mcp search dawiki "Copenhagen architecture"
-./wikipedia-multistream-mcp read dawiki --id 12345
+./knowledge-mcp dataset download dawiki --variant content-current
+./knowledge-mcp search dawiki "Copenhagen architecture"
+./knowledge-mcp read dawiki --id 12345
 ```
 
-Set `KNOWLEDGE_DATASET_MCP_SERVER` or pass `--server` for a non-default
-endpoint. The legacy `WIKIPEDIA_MULTISTREAM_MCP_SERVER` name remains accepted.
+Set `KNOWLEDGE_MCP_SERVER` or pass `--server` for a non-default endpoint.
 
 ## MCP tools
 
@@ -194,20 +193,20 @@ upstream catalog is temporarily unavailable. Settings persist in `data/settings.
 ## User service
 
 ```sh
-mkdir -p ~/.local/lib/wikipedia-multistream-mcp \
-  ~/.local/share/wikipedia-multistream-mcp/data \
+mkdir -p ~/.local/lib/knowledge-mcp \
+  ~/.local/share/knowledge-mcp/data \
   ~/.config/systemd/user
-go build -o ~/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp .
-cp contrib/systemd/wikipedia-multistream-mcp.service ~/.config/systemd/user/
+go build -o ~/.local/lib/knowledge-mcp/knowledge-mcp .
+cp contrib/systemd/knowledge-mcp.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now wikipedia-multistream-mcp.service
+systemctl --user enable --now knowledge-mcp.service
 ```
 
 Inspect it with:
 
 ```sh
-systemctl --user status wikipedia-multistream-mcp.service
-journalctl --user -u wikipedia-multistream-mcp.service
+systemctl --user status knowledge-mcp.service
+journalctl --user -u knowledge-mcp.service
 ```
 
 An agent installing a release should download the matching binary and `.sha256`
@@ -217,7 +216,7 @@ binary and included user unit at the paths above, start the service, verify
 `http://127.0.0.1:8765/mcp`. Stdio-only clients can run:
 
 ```sh
-~/.local/lib/wikipedia-multistream-mcp/wikipedia-multistream-mcp mcp stdio
+~/.local/lib/knowledge-mcp/knowledge-mcp mcp stdio
 ```
 
 Daily rolling releases provide Linux, macOS, and Windows binaries for AMD64 and
@@ -251,4 +250,4 @@ EUR-Lex document dates. `knowledge_search` accepts `published_after`,
 
 ## License
 
-Knowledge Dataset MCP is released under the [MIT License](LICENSE).
+Knowledge MCP is released under the [MIT License](LICENSE).

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
 )
 
 type matrixSite struct {

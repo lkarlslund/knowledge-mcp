@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	sourceprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	"github.com/lkarlslund/knowledge-mcp/internal/knowledgeindex"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	sourceprovider "github.com/lkarlslund/knowledge-mcp/internal/provider"
 )
 
 const testRFCIndex = `<?xml version="1.0"?><rfc-index>

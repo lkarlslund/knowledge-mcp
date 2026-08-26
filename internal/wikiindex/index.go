@@ -35,7 +35,7 @@ import (
 	blevequery "github.com/blevesearch/bleve/v2/search/query"
 	"github.com/cosnicolaou/pbzip2"
 	dsbzip2 "github.com/dsnet/compress/bzip2"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
 )
 
 const (

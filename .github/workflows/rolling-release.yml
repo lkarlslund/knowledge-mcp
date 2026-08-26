@@ -53,18 +53,18 @@ jobs:
             local missing=0
             local asset
             local expected_assets=(
-              "wikipedia-multistream-mcp-${tag}-linux-amd64"
-              "wikipedia-multistream-mcp-${tag}-linux-amd64.sha256"
-              "wikipedia-multistream-mcp-${tag}-linux-arm64"
-              "wikipedia-multistream-mcp-${tag}-linux-arm64.sha256"
-              "wikipedia-multistream-mcp-${tag}-darwin-amd64"
-              "wikipedia-multistream-mcp-${tag}-darwin-amd64.sha256"
-              "wikipedia-multistream-mcp-${tag}-darwin-arm64"
-              "wikipedia-multistream-mcp-${tag}-darwin-arm64.sha256"
-              "wikipedia-multistream-mcp-${tag}-windows-amd64.exe"
-              "wikipedia-multistream-mcp-${tag}-windows-amd64.exe.sha256"
-              "wikipedia-multistream-mcp-${tag}-windows-arm64.exe"
-              "wikipedia-multistream-mcp-${tag}-windows-arm64.exe.sha256"
+              "knowledge-mcp-${tag}-linux-amd64"
+              "knowledge-mcp-${tag}-linux-amd64.sha256"
+              "knowledge-mcp-${tag}-linux-arm64"
+              "knowledge-mcp-${tag}-linux-arm64.sha256"
+              "knowledge-mcp-${tag}-darwin-amd64"
+              "knowledge-mcp-${tag}-darwin-amd64.sha256"
+              "knowledge-mcp-${tag}-darwin-arm64"
+              "knowledge-mcp-${tag}-darwin-arm64.sha256"
+              "knowledge-mcp-${tag}-windows-amd64.exe"
+              "knowledge-mcp-${tag}-windows-amd64.exe.sha256"
+              "knowledge-mcp-${tag}-windows-arm64.exe"
+              "knowledge-mcp-${tag}-windows-arm64.exe.sha256"
             )
 
             mapfile -t release_assets < <(gh release view "$tag" --json assets --jq '.assets[].name')
@@ -111,7 +111,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
           {
-            echo "## Wikipedia Multistream MCP ${tag}"
+            echo "## Knowledge MCP ${tag}"
             echo
             echo "Rolling release for Linux, macOS, and Windows on AMD64 and ARM64, built from ${short_sha} at ${built_at}."
             echo
@@ -154,10 +154,10 @@ jobs:
             if [[ "$goos" == "windows" ]]; then
               extension=".exe"
             fi
-            asset="wikipedia-multistream-mcp-${VERSION}-${goos}-${goarch}${extension}"
+            asset="knowledge-mcp-${VERSION}-${goos}-${goarch}${extension}"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
               -trimpath \
-              -ldflags "-s -w -X github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver.Version=${VERSION}" \
+              -ldflags "-s -w -X github.com/lkarlslund/knowledge-mcp/internal/mcpserver.Version=${VERSION}" \
               -o "dist/${asset}" .
             (cd dist && sha256sum "$asset" >"${asset}.sha256")
           done

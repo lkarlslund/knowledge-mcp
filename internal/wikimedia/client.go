@@ -21,11 +21,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
 )
 
 const defaultBaseURL = "https://dumps.wikimedia.org"
-const userAgent = "wikipedia-multistream-mcp/0.1 (+https://github.com/lkarlslund/wikipedia-multistream-mcp)"
+const userAgent = "knowledge-mcp/0.1 (+https://github.com/lkarlslund/knowledge-mcp)"
 
 var (
 	wikiNameRE   = regexp.MustCompile(`^[a-z0-9_]+(?:wiki|wikibooks|wikinews|wikiquote|wikisource|wikispecies|wikiversity|wikivoyage|wiktionary)$`)

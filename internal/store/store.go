@@ -16,10 +16,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
-	documentrefs "github.com/lkarlslund/wikipedia-multistream-mcp/internal/references"
+	"github.com/lkarlslund/knowledge-mcp/internal/knowledgeindex"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
+	documentrefs "github.com/lkarlslund/knowledge-mcp/internal/references"
 )
 
 type Store struct {

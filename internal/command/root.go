@@ -12,17 +12,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpclient"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
-	eurlexprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/eurlex"
-	kiwixprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/kiwix"
-	ncbiprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/ncbi"
-	rfcprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/rfc"
-	wikimediaprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/wikimedia"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/store"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
+	"github.com/lkarlslund/knowledge-mcp/internal/mcpclient"
+	"github.com/lkarlslund/knowledge-mcp/internal/mcpserver"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
+	eurlexprovider "github.com/lkarlslund/knowledge-mcp/internal/provider/eurlex"
+	kiwixprovider "github.com/lkarlslund/knowledge-mcp/internal/provider/kiwix"
+	ncbiprovider "github.com/lkarlslund/knowledge-mcp/internal/provider/ncbi"
+	rfcprovider "github.com/lkarlslund/knowledge-mcp/internal/provider/rfc"
+	wikimediaprovider "github.com/lkarlslund/knowledge-mcp/internal/provider/wikimedia"
+	"github.com/lkarlslund/knowledge-mcp/internal/store"
+	"github.com/lkarlslund/knowledge-mcp/internal/wikimedia"
 	"github.com/spf13/cobra"
 )
 
@@ -35,16 +35,13 @@ type options struct {
 func Execute() error {
 	opts := &options{}
 	root := &cobra.Command{
-		Use:           "wikipedia-multistream-mcp",
+		Use:           "knowledge-mcp",
 		Short:         "Search locally indexed knowledge datasets through MCP",
 		Version:       mcpserver.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	defaultServer := os.Getenv("KNOWLEDGE_DATASET_MCP_SERVER")
-	if defaultServer == "" {
-		defaultServer = os.Getenv("WIKIPEDIA_MULTISTREAM_MCP_SERVER")
-	}
+	defaultServer := os.Getenv("KNOWLEDGE_MCP_SERVER")
 	if defaultServer == "" {
 		defaultServer = defaultEndpoint
 	}

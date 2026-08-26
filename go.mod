@@ -1,4 +1,4 @@
-module github.com/lkarlslund/wikipedia-multistream-mcp
+module github.com/lkarlslund/knowledge-mcp
 
 go 1.25.0
 

@@ -20,8 +20,8 @@ import (
 
 	"github.com/blevesearch/bleve/v2"
 	blevequery "github.com/blevesearch/bleve/v2/search/query"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	"github.com/lkarlslund/knowledge-mcp/internal/model"
+	"github.com/lkarlslund/knowledge-mcp/internal/provider"
 )
 
 const (

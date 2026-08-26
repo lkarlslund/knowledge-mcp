@@ -1,4 +1,4 @@
-/wikipedia-multistream-mcp
+/knowledge-mcp
 /data/*
 !/data/.gitkeep
 coverage.out
