@@ -237,7 +237,7 @@ func ScanSourceTitles(ctx context.Context, parts []Part, after string, emit func
 	return nil
 }
 
-func ScanSourceBodies(ctx context.Context, parts []Part, after string, emit func([]SourceBody, string, int64, int64) error) error {
+func ScanSourceBodies(ctx context.Context, parts []Part, after string, parallelism int, emit func([]SourceBody, string, int64, int64) error) error {
 	var streams []stream
 	for _, part := range parts {
 		partStreams, err := readStreams(ctx, part)
@@ -261,8 +261,12 @@ func ScanSourceBodies(ctx context.Context, parts []Part, after string, emit func
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	workerCount := min(runtime.GOMAXPROCS(0), 8)
+	if parallelism > 0 {
+		workerCount = min(parallelism, 32)
+	}
 	jobs := make(chan int)
-	results := make(chan result, min(runtime.GOMAXPROCS(0), 8))
+	results := make(chan result, workerCount)
 	var workers sync.WaitGroup
 	for range cap(results) {
 		workers.Add(1)

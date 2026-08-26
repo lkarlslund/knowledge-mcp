@@ -36,7 +36,7 @@ type wikimediaCorpus struct {
 	reader   *wikiindex.Reader
 }
 
-func (c *wikimediaCorpus) ScanTitles(ctx context.Context, after string, sink provider.RecordSink) error {
+func (c *wikimediaCorpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return wikiindex.ScanSourceTitles(ctx, wikiParts(c.path, c.manifest.PartCount), after, func(source wikiindex.SourceTitle, cursor string, completed, total int64, boundary bool) error {
 		return sink(provider.Record{
 			ID: strconv.FormatUint(source.ID, 10), Title: source.Title,
@@ -46,8 +46,8 @@ func (c *wikimediaCorpus) ScanTitles(ctx context.Context, after string, sink pro
 	})
 }
 
-func (c *wikimediaCorpus) ScanBodies(ctx context.Context, after string, sink provider.RecordSink) error {
-	return wikiindex.ScanSourceBodies(ctx, wikiParts(c.path, c.manifest.PartCount), after, func(documents []wikiindex.SourceBody, cursor string, completed, total int64) error {
+func (c *wikimediaCorpus) ScanBodies(ctx context.Context, after string, options provider.ScanOptions, sink provider.RecordSink) error {
+	return wikiindex.ScanSourceBodies(ctx, wikiParts(c.path, c.manifest.PartCount), after, options.Parallelism, func(documents []wikiindex.SourceBody, cursor string, completed, total int64) error {
 		for index, source := range documents {
 			body := ""
 			if !source.Redirect {

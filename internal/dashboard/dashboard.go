@@ -27,6 +27,9 @@ type Service interface {
 	Submit(string, string, string) (model.Job, error)
 	DeleteDataset(string) error
 	JobAction(string, string) (model.Job, error)
+	Settings() model.Settings
+	UpdateSettings(model.Settings) (model.Settings, error)
+	OperationalStatus() model.OperationalStatus
 	Subscribe(context.Context) <-chan struct{}
 }
 
@@ -94,6 +97,25 @@ func Handler(service Service) http.Handler {
 	})
 	mux.HandleFunc("GET /api/dashboard/jobs", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, service.ListJobs(), nil)
+	})
+	mux.HandleFunc("GET /api/dashboard/status", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, service.OperationalStatus(), nil)
+	})
+	mux.HandleFunc("GET /api/dashboard/settings", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, service.Settings(), nil)
+	})
+	mux.HandleFunc("PUT /api/dashboard/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Knowledge-MCP") != "1" {
+			writeJSONStatus(w, nil, errors.New("missing maintenance request header"), http.StatusForbidden)
+			return
+		}
+		var settings model.Settings
+		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+			writeJSONStatus(w, nil, err, http.StatusBadRequest)
+			return
+		}
+		result, err := service.UpdateSettings(settings)
+		writeJSON(w, result, err)
 	})
 	mux.HandleFunc("GET /api/dashboard/upgrades", func(w http.ResponseWriter, r *http.Request) {
 		result, err := service.ListUpgrades(r.Context())

@@ -20,10 +20,10 @@ type testCorpus struct {
 	observedAfter []string
 }
 
-func (c *testCorpus) ScanTitles(ctx context.Context, after string, sink provider.RecordSink) error {
+func (c *testCorpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return c.scan(ctx, after, false, sink)
 }
-func (c *testCorpus) ScanBodies(ctx context.Context, after string, sink provider.RecordSink) error {
+func (c *testCorpus) ScanBodies(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return c.scan(ctx, after, true, sink)
 }
 func (c *testCorpus) scan(ctx context.Context, after string, body bool, sink provider.RecordSink) error {
@@ -68,11 +68,11 @@ func TestTitleBuildResumesAtCommittedProviderBoundary(t *testing.T) {
 	}
 	interrupted := errors.New("source interrupted")
 	corpus := &testCorpus{records: records, failAfter: 1_050, failure: interrupted}
-	if _, err := BuildTitle(context.Background(), path, "release-a", corpus, func(uint64, int64, int64) {}); !errors.Is(err, interrupted) {
+	if _, err := BuildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(uint64, int64, int64) {}); !errors.Is(err, interrupted) {
 		t.Fatalf("first BuildTitle error = %v", err)
 	}
 	corpus.failure = nil
-	count, err := BuildTitle(context.Background(), path, "release-a", corpus, func(uint64, int64, int64) {})
+	count, err := BuildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(uint64, int64, int64) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +97,11 @@ func TestBodyBuildResumesAtCommittedProviderBoundary(t *testing.T) {
 	}
 	interrupted := errors.New("source interrupted")
 	corpus := &testCorpus{records: records, failAfter: 9, failure: interrupted}
-	if err := BuildBody(context.Background(), path, "release-a", corpus, func(int64, int64) {}); !errors.Is(err, interrupted) {
+	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64) {}); !errors.Is(err, interrupted) {
 		t.Fatalf("first BuildBody error = %v", err)
 	}
 	corpus.failure = nil
-	if err := BuildBody(context.Background(), path, "release-a", corpus, func(int64, int64) {}); err != nil {
+	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64) {}); err != nil {
 		t.Fatal(err)
 	}
 	if got := corpus.observedAfter[len(corpus.observedAfter)-1]; got != "doc-07" {
@@ -120,14 +120,14 @@ func TestGenericEngineIndexesProviderRecords(t *testing.T) {
 		{ID: "mail", Title: "Mail Status", Body: "email delivery status codes", URL: "https://example/mail", Locator: "raw:2", Primary: true},
 		{ID: "talk", Title: "Talk: HTTP", Body: "discussion of semantics", Locator: "raw:3", Namespace: 1},
 	}}
-	count, err := BuildTitle(context.Background(), path, "test-source", corpus, func(uint64, int64, int64) {})
+	count, err := BuildTitle(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(uint64, int64, int64) {})
 	if err != nil || count != 3 {
 		t.Fatalf("BuildTitle = %d, %v", count, err)
 	}
 	if err := os.Rename(filepath.Join(path, TitleDirectory+".building"), filepath.Join(path, TitleDirectory)); err != nil {
 		t.Fatal(err)
 	}
-	if err := BuildBody(context.Background(), path, "test-source", corpus, func(int64, int64) {}); err != nil {
+	if err := BuildBody(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(int64, int64) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(path, BodyDirectory+".building"), filepath.Join(path, BodyDirectory)); err != nil {

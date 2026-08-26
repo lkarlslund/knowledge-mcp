@@ -31,6 +31,15 @@ func (f *fakeService) ListUpgrades(context.Context) ([]model.AvailableDataset, e
 	return []model.AvailableDataset{{ID: "testwiki", Installed: true, UpdateAvailable: true}}, nil
 }
 func (f *fakeService) ListJobs() []model.Job { return []model.Job{{ID: "job-1"}} }
+func (f *fakeService) Settings() model.Settings {
+	return model.Settings{DownloadWorkers: 3, IndexWorkers: 2, IndexingParallelism: 8, UpdateCheckHours: 24}
+}
+func (f *fakeService) UpdateSettings(settings model.Settings) (model.Settings, error) {
+	return settings, nil
+}
+func (f *fakeService) OperationalStatus() model.OperationalStatus {
+	return model.OperationalStatus{Settings: f.Settings()}
+}
 func (f *fakeService) Submit(dataset, variant, kind string) (model.Job, error) {
 	f.submitted = dataset + "/" + kind
 	return model.Job{ID: "job-2", Dataset: dataset, Kind: kind}, nil
@@ -95,7 +104,7 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Knowledge Dataset MCP") || !strings.Contains(page.Body.String(), `href="https://github.com/lkarlslund/wikipedia-multistream-mcp"`) || !strings.Contains(page.Body.String(), `aria-label="View Knowledge Dataset MCP on GitHub"`) || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || !strings.Contains(page.Body.String(), "Total documents") || !strings.Contains(page.Body.String(), "bi-trash3") || !strings.Contains(page.Body.String(), `id="onlineDatasetsModal"`) || !strings.Contains(page.Body.String(), "limit=-1") || !strings.Contains(page.Body.String(), "All Languages") || !strings.Contains(page.Body.String(), "hideInstalled") || !strings.Contains(page.Body.String(), "filteredAvailable") || !strings.Contains(page.Body.String(), "provider metadata") || !strings.Contains(page.Body.String(), "storage-column") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Knowledge Dataset MCP") || !strings.Contains(page.Body.String(), `href="https://github.com/lkarlslund/wikipedia-multistream-mcp"`) || !strings.Contains(page.Body.String(), `aria-label="View Knowledge Dataset MCP on GitHub"`) || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || !strings.Contains(page.Body.String(), "Total documents") || !strings.Contains(page.Body.String(), "bi-trash3") || !strings.Contains(page.Body.String(), `id="onlineDatasetsModal"`) || !strings.Contains(page.Body.String(), `id="settingsModal"`) || !strings.Contains(page.Body.String(), "indexing_parallelism") || !strings.Contains(page.Body.String(), "Provider catalogs") || !strings.Contains(page.Body.String(), "limit=-1") || !strings.Contains(page.Body.String(), "All Languages") || !strings.Contains(page.Body.String(), "hideInstalled") || !strings.Contains(page.Body.String(), "filteredAvailable") || !strings.Contains(page.Body.String(), "provider metadata") || !strings.Contains(page.Body.String(), "storage-column") {
 		t.Fatalf("unexpected dashboard response: %d %q", page.Code, page.Body.String())
 	}
 
@@ -125,6 +134,14 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 	handler.ServeHTTP(jobResponse, jobRequest)
 	if jobResponse.Code != http.StatusOK || service.submitted != "job-1/pause" {
 		t.Fatalf("job action response %d, submitted %q", jobResponse.Code, service.submitted)
+	}
+	settingsRequest := httptest.NewRequestWithContext(ctx, http.MethodPut, "/api/dashboard/settings", strings.NewReader(`{"download_workers":4,"index_workers":2,"indexing_parallelism":6,"update_check_hours":24}`))
+	settingsRequest.Header.Set("Content-Type", "application/json")
+	settingsRequest.Header.Set("X-Knowledge-MCP", "1")
+	settingsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(settingsResponse, settingsRequest)
+	if settingsResponse.Code != http.StatusOK || !strings.Contains(settingsResponse.Body.String(), `"download_workers":4`) {
+		t.Fatalf("settings response = %d %q", settingsResponse.Code, settingsResponse.Body.String())
 	}
 }
 

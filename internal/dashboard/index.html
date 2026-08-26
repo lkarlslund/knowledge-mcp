@@ -47,6 +47,7 @@
     <div class="d-flex align-items-center gap-3 small text-body-secondary">
       <span class="d-flex align-items-center gap-2" :class="connected ? 'text-success' : 'text-warning'"><span class="connection-dot rounded-circle bg-current"></span><span x-text="connected ? 'Live' : 'Reconnecting'"></span></span>
       <code>/mcp</code>
+      <button class="btn btn-sm btn-outline-secondary btn-icon rounded-circle" data-bs-toggle="modal" data-bs-target="#settingsModal" @click="loadOperational()" title="Settings and provider health" aria-label="Settings and provider health"><i class="bi bi-gear"></i></button>
       <a class="text-body-secondary text-decoration-none d-inline-flex align-items-center gap-1" href="https://github.com/lkarlslund/wikipedia-multistream-mcp" target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View Knowledge Dataset MCP on GitHub"><i class="bi bi-github fs-5"></i><span class="d-none d-sm-inline">GitHub</span></a>
     </div>
   </header>
@@ -111,11 +112,30 @@
     </div>
   </div></div>
 </div>
+
+<div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsTitle" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content surface border rounded-4">
+    <div class="modal-header py-2"><div><h2 class="modal-title h6 mb-0" id="settingsTitle"><i class="bi bi-gear section-icon me-2"></i>Settings</h2><div class="small text-body-secondary">Worker limits apply immediately; indexing parallelism applies to the next index scan.</div></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <form class="row g-3" @submit.prevent="saveSettings()">
+        <div class="col-sm-6"><label class="form-label small" for="downloadWorkers">Parallel download jobs</label><input id="downloadWorkers" class="form-control form-control-sm" type="number" min="1" max="32" x-model.number="settingsDraft.download_workers" /></div>
+        <div class="col-sm-6"><label class="form-label small" for="indexWorkers">Parallel index jobs</label><input id="indexWorkers" class="form-control form-control-sm" type="number" min="1" max="32" x-model.number="settingsDraft.index_workers" /></div>
+        <div class="col-sm-6"><label class="form-label small" for="indexParallelism">Decompression workers per index</label><input id="indexParallelism" class="form-control form-control-sm" type="number" min="1" max="32" x-model.number="settingsDraft.indexing_parallelism" /></div>
+        <div class="col-sm-6"><label class="form-label small" for="updateHours">Check for updates every (hours)</label><input id="updateHours" class="form-control form-control-sm" type="number" min="1" max="720" x-model.number="settingsDraft.update_check_hours" /></div>
+        <div class="col-12"><div class="form-check form-switch"><input id="automaticUpdates" class="form-check-input" type="checkbox" role="switch" x-model="settingsDraft.automatically_update" /><label class="form-check-label" for="automaticUpdates">Automatically queue detected dataset updates</label></div><div class="small text-body-secondary">When disabled, scheduled checks only refresh update availability.</div></div>
+        <div class="col-12 d-flex justify-content-end"><button class="btn btn-sm btn-primary" type="submit"><i class="bi bi-check-lg me-1"></i>Save settings</button></div>
+      </form>
+      <hr />
+      <div class="d-flex align-items-center justify-content-between mb-2"><h3 class="h6 mb-0">Provider catalogs</h3><span class="small text-body-secondary" x-text="operational.next_update_check ? `Next check ${relativeTimeFuture(operational.next_update_check)}` : ''"></span></div>
+      <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Provider</th><th>State</th><th>Catalog</th><th>Datasets</th><th>Last success</th></tr></thead><tbody><template x-for="provider in operational.providers || []" :key="provider.provider"><tr><td class="fw-semibold" x-text="provider.provider"></td><td><span class="badge fw-normal" :class="provider.state === 'healthy' ? 'text-bg-success' : provider.state === 'degraded' ? 'text-bg-danger' : 'text-bg-secondary'" x-text="provider.state"></span><div class="small text-danger" x-show="provider.error" x-text="provider.error"></div></td><td class="small" x-text="label(provider.catalog_state)"></td><td x-text="number(provider.datasets)"></td><td class="small text-body-secondary" x-text="provider.last_success ? relativeTime(provider.last_success) : 'never'"></td></tr></template></tbody></table></div>
+    </div>
+  </div></div>
+</div>
 </main>
 
 <script>
 document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
-  local: [], jobs: [], upgrades: [], available: [], filter: '', languageFilter: '', hideInstalled: false, jobFilter: 'running', connected: false, error: '', socket: null, reconnectDelay: 1000,
+  local: [], jobs: [], upgrades: [], available: [], operational: {providers:[]}, settingsDraft: {download_workers:3,index_workers:2,indexing_parallelism:8,update_check_hours:24,automatically_update:false}, filter: '', languageFilter: '', hideInstalled: false, jobFilter: 'running', connected: false, error: '', socket: null, reconnectDelay: 1000,
   terminal: ['downloaded','ready','up_to_date','failed','canceled'],
 	jobFilterOptions: [{value:'all', label:'All', icon:'bi bi-grid'}, {value:'running', label:'Running', icon:'bi bi-play-circle'}, {value:'queued', label:'Queued', icon:'bi bi-hourglass'}, {value:'failed', label:'Failed', icon:'bi bi-exclamation-circle'}, {value:'completed', label:'Completed', icon:'bi bi-check-circle'}],
   async init() { await this.loadUpgrades(); this.connect(); },
@@ -136,6 +156,8 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
   },
   refreshCatalogSoon() { clearTimeout(this.catalogTimer); this.catalogTimer = setTimeout(() => Promise.all([this.loadUpgrades(), this.available.length ? this.loadAvailable(false, true) : Promise.resolve()]), 750); },
   async loadUpgrades() { try { this.upgrades = await this.api('/api/dashboard/upgrades'); } catch (error) { this.error = error.message; } },
+  async loadOperational() { try { this.operational = await this.api('/api/dashboard/status'); this.settingsDraft = {...this.operational.settings}; } catch (error) { this.error = error.message; } },
+  async saveSettings() { try { const settings = await this.api('/api/dashboard/settings', {method:'PUT', headers:{'Content-Type':'application/json','X-Knowledge-MCP':'1'}, body:JSON.stringify(this.settingsDraft)}); this.settingsDraft = {...settings}; await this.loadOperational(); } catch (error) { this.error = error.message; } },
   async loadAvailable(refresh = false, force = false) { if (this.available.length && !refresh && !force) return; try { const data = await this.api(`/api/dashboard/available?filter=&offset=0&limit=-1&refresh=${refresh}`); this.available = data.datasets || []; this.error = ''; } catch (error) { this.error = error.message; } },
   async maintain(dataset, action, variant = '') { try { await this.api(`/api/dashboard/dataset/${encodeURIComponent(dataset)}/${action}?variant=${encodeURIComponent(variant || '')}`, {method:'POST', headers:{'X-Knowledge-MCP':'1'}}); if (this.available.length) await this.loadAvailable(false, true); } catch (error) { this.error = error.message; } },
   async deleteDataset(dataset) { if (!window.confirm(`Delete ${dataset.dataset} and permanently remove ${this.bytes(dataset.disk_bytes)} of local data?`)) return; try { await this.api(`/api/dashboard/dataset/${encodeURIComponent(dataset.dataset)}/delete`, {method:'POST', headers:{'X-Knowledge-MCP':'1'}}); this.local = this.local.filter(item => item.dataset !== dataset.dataset); await Promise.all([this.loadUpgrades(), this.available.length ? this.loadAvailable(false, true) : Promise.resolve()]); } catch (error) { this.error = error.message; } },
@@ -155,6 +177,7 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
   progressText(job) { const done = Number(job.completed || 0), total = Number(job.total || 0), rate = Number(job.rate || 0); if (job.state === 'title_indexing') return `${this.number(done)} documents · ~${this.progressPercent(job).toFixed(1)}%`; const values = job.units === 'bytes' ? `${this.bytes(done)}${total ? ` / ${this.bytes(total)}` : ''}` : `${this.number(done)}${total ? ` / ${this.number(total)}` : ''} ${job.units || ''}`; if (!rate || job.units !== 'bytes') return values || job.message || ''; const seconds = total > done ? (total - done) / rate : 0; return `${values} · ${this.bytes(rate)}/s · ${this.duration(seconds)} left`; },
   duration(seconds) { if (seconds < 60) return `${Math.ceil(seconds)}s`; if (seconds < 3600) return `${Math.floor(seconds/60)}m`; return `${Math.floor(seconds/3600)}h ${Math.ceil((seconds%3600)/60)}m`; },
   relativeTime(value) { const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000); if (seconds < 60) return `${Math.floor(seconds)}s ago`; if (seconds < 3600) return `${Math.floor(seconds/60)}m ago`; return new Date(value).toLocaleString(); },
+  relativeTimeFuture(value) { const seconds = Math.max(0, (new Date(value).getTime() - Date.now()) / 1000); if (seconds < 60) return `in ${Math.ceil(seconds)}s`; if (seconds < 3600) return `in ${Math.ceil(seconds/60)}m`; return `in ${Math.ceil(seconds/3600)}h`; },
   newerJob(current, incoming) { if (!current) return incoming; const currentTime = new Date(current.updated_at).getTime(), incomingTime = new Date(incoming.updated_at).getTime(); if (incomingTime < currentTime) return current; if (incomingTime === currentTime && incoming.state === current.state && incoming.phase === current.phase && Number(incoming.completed || 0) < Number(current.completed || 0)) return current; return incoming; }
 })))
 </script>

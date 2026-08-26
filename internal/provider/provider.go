@@ -49,9 +49,13 @@ type ScanPosition struct {
 
 type RecordSink func(Record, ScanPosition) error
 
+type ScanOptions struct {
+	Parallelism int
+}
+
 type Corpus interface {
-	ScanTitles(context.Context, string, RecordSink) error
-	ScanBodies(context.Context, string, RecordSink) error
+	ScanTitles(context.Context, string, ScanOptions, RecordSink) error
+	ScanBodies(context.Context, string, ScanOptions, RecordSink) error
 	Read(context.Context, Record, model.ReadOptions) (model.Document, error)
 	Close() error
 }
@@ -81,6 +85,12 @@ type Provider interface {
 type Registry struct {
 	providers []Provider
 	byID      map[string]Provider
+}
+
+type DiscoveryReport struct {
+	Provider string
+	Datasets int
+	Error    string
 }
 
 func NewRegistry(providers ...Provider) (*Registry, error) {
@@ -125,6 +135,11 @@ func (r *Registry) ForCollection(collection string) (Provider, error) {
 }
 
 func (r *Registry) Discover(ctx context.Context, filter string, refresh bool) ([]model.AvailableDataset, error) {
+	items, _, err := r.DiscoverReport(ctx, filter, refresh)
+	return items, err
+}
+
+func (r *Registry) DiscoverReport(ctx context.Context, filter string, refresh bool) ([]model.AvailableDataset, []DiscoveryReport, error) {
 	type result struct {
 		provider string
 		items    []model.AvailableDataset
@@ -139,11 +154,17 @@ func (r *Registry) Discover(ctx context.Context, filter string, refresh bool) ([
 	}
 	var items []model.AvailableDataset
 	var errs []error
+	reports := make([]DiscoveryReport, 0, len(r.providers))
 	for range r.providers {
 		result := <-results
+		report := DiscoveryReport{Provider: result.provider, Datasets: len(result.items)}
+		if result.err != nil {
+			report.Error = result.err.Error()
+		}
+		reports = append(reports, report)
 		for _, item := range result.items {
 			if item.Provider != result.provider {
-				return nil, fmt.Errorf("provider %q advertised dataset %q with owner %q", result.provider, item.ID, item.Provider)
+				return nil, reports, fmt.Errorf("provider %q advertised dataset %q with owner %q", result.provider, item.ID, item.Provider)
 			}
 		}
 		items = append(items, result.items...)
@@ -154,20 +175,20 @@ func (r *Registry) Discover(ctx context.Context, filter string, refresh bool) ([
 	owners := make(map[string]string, len(items))
 	for _, item := range items {
 		if !stableIDPattern.MatchString(item.ID) || item.Provider == "" || strings.TrimSpace(item.Description) == "" || len(item.Variants) == 0 {
-			return nil, fmt.Errorf("provider %q returned incomplete dataset metadata for %q", item.Provider, item.ID)
+			return nil, reports, fmt.Errorf("provider %q returned incomplete dataset metadata for %q", item.Provider, item.ID)
 		}
 		seenVariants := make(map[string]struct{}, len(item.Variants))
 		for _, variant := range item.Variants {
 			if !stableIDPattern.MatchString(variant.ID) || strings.TrimSpace(variant.Name) == "" {
-				return nil, fmt.Errorf("provider %q returned invalid variant for dataset %q", item.Provider, item.ID)
+				return nil, reports, fmt.Errorf("provider %q returned invalid variant for dataset %q", item.Provider, item.ID)
 			}
 			if _, exists := seenVariants[variant.ID]; exists {
-				return nil, fmt.Errorf("provider %q returned duplicate variant %q for dataset %q", item.Provider, variant.ID, item.ID)
+				return nil, reports, fmt.Errorf("provider %q returned duplicate variant %q for dataset %q", item.Provider, variant.ID, item.ID)
 			}
 			seenVariants[variant.ID] = struct{}{}
 		}
 		if owner, exists := owners[item.ID]; exists && owner != item.Provider {
-			return nil, fmt.Errorf("dataset ID %q is advertised by both %q and %q", item.ID, owner, item.Provider)
+			return nil, reports, fmt.Errorf("dataset ID %q is advertised by both %q and %q", item.ID, owner, item.Provider)
 		}
 		owners[item.ID] = item.Provider
 	}
@@ -178,7 +199,8 @@ func (r *Registry) Discover(ctx context.Context, filter string, refresh bool) ([
 		return items[i].ID < items[j].ID
 	})
 	if len(items) == 0 && len(errs) > 0 {
-		return nil, errors.Join(errs...)
+		return nil, reports, errors.Join(errs...)
 	}
-	return items, nil
+	sort.Slice(reports, func(i, j int) bool { return reports[i].Provider < reports[j].Provider })
+	return items, reports, nil
 }

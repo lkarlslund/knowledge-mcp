@@ -118,11 +118,11 @@ type rfcCorpus struct {
 	entries       []rfcEntry
 }
 
-func (c *rfcCorpus) ScanTitles(ctx context.Context, after string, sink provider.RecordSink) error {
+func (c *rfcCorpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return c.scan(ctx, after, false, sink)
 }
 
-func (c *rfcCorpus) ScanBodies(ctx context.Context, after string, sink provider.RecordSink) error {
+func (c *rfcCorpus) ScanBodies(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return c.scan(ctx, after, true, sink)
 }
 

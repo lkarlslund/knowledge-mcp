@@ -23,7 +23,7 @@ func TestNativeZIMCorpusAndMarkdownLinks(t *testing.T) {
 	corpus := &zimCorpus{archive: archive, dataset: "kiwix-test", sourceURL: "https://example.test/content/test"}
 	defer func() { _ = corpus.Close() }()
 	var record provider.Record
-	if err := corpus.ScanBodies(context.Background(), "", func(candidate provider.Record, position provider.ScanPosition) error {
+	if err := corpus.ScanBodies(context.Background(), "", provider.ScanOptions{}, func(candidate provider.Record, position provider.ScanPosition) error {
 		record = candidate
 		if position.Cursor != "1" || position.Completed != 1 || position.Total != 1 || !position.Boundary {
 			t.Fatalf("position = %#v", position)
@@ -87,7 +87,7 @@ func TestOfficialSmallKiwixArchive(t *testing.T) {
 	}
 	defer func() { _ = corpus.Close() }()
 	var documents int
-	err = corpus.ScanBodies(ctx, "", func(record provider.Record, _ provider.ScanPosition) error {
+	err = corpus.ScanBodies(ctx, "", provider.ScanOptions{}, func(record provider.Record, _ provider.ScanPosition) error {
 		if record.Body != "" {
 			documents++
 		}

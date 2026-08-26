@@ -67,7 +67,7 @@ func Current(manifest model.Manifest) (title, body bool) {
 		manifest.BodyReady && manifest.BodyIndexVersion == BodyVersion
 }
 
-func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.Corpus, progress TitleProgress) (uint64, error) {
+func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, progress TitleProgress) (uint64, error) {
 	destination := filepath.Join(path, TitleDirectory+".building")
 	checkpointPath := destination + ".checkpoint.json"
 	checkpoint, resume := loadCheckpoint(checkpointPath, destination, "title", TitleVersion, fingerprint)
@@ -116,7 +116,7 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 		return nil
 	}
 	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
-	err = corpus.ScanTitles(ctx, checkpoint.Cursor, func(record provider.Record, position provider.ScanPosition) error {
+	err = corpus.ScanTitles(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
 			return errors.New("provider emitted title record without ID or title")
 		}
@@ -152,7 +152,7 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 	return count, nil
 }
 
-func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Corpus, progress BodyProgress) error {
+func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, progress BodyProgress) error {
 	destination := filepath.Join(path, BodyDirectory+".building")
 	checkpointPath := destination + ".checkpoint.json"
 	checkpoint, resume := loadCheckpoint(checkpointPath, destination, "body", BodyVersion, fingerprint)
@@ -235,7 +235,7 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 	pendingBytes := 0
 	lastBoundary := true
 	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
-	err := corpus.ScanBodies(ctx, checkpoint.Cursor, func(record provider.Record, position provider.ScanPosition) error {
+	err := corpus.ScanBodies(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
 			return errors.New("provider emitted body record without ID or title")
 		}

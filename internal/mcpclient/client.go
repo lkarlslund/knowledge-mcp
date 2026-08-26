@@ -84,6 +84,12 @@ func (c *Client) JobAction(id, action string) (model.Job, error) {
 	return out, err
 }
 
+func (c *Client) OperationalStatus() model.OperationalStatus {
+	var out model.OperationalStatus
+	_ = c.Call(context.Background(), "knowledge_status", map[string]any{}, &out)
+	return out
+}
+
 func (c *Client) Search(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, error) {
 	var out model.SearchResult
 	arguments := map[string]any{"dataset": dataset, "query": query, "offset": options.Offset, "limit": options.Limit, "include_secondary": options.IncludeSecondary, "snippets": options.Snippets}

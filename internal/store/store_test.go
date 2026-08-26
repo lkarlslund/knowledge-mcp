@@ -129,6 +129,36 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	}
 }
 
+func TestSettingsPersistAcrossRestart(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	registry, err := provider.NewRegistry(wikimediaprovider.New(wikimedia.NewClient(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := Open(root, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := model.Settings{DownloadWorkers: 5, IndexWorkers: 3, IndexingParallelism: 7, UpdateCheckHours: 48, AutomaticallyUpdate: true}
+	if _, err := backend.UpdateSettings(want); err != nil {
+		t.Fatal(err)
+	}
+	backend.Close()
+	reopened, err := Open(root, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got := reopened.Settings()
+	if got.DownloadWorkers != want.DownloadWorkers || got.IndexWorkers != want.IndexWorkers || got.IndexingParallelism != want.IndexingParallelism || got.UpdateCheckHours != want.UpdateCheckHours || !got.AutomaticallyUpdate {
+		t.Fatalf("settings after restart = %#v, want %#v", got, want)
+	}
+	if _, err := reopened.UpdateSettings(model.Settings{DownloadWorkers: 0, IndexWorkers: 1, IndexingParallelism: 1, UpdateCheckHours: 24}); err == nil {
+		t.Fatal("invalid worker count was accepted")
+	}
+}
+
 func TestMigrateLegacyStagePreservesPartialDownloads(t *testing.T) {
 	t.Parallel()
 	stage := t.TempDir()

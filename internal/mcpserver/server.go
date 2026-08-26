@@ -20,6 +20,7 @@ var Version = "0.1.0"
 type Service interface {
 	ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error)
 	ListLocalSummary() ([]model.LocalDatasetSummary, error)
+	OperationalStatus() model.OperationalStatus
 	Submit(string, string, string) (model.Job, error)
 	Job(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
@@ -103,6 +104,9 @@ func New(service Service) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_local", Description: "List installed datasets with provider-defined descriptions plus variant, content scope, source, snapshot, and search metadata to help select the right dataset.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalDatasetSummary, error) {
 		out, err := service.ListLocalSummary()
 		return nil, out, err
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_status", Description: "Inspect local worker settings, provider catalog health, and scheduled update-check timing.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, model.OperationalStatus, error) {
+		return nil, service.OperationalStatus(), nil
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_download", Description: "Submit a background download for a dataset and return immediately with a job ID; poll knowledge_job_status.", Annotations: changingAnnotations(false, true)}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
 		out, err := service.Submit(in.Dataset, in.Variant, "download")

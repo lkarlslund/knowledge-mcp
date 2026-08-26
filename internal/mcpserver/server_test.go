@@ -30,6 +30,7 @@ func (fakeService) ListAvailable(context.Context, string, int, int, bool) (model
 func (fakeService) ListLocalSummary() ([]model.LocalDatasetSummary, error) {
 	return []model.LocalDatasetSummary{{Dataset: "testwiki", Name: "Test Wikipedia", Description: "A test-language general-purpose encyclopedia.", Project: "wikipedia", ContentType: "general-purpose encyclopedia", Profile: model.DatasetProfile{Topics: []string{"encyclopedia"}, GeographicScope: []string{"global"}, TimeCoverage: "current snapshot", DocumentTypes: []string{"articles"}, UpdateCadence: "monthly", SourceFeatures: []string{"links"}}, OnlineSourceURL: "https://test.wikipedia.org", Language: model.Language{Code: "test", Name: "Test"}, SourceDocuments: 40, IndexedDocuments: 42, SearchMode: "title"}}, nil
 }
+func (fakeService) OperationalStatus() model.OperationalStatus { return model.OperationalStatus{} }
 
 func TestLocalDatasetSummariesExposeSelectionMetadata(t *testing.T) {
 	t.Parallel()
@@ -86,6 +87,7 @@ func TestToolsAndStructuredCall(t *testing.T) {
 	want := map[string]annotationExpectation{
 		"knowledge_list_available": {readOnly: true, openWorld: true},
 		"knowledge_list_local":     {readOnly: true, openWorld: false},
+		"knowledge_status":         {readOnly: true, openWorld: false},
 		"knowledge_download":       {destructive: boolPointer(false), openWorld: true},
 		"knowledge_update":         {destructive: boolPointer(true), openWorld: true},
 		"knowledge_job_status":     {readOnly: true, openWorld: false},

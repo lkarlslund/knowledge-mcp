@@ -34,8 +34,8 @@ func (p *contractProvider) Discover(context.Context, string, bool) ([]model.Avai
 
 type contractCorpus struct{}
 
-func (*contractCorpus) ScanTitles(context.Context, string, RecordSink) error { return nil }
-func (*contractCorpus) ScanBodies(context.Context, string, RecordSink) error { return nil }
+func (*contractCorpus) ScanTitles(context.Context, string, ScanOptions, RecordSink) error { return nil }
+func (*contractCorpus) ScanBodies(context.Context, string, ScanOptions, RecordSink) error { return nil }
 func (*contractCorpus) Read(context.Context, Record, model.ReadOptions) (model.Document, error) {
 	return model.Document{}, nil
 }

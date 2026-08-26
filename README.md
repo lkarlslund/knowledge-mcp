@@ -9,6 +9,7 @@ Included providers:
 
 - `wikimedia`: Wikimedia article multistream snapshots, with one `multistream` variant.
 - `rfc`: the complete RFC Series from the RFC Editor, with a `text` variant.
+- `kiwix`: the complete Kiwix OPDS catalog, grouped into datasets and archive flavours.
 
 Provider URLs and local paths are not part of the agent contract. Search returns
 a short, stable, opaque document `id`; `knowledge_read` accepts that ID together
@@ -56,6 +57,7 @@ All non-server commands call the running MCP backend once.
 # Discover datasets from all providers.
 ./wikipedia-multistream-mcp dataset available
 ./wikipedia-multistream-mcp dataset available rfc
+./wikipedia-multistream-mcp dataset available devdocs
 
 # Download the RFC text variant, then poll/control its jobs.
 ./wikipedia-multistream-mcp dataset download rfc --variant text
@@ -70,6 +72,7 @@ All non-server commands call the running MCP backend once.
 ./wikipedia-multistream-mcp dataset list
 ./wikipedia-multistream-mcp dataset update rfc
 ./wikipedia-multistream-mcp search rfc "HTTP status codes"
+./wikipedia-multistream-mcp search rfc "RFC 9110" --mode full_text
 ./wikipedia-multistream-mcp read rfc --id 9110
 ./wikipedia-multistream-mcp read rfc --id 9110 --format source
 
@@ -88,6 +91,7 @@ endpoint. The legacy `WIKIPEDIA_MULTISTREAM_MCP_SERVER` name remains accepted.
 | --- | --- |
 | `knowledge_list_available` | Discover datasets, providers, and variants. |
 | `knowledge_list_local` | List installed datasets and selection/search metadata. |
+| `knowledge_status` | Inspect worker settings, provider health, and update scheduling. |
 | `knowledge_download` | Submit a first-time background download. |
 | `knowledge_update` | Submit an atomic background update or finish indexing. |
 | `knowledge_job_status` | Poll one job by `job_id` or `dataset`. |
@@ -101,8 +105,10 @@ record. Large documents return `offset`, `returned_chars`, `total_chars`,
 `truncated`, and `next_offset` for continuation.
 
 Wikimedia reads preserve headings, lists, tables, links, infobox fields,
-citations, redirects, outlines, and bounded references. RFC reads add a compact
-metadata heading and convert RFC references into followable Markdown links.
+citations, redirects, outlines, and bounded references. RFC reads add lifecycle
+status and structured relationships and convert RFC references into followable
+Markdown links. Kiwix reads ZIM files natively and converts stored HTML,
+including tables and internal links, to Markdown.
 
 ## Provider architecture
 
@@ -110,8 +116,9 @@ The core contract is in `internal/provider`. Implementations are isolated:
 
 ```text
 internal/provider/
-├── provider.go          discovery/acquisition/document/index boundary
-├── rfc/                 RFC Editor catalog, raw text, Markdown, indexes
+├── provider.go          discovery, acquisition, and common corpus boundary
+├── kiwix/               OPDS catalog, native ZIM reader, HTML-to-Markdown
+├── rfc/                 RFC Editor catalog, raw text, and Markdown
 └── wikimedia/           Wikimedia discovery and multistream adapter
 ```
 
@@ -121,8 +128,16 @@ A provider supplies:
 - discovery metadata and one or more variants;
 - current release metadata and a release fingerprint;
 - resumable acquisition into a staging generation;
-- title/body index feeds and a document reader; and
+- resumable title/body record scans through the common corpus interface;
+- provider-owned descriptions, scope, topics, cadence, and source features;
+- stable identifiers, aliases, keywords, lifecycle status, and rank weight; and
 - on-demand conversion to Markdown, text, or native source.
+
+Providers never build or query search indexes. The provider-neutral
+`internal/knowledgeindex` package consumes the common corpus, owns the single
+Bleve schema and ranking pipeline, and checkpoints only at provider-declared
+safe cursors. Title and body builds therefore resume after service restarts for
+every provider without provider-specific index formats.
 
 The store sees datasets only. Manifests persist `provider`, `dataset`, and
 `variant`; jobs and MCP responses use the same vocabulary. Existing installations
@@ -135,13 +150,21 @@ documents. RFC numbers are its stable document IDs. Existing raw RFC files are
 hard-linked or copied into an update generation, while new documents are
 downloaded in parallel. Individual partial files use HTTP ranges when resumed.
 
+The Kiwix provider caches and searches the complete OPDS catalog, resolves
+Metalink mirrors, resumes partial ZIM downloads with byte ranges, verifies
+SHA-256, and supports uncompressed, zlib, bzip2, XZ, and Zstandard clusters.
+Zstandard decoding uses Klaus Post's optimized Go implementation.
+
 ## Dashboard
 
 The embedded Bootstrap/Alpine.js dashboard shows local datasets, provider and
 variant metadata, document counts, storage attribution, upgrades, and live job
 progress. The complete provider catalog is searchable in a modal, with language
 and installed-state filters. Dataset variants are selected before download.
-Updates arrive over a WebSocket; no CDN is required.
+Updates arrive over a WebSocket; no CDN is required. The gear menu changes
+download/index worker limits at runtime, controls per-index decompression
+parallelism, configures periodic update checks and optional automatic updates,
+and reports provider catalog health. Settings persist in `data/settings.json`.
 
 ## User service
 
@@ -181,8 +204,10 @@ Runtime data is not committed. Each installed dataset has a provider-owned raw
 area, provider metadata, compact title index, body-term index, and manifest.
 Body text is not duplicated as stored fields in the search index. Wikimedia
 page reads seek directly to indexed bzip2 stream boundaries; RFC reads open the
-canonical local text document. Title search becomes available before the body
-index finishes.
+canonical local text document; Kiwix reads only the referenced ZIM cluster.
+Title search becomes available before the body index finishes. Search supports
+`auto`, `title`, and `full_text` modes, with BM25 body relevance plus generic
+title, alias, keyword, exact-identifier, lifecycle, and provider rank signals.
 
 ## License
 

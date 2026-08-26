@@ -223,10 +223,10 @@ type zimCorpus struct {
 }
 
 func (c *zimCorpus) Close() error { return c.archive.Close() }
-func (c *zimCorpus) ScanTitles(ctx context.Context, after string, sink provider.RecordSink) error {
+func (c *zimCorpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return c.scan(ctx, after, false, sink)
 }
-func (c *zimCorpus) ScanBodies(ctx context.Context, after string, sink provider.RecordSink) error {
+func (c *zimCorpus) ScanBodies(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return c.scan(ctx, after, true, sink)
 }
 

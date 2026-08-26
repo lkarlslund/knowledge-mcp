@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -21,22 +22,28 @@ import (
 )
 
 type Store struct {
-	root          string
-	providers     *provider.Registry
-	mu            sync.RWMutex
-	jobs          map[string]*model.Job
-	active        map[string]string
-	downloadQueue chan string
-	indexQueue    chan string
-	running       map[string]context.CancelFunc
-	watchers      map[chan struct{}]struct{}
-	readerMu      sync.Mutex
-	readers       map[string]*knowledgeindex.Reader
-	storageMu     sync.Mutex
-	storage       map[string]storageSnapshot
-	lastProgress  map[string]time.Time
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
+	root             string
+	providers        *provider.Registry
+	mu               sync.RWMutex
+	jobs             map[string]*model.Job
+	active           map[string]string
+	downloadQueue    chan string
+	indexQueue       chan string
+	running          map[string]context.CancelFunc
+	watchers         map[chan struct{}]struct{}
+	readerMu         sync.Mutex
+	readers          map[string]*knowledgeindex.Reader
+	storageMu        sync.Mutex
+	storage          map[string]storageSnapshot
+	lastProgress     map[string]time.Time
+	settings         model.Settings
+	providerState    map[string]model.ProviderStatus
+	downloadSettings chan struct{}
+	indexSettings    chan struct{}
+	scheduleSettings chan struct{}
+	lastUpdateCheck  time.Time
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
 }
 
 type storageSnapshot struct {
@@ -79,7 +86,14 @@ func Open(root string, registry *provider.Registry, options ...Options) (*Store,
 	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
 		return nil, errors.New("download and index worker counts must be positive")
 	}
-	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*knowledgeindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time)}
+	settings, err := loadSettings(root, model.Settings{DownloadWorkers: config.DownloadWorkers, IndexWorkers: config.IndexWorkers, IndexingParallelism: min(runtime.GOMAXPROCS(0), 8), UpdateCheckHours: 24})
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*knowledgeindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time), settings: settings, providerState: make(map[string]model.ProviderStatus), downloadSettings: make(chan struct{}, 1), indexSettings: make(chan struct{}, 1), scheduleSettings: make(chan struct{}, 1)}
+	for _, backend := range registry.Providers() {
+		s.providerState[backend.ID()] = model.ProviderStatus{Provider: backend.ID(), State: "unknown", CatalogState: "not_checked"}
+	}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
@@ -88,13 +102,10 @@ func Open(root string, registry *provider.Registry, options ...Options) (*Store,
 	metadataCancel()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
-	s.wg.Add(config.DownloadWorkers + config.IndexWorkers)
-	for range config.DownloadWorkers {
-		go s.worker(ctx, s.downloadQueue)
-	}
-	for range config.IndexWorkers {
-		go s.worker(ctx, s.indexQueue)
-	}
+	s.wg.Add(3)
+	go s.dispatch(ctx, "download", s.downloadQueue)
+	go s.dispatch(ctx, "index", s.indexQueue)
+	go s.scheduleUpdates(ctx)
 	if err := s.queueStaleIndexes(); err != nil {
 		s.Close()
 		return nil, err
@@ -264,7 +275,8 @@ func (s *Store) Close() {
 }
 
 func (s *Store) ListAvailable(ctx context.Context, filter string, offset, limit int, refresh bool) (model.AvailableResult, error) {
-	items, err := s.providers.Discover(ctx, filter, refresh)
+	items, reports, err := s.providers.DiscoverReport(ctx, filter, refresh)
+	s.recordDiscovery(reports, refresh)
 	if err != nil {
 		return model.AvailableResult{}, err
 	}
@@ -752,37 +764,72 @@ func (s *Store) closeReaders(path string) {
 	}
 }
 
-func (s *Store) worker(ctx context.Context, queue <-chan string) {
+func (s *Store) dispatch(ctx context.Context, kind string, queue <-chan string) {
 	defer s.wg.Done()
+	done := make(chan struct{}, 32)
+	active := 0
+	settingsChanged := s.downloadSettings
+	if kind == "index" {
+		settingsChanged = s.indexSettings
+	}
 	for {
+		var next <-chan string
+		if active < s.workerLimit(kind) {
+			next = queue
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case id := <-queue:
-			s.mu.Lock()
-			job := s.jobs[id]
-			if job == nil || job.State != model.StateQueued {
-				s.mu.Unlock()
-				continue
-			}
-			jobCtx, cancel := context.WithCancel(ctx)
-			s.running[id] = cancel
-			s.mu.Unlock()
-			requeueBody := s.runJob(jobCtx, id)
-			cancel()
-			s.mu.Lock()
-			delete(s.running, id)
-			job = s.jobs[id]
-			shouldEnqueue := requeueBody && job != nil && job.State != model.StatePaused && job.State != model.StateCanceled
-			if shouldEnqueue {
-				job.State, job.Phase, job.Message, job.UpdatedAt = model.StateQueued, "body_queued", "title index is available; full-text indexing requeued behind title work", time.Now().UTC()
-				_ = s.saveJobsLocked()
-			}
-			s.mu.Unlock()
-			if shouldEnqueue {
-				s.indexQueue <- id
-			}
+		case <-settingsChanged:
+		case <-done:
+			active--
+		case id := <-next:
+			active++
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.processQueuedJob(ctx, id)
+				select {
+				case done <- struct{}{}:
+				case <-ctx.Done():
+				}
+			}()
 		}
+	}
+}
+
+func (s *Store) workerLimit(kind string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if kind == "index" {
+		return s.settings.IndexWorkers
+	}
+	return s.settings.DownloadWorkers
+}
+
+func (s *Store) processQueuedJob(ctx context.Context, id string) {
+	s.mu.Lock()
+	job := s.jobs[id]
+	if job == nil || job.State != model.StateQueued {
+		s.mu.Unlock()
+		return
+	}
+	jobCtx, cancel := context.WithCancel(ctx)
+	s.running[id] = cancel
+	s.mu.Unlock()
+	requeueBody := s.runJob(jobCtx, id)
+	cancel()
+	s.mu.Lock()
+	delete(s.running, id)
+	job = s.jobs[id]
+	shouldEnqueue := requeueBody && job != nil && job.State != model.StatePaused && job.State != model.StateCanceled
+	if shouldEnqueue {
+		job.State, job.Phase, job.Message, job.UpdatedAt = model.StateQueued, "body_queued", "title index is available; full-text indexing requeued behind title work", time.Now().UTC()
+		_ = s.saveJobsLocked()
+	}
+	s.mu.Unlock()
+	if shouldEnqueue {
+		s.indexQueue <- id
 	}
 }
 
@@ -922,10 +969,11 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 	}
 	defer func() { _ = corpus.Close() }()
 	titleBuilt := false
+	scanOptions := provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}
 	if !titleCurrent {
 		temporary := filepath.Join(path, knowledgeindex.TitleDirectory+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
-		count, buildErr := knowledgeindex.BuildTitle(ctx, path, manifest.Fingerprint, corpus, func(pages uint64, compressedDone, compressedTotal int64) {
+		count, buildErr := knowledgeindex.BuildTitle(ctx, path, manifest.Fingerprint, corpus, scanOptions, func(pages uint64, compressedDone, compressedTotal int64) {
 			s.setTitleProgress(id, pages, compressedDone, compressedTotal)
 		})
 		if buildErr != nil {
@@ -983,7 +1031,7 @@ func (s *Store) buildBody(ctx context.Context, id, dataset string, manifest mode
 	}
 	temporary := filepath.Join(path, knowledgeindex.BodyDirectory+".building")
 	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "title search and page reads are available; building full-text index", "")
-	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, func(done, total int64) {
+	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}, func(done, total int64) {
 		s.setJob(id, model.StateBodyIndexing, "body_indexing", done, total, "documents", 0, "title search and document reads are available; building full-text index", "")
 	}); err != nil {
 		s.failJob(id, err)

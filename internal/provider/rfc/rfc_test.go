@@ -12,6 +12,7 @@ import (
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	sourceprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
 )
 
 const testRFCIndex = `<?xml version="1.0"?><rfc-index>
@@ -70,14 +71,14 @@ func TestRFCProviderLifecycleAndOpaqueIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = corpus.Close() }()
-	count, err := knowledgeindex.BuildTitle(ctx, path, manifest.Fingerprint, corpus, func(uint64, int64, int64) {})
+	count, err := knowledgeindex.BuildTitle(ctx, path, manifest.Fingerprint, corpus, sourceprovider.ScanOptions{}, func(uint64, int64, int64) {})
 	if err != nil || count != 2 {
 		t.Fatalf("title index = %d, %v", count, err)
 	}
 	if err := os.Rename(filepath.Join(path, knowledgeindex.TitleDirectory+".building"), filepath.Join(path, knowledgeindex.TitleDirectory)); err != nil {
 		t.Fatal(err)
 	}
-	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, func(int64, int64) {}); err != nil {
+	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, sourceprovider.ScanOptions{}, func(int64, int64) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(path, knowledgeindex.BodyDirectory+".building"), filepath.Join(path, knowledgeindex.BodyDirectory)); err != nil {

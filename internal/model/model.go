@@ -186,6 +186,32 @@ type Job struct {
 	SourceJobID     string    `json:"source_job_id,omitempty"`
 }
 
+type Settings struct {
+	DownloadWorkers     int       `json:"download_workers"`
+	IndexWorkers        int       `json:"index_workers"`
+	IndexingParallelism int       `json:"indexing_parallelism"`
+	UpdateCheckHours    int       `json:"update_check_hours"`
+	AutomaticallyUpdate bool      `json:"automatically_update"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+}
+
+type ProviderStatus struct {
+	Provider     string    `json:"provider"`
+	State        string    `json:"state"`
+	CatalogState string    `json:"catalog_state"`
+	Datasets     int       `json:"datasets"`
+	LastAttempt  time.Time `json:"last_attempt,omitempty"`
+	LastSuccess  time.Time `json:"last_success,omitempty"`
+	Error        string    `json:"error,omitempty"`
+}
+
+type OperationalStatus struct {
+	Settings        Settings         `json:"settings"`
+	Providers       []ProviderStatus `json:"providers"`
+	LastUpdateCheck time.Time        `json:"last_update_check,omitempty"`
+	NextUpdateCheck time.Time        `json:"next_update_check,omitempty"`
+}
+
 type SearchHit struct {
 	ID           string   `json:"id"`
 	NumericID    uint64   `json:"-"`
