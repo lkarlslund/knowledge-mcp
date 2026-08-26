@@ -42,8 +42,10 @@ type Store struct {
 	downloadSettings chan struct{}
 	indexSettings    chan struct{}
 	scheduleSettings chan struct{}
+	sharedCleanup    chan struct{}
 	lastUpdateCheck  time.Time
 	references       *documentrefs.Store
+	shared           *knowledgeindex.SharedIndex
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
 }
@@ -96,12 +98,18 @@ func Open(root string, registry *provider.Registry, options ...Options) (*Store,
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*knowledgeindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time), settings: settings, providerState: make(map[string]model.ProviderStatus), downloadSettings: make(chan struct{}, 1), indexSettings: make(chan struct{}, 1), scheduleSettings: make(chan struct{}, 1), references: referenceStore}
+	shared, err := knowledgeindex.OpenShared(filepath.Join(root, "search"))
+	if err != nil {
+		_ = referenceStore.Close()
+		return nil, err
+	}
+	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*knowledgeindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time), settings: settings, providerState: make(map[string]model.ProviderStatus), downloadSettings: make(chan struct{}, 1), indexSettings: make(chan struct{}, 1), scheduleSettings: make(chan struct{}, 1), sharedCleanup: make(chan struct{}, 1), references: referenceStore, shared: shared}
 	for _, backend := range registry.Providers() {
 		s.providerState[backend.ID()] = model.ProviderStatus{Provider: backend.ID(), State: "unknown", CatalogState: "not_checked"}
 	}
 	if err := s.loadJobs(); err != nil {
 		_ = referenceStore.Close()
+		_ = shared.Close()
 		return nil, err
 	}
 	metadataCtx, metadataCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -109,10 +117,12 @@ func Open(root string, registry *provider.Registry, options ...Options) (*Store,
 	metadataCancel()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
-	s.wg.Add(3)
+	s.wg.Add(4)
 	go s.dispatch(ctx, "download", s.downloadQueue)
 	go s.dispatch(ctx, "index", s.indexQueue)
 	go s.scheduleUpdates(ctx)
+	go s.cleanupSharedIndex(ctx)
+	s.requestSharedCleanup()
 	if err := s.queueStaleIndexes(); err != nil {
 		s.Close()
 		return nil, err
@@ -256,7 +266,7 @@ func (s *Store) queueStaleIndexes() error {
 		if readErr != nil || ownerErr != nil {
 			continue
 		}
-		titleCurrent, bodyCurrent := knowledgeindex.Current(manifest)
+		titleCurrent, bodyCurrent := s.indexCurrent(manifest)
 		if titleCurrent && bodyCurrent {
 			continue
 		}
@@ -289,7 +299,7 @@ func (s *Store) CloseContext(ctx context.Context) error {
 	select {
 	case <-done:
 		s.closeReaders("")
-		return s.references.Close()
+		return errors.Join(s.references.Close(), s.shared.Close())
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -448,18 +458,21 @@ func (s *Store) ListLocal() ([]model.LocalDataset, error) {
 			continue
 		}
 		local := model.LocalDataset{Manifest: manifest, State: model.StateDownloaded, SearchMode: "none"}
-		local.TitleReady, local.BodyReady = knowledgeindex.Current(manifest)
+		local.TitleReady, local.BodyReady = s.indexCurrent(manifest)
 		if local.TitleReady {
 			local.State, local.SearchMode = model.StateTitleReady, "title"
 		}
 		if local.BodyReady {
-			local.State, local.SearchMode = model.StateReady, "full_text"
+			local.State, local.SearchMode = model.StateReady, "shared"
 		}
 		if jobID := active[entry.dataset]; jobID != "" {
 			local.ActiveJob = jobID
 			local.State = states[entry.dataset]
 		}
 		local.DiskBytes, local.RawBytes, local.ProviderMetadataBytes, local.TitleIndexBytes, local.BodyIndexBytes = s.localStorage(entry.path)
+		sharedBytes := s.shared.EstimatedBytes(local.Dataset)
+		local.BodyIndexBytes += sharedBytes
+		local.DiskBytes += sharedBytes
 		local.OtherBytes = max(local.DiskBytes-local.RawBytes-local.ProviderMetadataBytes-local.TitleIndexBytes-local.BodyIndexBytes, 0)
 		result = append(result, local)
 	}
@@ -627,19 +640,27 @@ func (s *Store) DeleteDataset(dataset string) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if id := s.active[dataset]; id != "" {
+		s.mu.Unlock()
 		return fmt.Errorf("dataset %s has active job %s; cancel it before deleting", dataset, id)
 	}
 	path := s.datasetPath(backend.ID(), dataset)
 	if _, err := os.Stat(filepath.Join(path, "manifest.json")); err != nil {
+		s.mu.Unlock()
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("dataset %s is not installed", dataset)
 		}
 		return err
 	}
+	if s.shared != nil {
+		if err := s.shared.Remove(dataset); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("remove dataset %s from shared search: %w", dataset, err)
+		}
+	}
 	s.closeReaders(path)
 	if err := os.RemoveAll(path); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("delete dataset %s: %w", dataset, err)
 	}
 	var cleanupErr error
@@ -657,6 +678,8 @@ func (s *Store) DeleteDataset(dataset string) error {
 	delete(s.storage, path)
 	s.storageMu.Unlock()
 	s.notifyLocked()
+	s.mu.Unlock()
+	s.requestSharedCleanup()
 	return cleanupErr
 }
 
@@ -758,62 +781,78 @@ func isTerminal(state string) bool {
 }
 
 func (s *Store) Search(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, error) {
-	if strings.TrimSpace(dataset) == "" {
-		return s.searchAll(ctx, query, options)
+	dataset = strings.TrimSpace(dataset)
+	if dataset != "" && options.Mode == "title" {
+		return s.searchLocalTitle(ctx, dataset, query, options)
 	}
-	result, providerID, err := s.searchDataset(ctx, dataset, query, options)
+	if dataset != "" && (options.Mode == "" || options.Mode == "auto") {
+		s.mu.RLock()
+		owner, ownerErr := s.providers.ForCollection(dataset)
+		active := false
+		if ownerErr == nil {
+			manifest, manifestErr := readManifest(filepath.Join(s.datasetPath(owner.ID(), dataset), "manifest.json"))
+			if manifestErr == nil {
+				active = s.shared.Active(dataset, manifest.Fingerprint)
+			}
+		}
+		s.mu.RUnlock()
+		if !active {
+			return s.searchLocalTitle(ctx, dataset, query, options)
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result, err := s.shared.Search(ctx, dataset, query, options)
 	if err != nil {
 		return result, err
 	}
-	if err := s.decorateSearchResult(&result, providerID, dataset); err != nil {
-		return model.SearchResult{}, err
+	for index := range result.Hits {
+		if err := s.decorateSearchHit(&result.Hits[index]); err != nil {
+			return model.SearchResult{}, err
+		}
 	}
 	return result, nil
 }
 
-func (s *Store) searchDataset(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, string, error) {
-	owner, ownerErr := s.providers.ForCollection(dataset)
-	if ownerErr != nil {
-		return model.SearchResult{}, "", ownerErr
+func (s *Store) searchLocalTitle(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, error) {
+	owner, err := s.providers.ForCollection(dataset)
+	if err != nil {
+		return model.SearchResult{}, err
 	}
 	path := s.datasetPath(owner.ID(), dataset)
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
-	if err != nil || !manifest.TitleReady {
-		s.mu.RUnlock()
-		return model.SearchResult{}, "", fmt.Errorf("dataset %s is not title-ready", dataset)
-	}
-	_, fullText := knowledgeindex.Current(manifest)
-	switch options.Mode {
-	case "", "auto":
-	case "title":
-		fullText = false
-	case "full_text":
-		if !fullText {
-			s.mu.RUnlock()
-			return model.SearchResult{}, "", fmt.Errorf("dataset %s is not full-text ready", dataset)
-		}
-	default:
-		s.mu.RUnlock()
-		return model.SearchResult{}, "", errors.New("search mode must be auto, title, or full_text")
-	}
-	reader, err := s.reader(owner, path, manifest, fullText)
 	if err != nil {
 		s.mu.RUnlock()
-		return model.SearchResult{}, "", err
+		return model.SearchResult{}, err
+	}
+	if !manifest.TitleReady || manifest.TitleIndexVersion != knowledgeindex.TitleVersion {
+		s.mu.RUnlock()
+		return model.SearchResult{}, fmt.Errorf("dataset %s is not search-ready", dataset)
+	}
+	reader, err := s.reader(owner, path, manifest, false)
+	if err != nil {
+		s.mu.RUnlock()
+		return model.SearchResult{}, err
 	}
 	release, err := reader.Retain()
 	s.mu.RUnlock()
 	if err != nil {
-		return model.SearchResult{}, "", err
+		return model.SearchResult{}, err
 	}
 	defer release()
-	result, err := reader.Search(ctx, query, options, fullText)
+	result, err := reader.Search(ctx, query, options, false)
 	if err != nil {
-		return result, owner.ID(), err
+		return result, err
 	}
 	result.Dataset = dataset
-	return result, owner.ID(), nil
+	for index := range result.Hits {
+		result.Hits[index].Provider, result.Hits[index].Dataset = owner.ID(), dataset
+		if err := s.decorateSearchHit(&result.Hits[index]); err != nil {
+			return model.SearchResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) Read(ctx context.Context, dataset, title, id string, options model.ReadOptions) (model.Document, error) {
@@ -926,6 +965,25 @@ func (s *Store) dispatch(ctx context.Context, kind string, queue <-chan string) 
 				case <-ctx.Done():
 				}
 			}()
+		}
+	}
+}
+
+func (s *Store) requestSharedCleanup() {
+	select {
+	case s.sharedCleanup <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Store) cleanupSharedIndex(ctx context.Context) {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.sharedCleanup:
+			_ = s.shared.Cleanup(ctx)
 		}
 	}
 }
@@ -1093,7 +1151,15 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		s.failJob(id, err)
 		return false
 	}
-	titleCurrent, bodyCurrent := knowledgeindex.Current(manifest)
+	titleCurrent, bodyCurrent := s.indexCurrent(manifest)
+	if !bodyCurrent && s.shared.Active(manifest.Dataset, manifest.Fingerprint) {
+		manifest.BodyReady, manifest.BodyIndexVersion = true, knowledgeindex.BodyVersion
+		if err := writeJSON(filepath.Join(path, "manifest.json"), manifest); err != nil {
+			s.failJob(id, err)
+			return false
+		}
+		bodyCurrent = true
+	}
 	corpus, err := owner.OpenCorpus(path, manifest)
 	if err != nil {
 		s.failJob(id, err)
@@ -1133,12 +1199,6 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		}
 		titleBuilt = true
 	}
-	if publishAfterTitle {
-		if err := s.publish(job.Provider, job.Dataset, path); err != nil {
-			s.failJob(id, err)
-			return false
-		}
-	}
 	s.mu.Lock()
 	if currentJob := s.jobs[id]; currentJob != nil {
 		currentJob.TitleAvailable = true
@@ -1146,51 +1206,97 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 	}
 	s.mu.Unlock()
 	if bodyCurrent {
+		if publishAfterTitle {
+			if err := s.publish(job.Provider, job.Dataset, path); err != nil {
+				s.failJob(id, err)
+				return false
+			}
+		}
 		s.finishJob(id, model.StateReady, "title and full-text indexes are ready")
 		return false
 	}
 	if titleBuilt {
 		return true
 	}
-	s.buildBody(ctx, id, job.Dataset, manifest, owner, corpus)
+	s.buildBody(ctx, id, job.Dataset, path, manifest, owner, corpus, publishAfterTitle)
 	return false
 }
 
-func (s *Store) buildBody(ctx context.Context, id, dataset string, manifest model.Manifest, owner provider.Provider, corpus provider.Corpus) {
-	path := s.datasetPath(manifest.Provider, dataset)
-	if manifest.Provider == "" {
-		path = s.datasetPath(owner.ID(), dataset)
-	}
-	temporary := filepath.Join(path, knowledgeindex.BodyDirectory+".building")
-	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "title search and page reads are available; building full-text index", "")
-	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}, func(documents uint64, completed, total int64, units string) {
-		message := "title search and document reads are available; building full-text index"
+func (s *Store) buildBody(ctx context.Context, id, dataset, path string, manifest model.Manifest, owner provider.Provider, corpus provider.Corpus, publishWhenReady bool) {
+	stagePath := path
+	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "document reads are available; building shared search generation", "")
+	documents, indexedBytes, err := s.shared.Build(ctx, owner.ID(), dataset, manifest.Fingerprint, corpus, provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}, func(documents uint64, completed, total int64, units string) {
+		message := "document reads are available; building shared search generation"
 		if units != "" && total > 0 {
 			message = fmt.Sprintf("%s; source progress %d / %d %s", message, completed, total, units)
 		}
 		s.setJob(id, model.StateBodyIndexing, "body_indexing", int64(documents), int64(manifest.DocumentCount), "documents", 0, message, "")
-	}); err != nil {
+	})
+	if err != nil {
 		s.failJob(id, err)
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closeReaders(path)
-	final := filepath.Join(path, knowledgeindex.BodyDirectory)
-	if err := os.RemoveAll(final); err != nil {
-		s.failJobLocked(id, err)
-		return
-	}
-	if err := os.Rename(temporary, final); err != nil {
-		s.failJobLocked(id, err)
-		return
-	}
 	manifest.BodyReady, manifest.BodyIndexVersion = true, knowledgeindex.BodyVersion
 	if err := writeJSON(filepath.Join(path, "manifest.json"), manifest); err != nil {
 		s.failJobLocked(id, err)
+		s.mu.Unlock()
 		return
 	}
-	s.finishJobLocked(id, model.StateReady, "full-text index is ready")
+	var old, destination string
+	if publishWhenReady {
+		destination = s.datasetPath(owner.ID(), dataset)
+		old = destination + ".old"
+		if err := s.swapDatasetLocked(path, destination, old); err != nil {
+			s.failJobLocked(id, err)
+			s.mu.Unlock()
+			return
+		}
+		path = destination
+	}
+	if err := s.shared.Activate(owner.ID(), dataset, manifest.Fingerprint, documents, indexedBytes); err != nil {
+		if publishWhenReady {
+			_ = os.Rename(destination, stagePath)
+			_ = os.Rename(old, destination)
+		}
+		s.failJobLocked(id, err)
+		s.mu.Unlock()
+		return
+	}
+	_ = os.RemoveAll(filepath.Join(path, knowledgeindex.BodyDirectory))
+	if old != "" {
+		_ = os.RemoveAll(old)
+	}
+	s.finishJobLocked(id, model.StateReady, "shared search generation is active")
+	s.mu.Unlock()
+	s.requestSharedCleanup()
+}
+
+func (s *Store) swapDatasetLocked(stage, destination, old string) error {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	s.closeReaders(destination)
+	if err := os.RemoveAll(old); err != nil {
+		return err
+	}
+	if _, err := os.Stat(destination); err == nil {
+		if err := os.Rename(destination, old); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(stage, destination); err != nil {
+		_ = os.Rename(old, destination)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) indexCurrent(manifest model.Manifest) (title, body bool) {
+	title, body = knowledgeindex.Current(manifest)
+	return title, body && s.shared.Active(manifest.Dataset, manifest.Fingerprint)
 }
 
 func migrateLegacyStage(stage, partsDir string) error {

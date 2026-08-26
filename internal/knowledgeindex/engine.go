@@ -34,6 +34,10 @@ type TitleProgress func(documents uint64, completed, total int64)
 type BodyProgress func(documents uint64, completed, total int64, units string)
 
 type indexDocument struct {
+	Provider        string   `json:"provider,omitempty"`
+	Dataset         string   `json:"dataset,omitempty"`
+	Generation      string   `json:"generation,omitempty"`
+	DocumentID      string   `json:"document_id,omitempty"`
 	Title           string   `json:"title"`
 	TitleExact      string   `json:"title_exact"`
 	Body            string   `json:"body,omitempty"`
@@ -50,14 +54,15 @@ type indexDocument struct {
 }
 
 type buildCheckpoint struct {
-	Kind        string    `json:"kind"`
-	Version     int       `json:"version"`
-	Fingerprint string    `json:"fingerprint"`
-	Cursor      string    `json:"cursor"`
-	Documents   uint64    `json:"documents"`
-	Completed   int64     `json:"completed"`
-	Total       int64     `json:"total"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Kind         string    `json:"kind"`
+	Version      int       `json:"version"`
+	Fingerprint  string    `json:"fingerprint"`
+	Cursor       string    `json:"cursor"`
+	Documents    uint64    `json:"documents"`
+	Completed    int64     `json:"completed"`
+	Total        int64     `json:"total"`
+	IndexedBytes int64     `json:"indexed_bytes,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 func Current(manifest model.Manifest) (title, body bool) {
@@ -612,6 +617,12 @@ func indexMapping(body bool) mapping.IndexMapping {
 	primary.Analyzer = "keyword"
 	primary.Store, primary.Index, primary.IncludeTermVectors, primary.IncludeInAll, primary.DocValues = true, true, false, false, false
 	doc.AddFieldMappingsAt("primary", primary)
+	for _, fieldName := range []string{"provider", "dataset", "generation", "document_id"} {
+		field := bleve.NewTextFieldMapping()
+		field.Analyzer = "keyword"
+		field.Store, field.Index, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = true, true, false, false, false
+		doc.AddFieldMappingsAt(fieldName, field)
+	}
 	if body {
 		field := bleve.NewTextFieldMapping()
 		field.Store, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = false, false, false, false

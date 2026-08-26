@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	documentrefs "github.com/lkarlslund/wikipedia-multistream-mcp/internal/references"
@@ -13,15 +14,19 @@ import (
 
 var legacyKnowledgeLinkPattern = regexp.MustCompile(`knowledge-read://read\?[^)\s"]+(?:\s+"[^"]*")?`)
 
-func (s *Store) decorateSearchResult(result *model.SearchResult, providerID, dataset string) error {
-	for index := range result.Hits {
-		hit := &result.Hits[index]
-		hit.Provider, hit.Dataset = providerID, dataset
-		if err := s.decorateSearchHit(hit); err != nil {
-			return err
+func normalizeReferenceTitle(value string) string {
+	var result strings.Builder
+	space := true
+	for _, character := range strings.ToLower(value) {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) {
+			result.WriteRune(character)
+			space = false
+		} else if !space {
+			result.WriteByte(' ')
+			space = true
 		}
 	}
-	return nil
+	return strings.TrimSpace(result.String())
 }
 
 func (s *Store) decorateSearchHit(hit *model.SearchHit) error {
@@ -152,11 +157,11 @@ func (s *Store) ReadReference(ctx context.Context, reference string, options mod
 		}
 	}
 	if err != nil && route.Title != "" {
-		result, _, searchErr := s.searchDataset(ctx, route.Dataset, route.Title, model.SearchOptions{Mode: "title", Limit: 10})
+		result, searchErr := s.Search(ctx, route.Dataset, route.Title, model.SearchOptions{Mode: "title", Limit: 10})
 		if searchErr == nil {
-			wanted := normalizeSearchText(route.Title)
+			wanted := normalizeReferenceTitle(route.Title)
 			for _, candidate := range result.Hits {
-				if candidate.ID == route.ID || normalizeSearchText(candidate.Title) != wanted {
+				if candidate.ID == route.ID || normalizeReferenceTitle(candidate.Title) != wanted {
 					continue
 				}
 				fallback, fallbackErr := s.Read(ctx, route.Dataset, "", candidate.ID, options)

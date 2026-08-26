@@ -47,7 +47,8 @@ default to avoid competing Bleve segment merges; each job still uses the
 configured internal decompression parallelism. Jobs submit and return
 immediately; poll their IDs for status. Partial provider downloads are preserved
 and resume after restarts. Updates are built in staging and atomically replace
-the installed generation only after the title index is usable.
+the installed generation only after both its title index and shared-search
+generation are ready.
 
 The listener intentionally requires an explicit loopback IP and has no
 authentication layer.
@@ -101,7 +102,7 @@ endpoint. The legacy `WIKIPEDIA_MULTISTREAM_MCP_SERVER` name remains accepted.
 | `knowledge_update` | Submit an atomic background update or finish indexing. |
 | `knowledge_job_status` | Poll one job by `job_id` or `dataset`. |
 | `knowledge_job` | `pause`, `resume`, `cancel`, or `retry` a job. |
-| `knowledge_search` | Search one local dataset, or omit `dataset` to search all ready datasets concurrently; returns opaque references. |
+| `knowledge_search` | Search one local dataset, or omit `dataset` to search the shared corpus of all ready datasets; returns opaque references. |
 | `knowledge_read` | Read by opaque `ref`; `dataset` plus `id` or exact title remains supported for compatibility. |
 
 `knowledge_read` always returns Markdown. Large documents return `offset`,
@@ -134,7 +135,7 @@ A provider supplies:
 - resumable title/body record scans through the common corpus interface;
 - provider-owned descriptions, scope, topics, cadence, and source features;
 - stable identifiers, aliases, keywords, lifecycle status, and rank weight; and
-- on-demand conversion to Markdown, text, or native source.
+- on-demand conversion to Markdown.
 
 Providers never build or query search indexes. The provider-neutral
 `internal/knowledgeindex` package consumes the common corpus, owns the single
@@ -204,12 +205,21 @@ ARM64, with SHA-256 checksums.
 ## Storage and indexing
 
 Runtime data is not committed. Each installed dataset has a provider-owned raw
-area, provider metadata, compact title index, body-term index, and manifest.
-Body text is not duplicated as stored fields in the search index. Wikimedia
-page reads seek directly to indexed bzip2 stream boundaries; RFC reads open the
-canonical local text document; Kiwix reads only the referenced ZIM cluster.
-Title search becomes available before the body index finishes. Search supports
-`auto`, `title`, and `full_text` modes, with BM25 body relevance plus generic
+area, provider metadata, a compact lookup/title index, and a manifest. Searchable
+documents from every provider feed one logical shared BM25 corpus, uniformly
+striped across physical Bleve shards. Body text is indexed but not duplicated as
+a stored field. Wikimedia reads seek directly to indexed bzip2 stream boundaries;
+RFC reads open the canonical local Markdown source; Kiwix reads only the referenced
+ZIM cluster.
+
+An initial install exposes title lookup while shared indexing continues. An
+update builds a hidden shared generation and atomically publishes its provider
+data, title lookup, and search generation when all are ready. Searches are always
+filtered by the durable active-generation manifest, so retired or partially built
+documents cannot leak into results. Removing a dataset first removes its generation
+from that manifest; a managed background cleanup then reclaims its index terms.
+Interrupted builds resume from provider-declared safe cursors. Search supports
+`auto`, `title`, and `full_text` modes, with shared BM25 body relevance plus generic
 title, alias, keyword, exact-identifier, lifecycle, and provider rank signals.
 
 ## License
