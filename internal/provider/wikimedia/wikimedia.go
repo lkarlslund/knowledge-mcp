@@ -2,8 +2,10 @@ package wikimediaprovider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,6 +39,9 @@ type wikimediaCorpus struct {
 }
 
 func (c *wikimediaCorpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
+	if c.manifest.Variant == "content-current" {
+		return c.scanContentFiles(ctx, after, false, sink)
+	}
 	return wikiindex.ScanSourceTitles(ctx, wikiParts(c.path, c.manifest.PartCount), after, func(source wikiindex.SourceTitle, cursor string, completed, total int64, boundary bool) error {
 		return sink(provider.Record{
 			ID: strconv.FormatUint(source.ID, 10), Title: source.Title,
@@ -48,6 +53,9 @@ func (c *wikimediaCorpus) ScanTitles(ctx context.Context, after string, _ provid
 }
 
 func (c *wikimediaCorpus) ScanBodies(ctx context.Context, after string, options provider.ScanOptions, sink provider.RecordSink) error {
+	if c.manifest.Variant == "content-current" {
+		return c.scanContentFiles(ctx, after, true, sink)
+	}
 	return wikiindex.ScanSourceBodies(ctx, wikiParts(c.path, c.manifest.PartCount), after, options.Parallelism, func(documents []wikiindex.SourceBody, cursor string, completed, total int64) error {
 		position := provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total, Units: "streams"}
 		if len(documents) == 0 {
@@ -64,6 +72,47 @@ func (c *wikimediaCorpus) ScanBodies(ctx context.Context, after string, options 
 		}
 		return nil
 	})
+}
+
+func (c *wikimediaCorpus) scanContentFiles(ctx context.Context, after string, bodies bool, sink provider.RecordSink) error {
+	partIndex, pageIndex, completed, err := parseContentCursor(after)
+	if err != nil {
+		return err
+	}
+	for part := partIndex; part < c.manifest.PartCount; part++ {
+		current := int64(0)
+		err := wikiindex.ScanBzip2File(ctx, filepath.Join(c.path, "parts", fmt.Sprintf("%03d.dump.bz2", part)), bodies, func(page wikiindex.SourcePage) error {
+			if part == partIndex && current < pageIndex {
+				current++
+				return nil
+			}
+			completed++
+			current++
+			body := ""
+			if bodies && !page.IsRedirect() {
+				body = wikiindex.PlainText(page.Wikitext)
+			}
+			record := provider.Record{ID: strconv.FormatUint(page.ID, 10), Title: page.Title, Body: body, URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, page.Title), Locator: fmt.Sprintf("file:%d", part), Namespace: page.Namespace, Primary: page.Namespace == 0}
+			return sink(record, provider.ScanPosition{Cursor: fmt.Sprintf("f1:%d:%d:%d", part, current, completed), Completed: completed, Units: "documents", Boundary: true})
+		})
+		if err != nil {
+			return err
+		}
+		pageIndex = 0
+	}
+	return nil
+}
+
+func parseContentCursor(value string) (int, int64, int64, error) {
+	if value == "" {
+		return 0, 0, 0, nil
+	}
+	var part int
+	var page, completed int64
+	if count, err := fmt.Sscanf(value, "f1:%d:%d:%d", &part, &page, &completed); err != nil || count != 3 || part < 0 || page < 0 || completed < 0 {
+		return 0, 0, 0, fmt.Errorf("invalid Wikimedia content cursor %q", value)
+	}
+	return part, page, completed, nil
 }
 
 func (c *wikimediaCorpus) Read(ctx context.Context, record provider.Record, options model.ReadOptions) (model.Document, error) {
@@ -115,21 +164,21 @@ func (p *Wikimedia) Discover(ctx context.Context, filter string, refresh bool) (
 		result.Datasets[i].Provider = p.ID()
 		result.Datasets[i].Description = wikimediaDatasetDescription(result.Datasets[i].DisplayName, result.Datasets[i].ContentType, result.Datasets[i].Language)
 		result.Datasets[i].Profile = wikimediaProfile(result.Datasets[i].ContentType, result.Datasets[i].Project, result.Datasets[i].Language, result.Datasets[i].ReleaseDate)
-		result.Datasets[i].Variant = "multistream"
-		result.Datasets[i].Variants = []model.Variant{{ID: "multistream", Name: "Articles", Description: "Wikimedia article multistream dump", Format: "XML/bzip2"}}
+		result.Datasets[i].Variant = "content-current"
+		result.Datasets[i].Variants = []model.Variant{{ID: "content-current", Name: "Current content", Description: "Current revisions from the official monthly MediaWiki Content File Export", Format: "XML/bzip2"}}
 	}
 	return result.Datasets, err
 }
 
 func (p *Wikimedia) Latest(ctx context.Context, collection, variant string) (provider.Release, error) {
-	if variant != "" && variant != "multistream" {
+	if variant != "" && variant != "content-current" && variant != "multistream" {
 		return provider.Release{}, fmt.Errorf("Wikimedia collection %s has no variant %q", collection, variant)
 	}
 	metadata, err := p.client.LatestMetadata(ctx, collection)
 	return provider.Release{Fingerprint: metadata.Fingerprint, Date: metadata.ReleaseDate, Value: metadata}, err
 }
 
-func (p *Wikimedia) Acquire(ctx context.Context, collection, _ string, release provider.Release, stage, _ string, progress provider.Progress) (model.Manifest, error) {
+func (p *Wikimedia) Acquire(ctx context.Context, collection, _ string, release provider.Release, stage, current string, progress provider.Progress) (model.Manifest, error) {
 	metadata, ok := release.Value.(model.ReleaseMetadata)
 	if !ok {
 		return model.Manifest{}, errors.New("invalid Wikimedia release metadata")
@@ -138,25 +187,31 @@ func (p *Wikimedia) Acquire(ctx context.Context, collection, _ string, release p
 	if err := os.MkdirAll(partsDir, 0o755); err != nil {
 		return model.Manifest{}, err
 	}
-	if len(metadata.Parts) == 1 {
-		legacy := map[string]string{
-			filepath.Join(stage, "multistream-index.txt.bz2"): filepath.Join(partsDir, "000.index.bz2"),
-			filepath.Join(stage, "dump.xml.bz2"):              filepath.Join(partsDir, "000.dump.bz2"),
-		}
-		for oldPath, newPath := range legacy {
-			if _, err := os.Stat(newPath); err == nil {
-				continue
-			}
-			if _, err := os.Stat(oldPath); err == nil {
-				if err := os.Rename(oldPath, newPath); err != nil {
-					return model.Manifest{}, fmt.Errorf("migrate partial download: %w", err)
+	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return model.Manifest{}, err
+	}
+	if err := os.WriteFile(filepath.Join(stage, "source-files.json"), append(encoded, '\n'), 0o644); err != nil {
+		return model.Manifest{}, err
+	}
+	type previousPart struct {
+		index int
+		part  model.ReleasePart
+	}
+	previous := map[string]previousPart{}
+	if current != "" {
+		if data, readErr := os.ReadFile(filepath.Join(current, "source-files.json")); readErr == nil {
+			var old model.ReleaseMetadata
+			if json.Unmarshal(data, &old) == nil {
+				for index, part := range old.Parts {
+					previous[part.Key] = previousPart{index: index, part: part}
 				}
 			}
 		}
 	}
 	var total, completed int64
 	for _, part := range metadata.Parts {
-		total += part.ProviderMetadata.Size + part.Raw.Size
+		total += part.Raw.Size
 	}
 	download := func(label string, file model.FileMetadata, path string) error {
 		progress("downloading_"+label, completed, total, "bytes", 0, "downloading "+label)
@@ -165,12 +220,13 @@ func (p *Wikimedia) Acquire(ctx context.Context, collection, _ string, release p
 		})
 	}
 	for i, part := range metadata.Parts {
-		label := fmt.Sprintf("index part %d/%d", i+1, len(metadata.Parts))
-		if err := download(label, part.ProviderMetadata, filepath.Join(partsDir, fmt.Sprintf("%03d.index.bz2", i))); err != nil {
-			return model.Manifest{}, err
+		destination := filepath.Join(partsDir, fmt.Sprintf("%03d.dump.bz2", i))
+		if old, ok := previous[part.Key]; ok && firstFileHash(old.part.Raw) == firstFileHash(part.Raw) {
+			if linkErr := linkOrCopy(filepath.Join(current, "parts", fmt.Sprintf("%03d.dump.bz2", old.index)), destination); linkErr != nil && !errors.Is(linkErr, os.ErrNotExist) {
+				return model.Manifest{}, linkErr
+			}
 		}
-		completed += part.ProviderMetadata.Size
-		label = fmt.Sprintf("dump part %d/%d", i+1, len(metadata.Parts))
+		label := fmt.Sprintf("content part %d/%d", i+1, len(metadata.Parts))
 		if err := download(label, part.Raw, filepath.Join(partsDir, fmt.Sprintf("%03d.dump.bz2", i))); err != nil {
 			return model.Manifest{}, err
 		}
@@ -180,15 +236,39 @@ func (p *Wikimedia) Acquire(ctx context.Context, collection, _ string, release p
 	site := mergeWikiSite(dumpSite, p.client.SiteMetadata(ctx, collection))
 	site.Description = wikimediaDatasetDescription(site.Name, site.ContentType, site.Language)
 	site.Profile = wikimediaProfile(site.ContentType, site.Project, site.Language, metadata.ReleaseDate)
-	manifest := model.Manifest{Provider: p.ID(), Variant: "multistream", Dataset: collection, ReleaseDate: metadata.ReleaseDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PublishedAt: time.Now().UTC(), Site: site}
+	manifest := model.Manifest{Provider: p.ID(), Variant: "content-current", Dataset: collection, ReleaseDate: metadata.ReleaseDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PublishedAt: time.Now().UTC(), Site: site}
 	for _, part := range metadata.Parts {
 		manifest.RawSize += part.Raw.Size
-		manifest.ProviderMetadataSize += part.ProviderMetadata.Size
 	}
-	if len(metadata.Parts) == 1 {
-		manifest.RawHash, manifest.ProviderMetadataHash = metadata.Parts[0].Raw.SHA1, metadata.Parts[0].ProviderMetadata.SHA1
-	}
+	manifest.ProviderMetadataSize = int64(len(encoded))
 	return manifest, nil
+}
+
+func firstFileHash(file model.FileMetadata) string {
+	if file.SHA256 != "" {
+		return file.SHA256
+	}
+	return file.SHA1
+}
+func linkOrCopy(source, destination string) error {
+	if _, err := os.Stat(destination); err == nil {
+		return nil
+	}
+	if err := os.Link(source, destination); err == nil {
+		return nil
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	return errors.Join(copyErr, closeErr)
 }
 
 func (p *Wikimedia) Backfill(ctx context.Context, path string, manifest *model.Manifest) bool {

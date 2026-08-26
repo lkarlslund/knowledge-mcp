@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"os"
@@ -27,11 +28,12 @@ const defaultBaseURL = "https://dumps.wikimedia.org"
 const userAgent = "wikipedia-multistream-mcp/0.1 (+https://github.com/lkarlslund/wikipedia-multistream-mcp)"
 
 var (
-	wikiNameRE  = regexp.MustCompile(`^[a-z0-9_]+(?:wiki|wikibooks|wikinews|wikiquote|wikisource|wikispecies|wikiversity|wikivoyage|wiktionary)$`)
-	catalogRE   = regexp.MustCompile(`<li>([^<]+)<a href="([a-z0-9_]+)/([0-9]{8})">([^<]+)</a>(?: \(closed\))?: <span class='([^']+)'>([^<]+)</span></li>`)
-	dumpPartRE  = regexp.MustCompile(`-pages-articles-multistream([0-9]*)\.xml(?:-(p[0-9]+p[0-9]+))?\.bz2$`)
-	indexPartRE = regexp.MustCompile(`-pages-articles-multistream-index([0-9]*)\.txt(?:-(p[0-9]+p[0-9]+))?\.bz2$`)
+	wikiNameRE   = regexp.MustCompile(`^[a-z0-9_]+(?:wiki|wikibooks|wikinews|wikiquote|wikisource|wikispecies|wikiversity|wikivoyage|wiktionary)$`)
+	catalogRE    = regexp.MustCompile(`<a href="([a-z0-9_]+)/">[^<]*</a>\s+([0-9]{2}-[A-Za-z]{3}-[0-9]{4})`)
+	exportFileRE = regexp.MustCompile(`^[a-z0-9_]+-[0-9]{4}-[0-9]{2}-[0-9]{2}-(?:p[0-9]+p[0-9]+|p[0-9]+r[0-9]+r[0-9]+)\.xml\.bz2$`)
 )
+
+const currentExportPath = "/other/mediawiki_content_current"
 
 type catalogEntry struct {
 	Name        string
@@ -142,7 +144,7 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 					wiki.ProviderMetadataSize += part.ProviderMetadata.Size
 				}
 				if len(metadata.Parts) == 1 {
-					wiki.RawHash = metadata.Parts[0].Raw.SHA1
+					wiki.RawHash = firstHash(metadata.Parts[0].Raw)
 					wiki.ProviderMetadataHash = metadata.Parts[0].ProviderMetadata.SHA1
 				}
 			}
@@ -163,7 +165,7 @@ func onlineWikiFromCatalog(entry catalogEntry, site model.DatasetMetadata) model
 	return model.AvailableDataset{
 		ID: entry.Name, DisplayName: site.Name, Project: site.Project, ContentType: site.ContentType,
 		Language: site.Language, OnlineSourceURL: site.OnlineSourceURL, ReleaseDate: entry.ReleaseDate,
-		Closed: entry.Closed || site.Closed, Available: true,
+		Closed: entry.Closed || site.Closed, Available: entry.ReleaseDate != "",
 	}
 }
 
@@ -177,7 +179,10 @@ func (c *Client) LatestMetadata(ctx context.Context, wiki string) (model.Release
 	}
 	for _, entry := range entries {
 		if entry.Name == wiki {
-			return c.Metadata(ctx, wiki, entry.ReleaseDate)
+			if entry.ReleaseDate != "" {
+				return c.Metadata(ctx, wiki, entry.ReleaseDate)
+			}
+			return c.latestCurrentMetadata(ctx, wiki)
 		}
 	}
 	return model.ReleaseMetadata{}, fmt.Errorf("wiki %q was not found in the Wikimedia dump catalog", wiki)
@@ -196,7 +201,9 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Rel
 	c.mu.Unlock()
 	metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	url := fmt.Sprintf("%s/%s/%s/dumpstatus.json", c.baseURL, wiki, dumpDate)
+	datePath := dumpDate[:4] + "-" + dumpDate[4:6] + "-" + dumpDate[6:]
+	directoryURL := fmt.Sprintf("%s%s/%s/%s/xml/bzip2", c.baseURL, currentExportPath, wiki, datePath)
+	url := directoryURL + "/SHA256SUMS"
 	req, err := http.NewRequestWithContext(metadataCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return model.ReleaseMetadata{}, err
@@ -211,67 +218,78 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Rel
 	if resp.StatusCode != http.StatusOK {
 		return model.ReleaseMetadata{}, fmt.Errorf("fetch dump metadata: %s", resp.Status)
 	}
-	var status struct {
-		Jobs map[string]struct {
-			Status string `json:"status"`
-			Files  map[string]struct {
-				Size int64  `json:"size"`
-				URL  string `json:"url"`
-				SHA1 string `json:"sha1"`
-			} `json:"files"`
-		} `json:"jobs"`
+	checksums, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return model.ReleaseMetadata{}, fmt.Errorf("read dump checksums: %w", err)
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&status); err != nil {
-		return model.ReleaseMetadata{}, fmt.Errorf("decode dump metadata: %w", err)
+	hashes := make(map[string]string)
+	for _, line := range strings.Split(string(checksums), "\n") {
+		fields := strings.Fields(line)
+		name := ""
+		if len(fields) == 2 {
+			name = strings.TrimPrefix(fields[1], "*")
+		}
+		if len(fields) == 2 && len(fields[0]) == sha256.Size*2 && exportFileRE.MatchString(name) {
+			hashes[name] = strings.ToLower(fields[0])
+		}
 	}
-	job, ok := status.Jobs["articlesmultistreamdump"]
-	if !ok || job.Status != "done" {
-		return model.ReleaseMetadata{}, errors.New("completed multistream article dump is unavailable")
+	type inspectedFile struct {
+		name     string
+		metadata model.FileMetadata
+		err      error
 	}
-	type partialPart struct {
-		key   string
-		dump  model.FileMetadata
-		index model.FileMetadata
-		order int64
-	}
-	parts := make(map[string]*partialPart)
-	for name, file := range job.Files {
-		item := model.FileMetadata{URL: c.baseURL + file.URL, Size: file.Size, SHA1: file.SHA1}
-		if match := dumpPartRE.FindStringSubmatch(name); match != nil {
-			key, order := partKey(match[1], match[2])
-			part := parts[key]
-			if part == nil {
-				part = &partialPart{key: key, order: order}
-				parts[key] = part
+	inspectCtx, cancelInspect := context.WithCancel(ctx)
+	defer cancelInspect()
+	tasks, inspected := make(chan string), make(chan inspectedFile, max(1, c.parallel))
+	var inspectors sync.WaitGroup
+	for range min(max(1, c.parallel), len(hashes)) {
+		inspectors.Add(1)
+		go func() {
+			defer inspectors.Done()
+			for name := range tasks {
+				address := directoryURL + "/" + name
+				size, sizeErr := c.remoteSize(inspectCtx, address)
+				select {
+				case inspected <- inspectedFile{name: name, metadata: model.FileMetadata{URL: address, Size: size, SHA256: hashes[name]}, err: sizeErr}:
+				case <-inspectCtx.Done():
+					return
+				}
 			}
-			part.dump = item
-		}
-		if match := indexPartRE.FindStringSubmatch(name); match != nil {
-			key, order := partKey(match[1], match[2])
-			part := parts[key]
-			if part == nil {
-				part = &partialPart{key: key, order: order}
-				parts[key] = part
+		}()
+	}
+	go func() {
+		defer close(tasks)
+		for name := range hashes {
+			select {
+			case tasks <- name:
+			case <-inspectCtx.Done():
+				return
 			}
-			part.index = item
 		}
-	}
-	ordered := make([]*partialPart, 0, len(parts))
-	for _, part := range parts {
-		if part.dump.URL == "" || part.index.URL == "" {
-			return model.ReleaseMetadata{}, fmt.Errorf("multistream part %q is missing its dump or index", part.key)
+	}()
+	go func() { inspectors.Wait(); close(inspected) }()
+	files := make(map[string]model.FileMetadata, len(hashes))
+	for result := range inspected {
+		if result.err != nil {
+			cancelInspect()
+			return model.ReleaseMetadata{}, fmt.Errorf("inspect %s: %w", result.name, result.err)
 		}
-		ordered = append(ordered, part)
+		files[result.name] = result.metadata
 	}
-	if len(ordered) == 0 {
-		return model.ReleaseMetadata{}, errors.New("multistream dump metadata is incomplete")
+	if len(files) == 0 {
+		return model.ReleaseMetadata{}, errors.New("current-content export checksum manifest contained no XML parts")
 	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].order < ordered[j].order })
-	metadata := model.ReleaseMetadata{Dataset: wiki, ReleaseDate: dumpDate, Parts: make([]model.ReleasePart, 0, len(ordered))}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	metadata := model.ReleaseMetadata{Dataset: wiki, Format: "mediawiki-content-current", ReleaseDate: dumpDate, Parts: make([]model.ReleasePart, 0, len(names))}
 	fingerprint := sha256.New()
-	for _, part := range ordered {
-		metadata.Parts = append(metadata.Parts, model.ReleasePart{Key: part.key, Raw: part.dump, ProviderMetadata: part.index})
-		_, _ = fmt.Fprintf(fingerprint, "%s\x00%s\x00%s\x00", part.key, part.dump.SHA1, part.index.SHA1)
+	for _, name := range names {
+		file := files[name]
+		metadata.Parts = append(metadata.Parts, model.ReleasePart{Key: name, Raw: file})
+		_, _ = fmt.Fprintf(fingerprint, "%s\x00%s\x00", name, file.SHA256)
 	}
 	metadata.Fingerprint = hex.EncodeToString(fingerprint.Sum(nil))
 	c.mu.Lock()
@@ -291,7 +309,7 @@ func (c *Client) loadCatalog(ctx context.Context, refresh bool) ([]catalogEntry,
 
 	metadataCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(metadataCtx, http.MethodGet, c.baseURL+"/backup-index-bydb.html", nil)
+	req, err := http.NewRequestWithContext(metadataCtx, http.MethodGet, c.baseURL+currentExportPath+"/", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -312,14 +330,27 @@ func (c *Client) loadCatalog(ctx context.Context, refresh bool) ([]catalogEntry,
 	matches := catalogRE.FindAllStringSubmatch(string(body), -1)
 	entries := make([]catalogEntry, 0, len(matches))
 	for _, match := range matches {
-		name := match[2]
+		name := match[1]
 		if !ValidWikiName(name) {
 			continue
 		}
-		entries = append(entries, catalogEntry{Name: name, ReleaseDate: match[3], Closed: strings.Contains(match[0], "(closed)")})
+		modified, parseErr := time.Parse("02-Jan-2006", match[2])
+		if parseErr != nil {
+			continue
+		}
+		releaseDate := time.Date(modified.Year(), modified.Month(), 1, 0, 0, 0, 0, time.UTC).Format("20060102")
+		entries = append(entries, catalogEntry{Name: name, ReleaseDate: releaseDate})
 	}
 	if len(entries) == 0 {
-		return nil, errors.New("wikimedia catalog contained no valid entries")
+		sites, siteErr := c.loadSiteMatrix(ctx)
+		if siteErr != nil {
+			return nil, errors.Join(errors.New("wikimedia current-content catalog contained no completed exports"), siteErr)
+		}
+		for name, site := range sites {
+			if ValidWikiName(name) {
+				entries = append(entries, catalogEntry{Name: name, Closed: site.Closed})
+			}
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	c.mu.Lock()
@@ -328,13 +359,37 @@ func (c *Client) loadCatalog(ctx context.Context, refresh bool) ([]catalogEntry,
 	return append([]catalogEntry(nil), entries...), nil
 }
 
-func partKey(number, pageRange string) (string, int64) {
-	if pageRange == "" {
-		return "single", 0
+func (c *Client) latestCurrentMetadata(ctx context.Context, wiki string) (model.ReleaseMetadata, error) {
+	now := time.Now().UTC()
+	for monthsBack := 0; monthsBack < 6; monthsBack++ {
+		date := time.Date(now.Year(), now.Month()-time.Month(monthsBack), 1, 0, 0, 0, 0, time.UTC).Format("20060102")
+		metadata, err := c.Metadata(ctx, wiki, date)
+		if err == nil {
+			return metadata, nil
+		}
 	}
-	startText := strings.TrimPrefix(strings.SplitN(pageRange, "p", 3)[1], "p")
-	start, _ := strconv.ParseInt(startText, 10, 64)
-	return number + "/" + pageRange, start
+	return model.ReleaseMetadata{}, fmt.Errorf("no completed current-content export found for %s in the last six months", wiki)
+}
+
+func (c *Client) remoteSize(ctx context.Context, address string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, address, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, release, err := c.doDownloadRequest(ctx, req)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("%s", resp.Status)
+	}
+	if resp.ContentLength <= 0 {
+		return 0, errors.New("missing Content-Length")
+	}
+	return resp.ContentLength, nil
 }
 
 type ProgressFunc func(completed, total int64, rate float64)
@@ -343,7 +398,7 @@ const parallelDownloadThreshold = 64 << 20
 
 type resumeState struct {
 	Size   int64         `json:"size"`
-	SHA1   string        `json:"sha1"`
+	Hash   string        `json:"hash"`
 	Chunks []resumeChunk `json:"chunks"`
 }
 
@@ -379,7 +434,7 @@ func (c *Client) Download(ctx context.Context, file model.FileMetadata, destinat
 		}
 	}
 	if start == file.Size {
-		if err := verifySHA1(destination, file.SHA1); err == nil {
+		if err := verifyFile(destination, file); err == nil {
 			progress(start, file.Size, 0)
 			return nil
 		}
@@ -450,7 +505,7 @@ func (c *Client) Download(ctx context.Context, file model.FileMetadata, destinat
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("close download: %w", err)
 	}
-	return verifySHA1(destination, file.SHA1)
+	return verifyFile(destination, file)
 }
 
 func (c *Client) supportsRanges(ctx context.Context, url string) (bool, error) {
@@ -589,7 +644,7 @@ func (c *Client) downloadParallel(ctx context.Context, file model.FileMetadata, 
 	if err := out.Sync(); err != nil {
 		return err
 	}
-	if err := verifySHA1(destination, file.SHA1); err != nil {
+	if err := verifyFile(destination, file); err != nil {
 		_ = os.Remove(resumePath)
 		_ = os.Truncate(destination, 0)
 		return err
@@ -599,7 +654,7 @@ func (c *Client) downloadParallel(ctx context.Context, file model.FileMetadata, 
 
 func newResumeState(file model.FileMetadata, connections int, existingSize int64) resumeState {
 	connections = min(connections, int(file.Size))
-	state := resumeState{Size: file.Size, SHA1: file.SHA1, Chunks: make([]resumeChunk, connections)}
+	state := resumeState{Size: file.Size, Hash: fileHash(file), Chunks: make([]resumeChunk, connections)}
 	chunkSize := (file.Size + int64(connections) - 1) / int64(connections)
 	for i := range connections {
 		start := int64(i) * chunkSize
@@ -619,7 +674,7 @@ func loadResumeState(path string, file model.FileMetadata) (resumeState, error) 
 	if err := json.Unmarshal(data, &state); err != nil {
 		return resumeState{}, err
 	}
-	if state.Size != file.Size || !strings.EqualFold(state.SHA1, file.SHA1) || len(state.Chunks) == 0 {
+	if state.Size != file.Size || !strings.EqualFold(state.Hash, fileHash(file)) || len(state.Chunks) == 0 {
 		return resumeState{}, errors.New("resume state does not match remote file")
 	}
 	for i, chunk := range state.Chunks {
@@ -679,19 +734,42 @@ func (c *Client) doDownloadRequest(ctx context.Context, req *http.Request) (*htt
 	}
 }
 
-func verifySHA1(path, expected string) error {
+func verifyFile(path string, metadata model.FileMetadata) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	h := sha1.New() // Wikimedia dump manifests still use SHA-1 for integrity.
+	var h hash.Hash
+	expected, algorithm := metadata.SHA256, "SHA-256"
+	if expected != "" {
+		h = sha256.New()
+	} else {
+		expected, algorithm, h = metadata.SHA1, "SHA-1", sha1.New()
+	}
+	if expected == "" {
+		return errors.New("wikimedia file has no integrity hash")
+	}
 	if _, err := io.Copy(h, f); err != nil {
 		return err
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(got, expected) {
-		return fmt.Errorf("SHA-1 mismatch: got %s, expected %s", got, expected)
+		return fmt.Errorf("%s mismatch: got %s, expected %s", algorithm, got, expected)
 	}
 	return nil
+}
+
+func fileHash(metadata model.FileMetadata) string {
+	if metadata.SHA256 != "" {
+		return "sha256:" + strings.ToLower(metadata.SHA256)
+	}
+	return "sha1:" + strings.ToLower(metadata.SHA1)
+}
+
+func firstHash(metadata model.FileMetadata) string {
+	if metadata.SHA256 != "" {
+		return metadata.SHA256
+	}
+	return metadata.SHA1
 }

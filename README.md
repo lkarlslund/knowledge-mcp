@@ -7,7 +7,7 @@ generations, local indexes, ranking, MCP, and the dashboard.
 
 Included providers:
 
-- `wikimedia`: Wikimedia article multistream snapshots, with one `multistream` variant.
+- `wikimedia`: official monthly Wikimedia current-content XML exports.
 - `rfc`: the complete RFC Series from the RFC Editor, with a `text` variant.
 - `kiwix`: the complete Kiwix OPDS catalog, grouped into datasets and archive flavours.
 - `ncbi`: the PubMed annual baseline, including citations, abstracts, identifiers, and MeSH terms.
@@ -88,7 +88,7 @@ All non-server commands call the running MCP backend once.
 ./wikipedia-multistream-mcp read rfc --id 9110
 
 # Wikimedia remains a provider, not a special core concept.
-./wikipedia-multistream-mcp dataset download dawiki --variant multistream
+./wikipedia-multistream-mcp dataset download dawiki --variant content-current
 ./wikipedia-multistream-mcp search dawiki "Copenhagen architecture"
 ./wikipedia-multistream-mcp read dawiki --id 12345
 ```
@@ -133,7 +133,7 @@ internal/provider/
 ├── kiwix/               OPDS catalog, native ZIM reader, HTML-to-Markdown
 ├── ncbi/                PubMed baseline discovery, XML, and Markdown
 ├── rfc/                 RFC Editor catalog, raw text, and Markdown
-└── wikimedia/           Wikimedia discovery and multistream adapter
+└── wikimedia/           Current-content discovery, XML, and Markdown
 ```
 
 A provider supplies:
@@ -228,7 +228,8 @@ Runtime data is not committed. Each installed dataset has a provider-owned raw
 area, provider metadata, a compact lookup/title index, and a manifest. Searchable
 documents from every provider feed one logical shared BM25 corpus, uniformly
 striped across physical Bleve shards. Body text is indexed but not duplicated as
-a stored field. Wikimedia reads seek directly to indexed bzip2 stream boundaries;
+a stored field. Wikimedia reads open only the page-range bzip2 source file recorded
+for the selected page;
 RFC reads open the canonical local Markdown source; Kiwix reads only the referenced
 ZIM cluster; PubMed reads one compressed baseline part; and EUR-Lex reads one local
 XHTML document.

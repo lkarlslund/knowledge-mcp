@@ -3,7 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -26,18 +26,16 @@ import (
 func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	t.Parallel()
 	xmlData := compress(t, []byte(`<mediawiki><page><title>Test Article</title><id>7</id><revision><id>70</id><timestamp>2026-08-01T00:00:00Z</timestamp><text>A remarkable capybara appears here.</text></revision></page></mediawiki>`))
-	indexData := compress(t, []byte("0:7:Test Article\n"))
-	dumpSHA, indexSHA := sha1String(xmlData), sha1String(indexData)
+	dumpSHA := sha256String(xmlData)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/backup-index-bydb.html":
-			_, _ = fmt.Fprint(w, `<li>2026-08-04 00:00:00 <a href="testwiki/20260801">testwiki</a>: <span class='done'>Dump complete</span></li>`)
-		case "/testwiki/20260801/dumpstatus.json":
-			_, _ = fmt.Fprintf(w, `{"jobs":{"articlesmultistreamdump":{"status":"done","files":{"testwiki-20260801-pages-articles-multistream.xml.bz2":{"size":%d,"url":"/dump","sha1":"%s"},"testwiki-20260801-pages-articles-multistream-index.txt.bz2":{"size":%d,"url":"/index","sha1":"%s"}}}}}`, len(xmlData), dumpSHA, len(indexData), indexSHA)
-		case "/dump":
+		case "/other/mediawiki_content_current/":
+			_, _ = fmt.Fprint(w, `<a href="testwiki/">testwiki/</a> 04-Aug-2026 00:00 -`)
+		case "/other/mediawiki_content_current/testwiki/2026-08-01/xml/bzip2/SHA256SUMS":
+			_, _ = fmt.Fprintf(w, "%s  testwiki-2026-08-01-p1p9.xml.bz2\n", dumpSHA)
+		case "/other/mediawiki_content_current/testwiki/2026-08-01/xml/bzip2/testwiki-2026-08-01-p1p9.xml.bz2":
+			w.Header().Set("Content-Length", fmt.Sprint(len(xmlData)))
 			_, _ = w.Write(xmlData)
-		case "/index":
-			_, _ = w.Write(indexData)
 		default:
 			http.NotFound(w, r)
 		}
@@ -498,7 +496,7 @@ func compress(t *testing.T, data []byte) []byte {
 	return out.Bytes()
 }
 
-func sha1String(data []byte) string {
-	sum := sha1.Sum(data)
+func sha256String(data []byte) string {
+	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }

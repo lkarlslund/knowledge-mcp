@@ -64,13 +64,15 @@ type AvailableResult struct {
 }
 
 type FileMetadata struct {
-	URL  string `json:"url"`
-	Size int64  `json:"size"`
-	SHA1 string `json:"sha1"`
+	URL    string `json:"url"`
+	Size   int64  `json:"size"`
+	SHA1   string `json:"sha1,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 type ReleaseMetadata struct {
 	Dataset     string        `json:"dataset"`
+	Format      string        `json:"format,omitempty"`
 	ReleaseDate string        `json:"release_date"`
 	Parts       []ReleasePart `json:"parts"`
 	Fingerprint string        `json:"fingerprint"`

@@ -45,6 +45,14 @@ func (r *Reader) releaseSAXReader(reader *gosax.Reader) {
 
 func decodeSelectedXMLPagesSAXReader(reader *gosax.Reader, wanted map[uint64]struct{}) ([]xmlPage, error) {
 	pages := make([]xmlPage, 0, len(wanted))
+	err := scanXMLPagesSAXReader(reader, wanted, true, func(page xmlPage) error {
+		pages = append(pages, page)
+		return nil
+	})
+	return pages, err
+}
+
+func scanXMLPagesSAXReader(reader *gosax.Reader, wanted map[uint64]struct{}, includeRevision bool, emit func(xmlPage) error) error {
 	selectAll := wanted == nil
 	var page xmlPage
 	var field saxPageField
@@ -57,11 +65,11 @@ func decodeSelectedXMLPagesSAXReader(reader *gosax.Reader, wanted map[uint64]str
 	for {
 		event, err := reader.Event()
 		if err != nil {
-			return nil, fmt.Errorf("parse XML stream: %w", err)
+			return fmt.Errorf("parse XML stream: %w", err)
 		}
 		switch event.Type() {
 		case gosax.EventEOF:
-			return pages, nil
+			return nil
 		case gosax.EventStart:
 			name := saxLocalName(event.Bytes)
 			if !inPage {
@@ -85,14 +93,14 @@ func decodeSelectedXMLPagesSAXReader(reader *gosax.Reader, wanted map[uint64]str
 			case depth == 2 && bytes.Equal(name, []byte("redirect")):
 				title, attrErr := saxAttribute(event.Bytes, "title")
 				if attrErr != nil {
-					return nil, fmt.Errorf("parse redirect: %w", attrErr)
+					return fmt.Errorf("parse redirect: %w", attrErr)
 				}
 				page.Redirect = &struct {
 					Title string `xml:"title,attr"`
 				}{Title: title}
-			case depth == 2 && bytes.Equal(name, []byte("revision")) && !selected:
+			case depth == 2 && bytes.Equal(name, []byte("revision")) && (!selected || !includeRevision):
 				if err := gosax.Skip(reader); err != nil {
-					return nil, fmt.Errorf("skip unselected revision: %w", err)
+					return fmt.Errorf("skip unselected revision: %w", err)
 				}
 				depth--
 			case depth == 3 && selected && bytes.Equal(name, []byte("id")):
@@ -114,7 +122,7 @@ func decodeSelectedXMLPagesSAXReader(reader *gosax.Reader, wanted map[uint64]str
 			}
 			text, err := gosax.Unescape(event.Bytes)
 			if err != nil {
-				return nil, fmt.Errorf("decode XML character data: %w", err)
+				return fmt.Errorf("decode XML character data: %w", err)
 			}
 			_, _ = value.Write(text)
 		case gosax.EventCData:
@@ -127,7 +135,7 @@ func decodeSelectedXMLPagesSAXReader(reader *gosax.Reader, wanted map[uint64]str
 			}
 			if field != saxPageFieldNone && depth == fieldDepth {
 				if err := assignSAXPageField(&page, field, value.String()); err != nil {
-					return nil, err
+					return err
 				}
 				if field == saxPageFieldID {
 					if selectAll {
@@ -142,7 +150,9 @@ func decodeSelectedXMLPagesSAXReader(reader *gosax.Reader, wanted map[uint64]str
 			}
 			if depth == 1 {
 				if selected {
-					pages = append(pages, page)
+					if err := emit(page); err != nil {
+						return err
+					}
 				}
 				inPage = false
 				depth = 0

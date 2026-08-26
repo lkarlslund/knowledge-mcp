@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,17 +23,19 @@ import (
 func TestCatalogMetadataAndDownload(t *testing.T) {
 	t.Parallel()
 	payload := []byte("compressed fixture")
-	hash := sha1.Sum(payload)
+	hash := sha256.Sum256(payload)
 	sha := hex.EncodeToString(hash[:])
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/backup-index-bydb.html":
-			_, _ = fmt.Fprint(w, `<li>2026-08-04 00:00:00 <a href="testwiki/20260801">testwiki</a>: <span class='done'>Dump complete</span></li>`)
+		case "/other/mediawiki_content_current/":
+			_, _ = fmt.Fprint(w, `<a href="testwiki/">testwiki/</a> 04-Aug-2026 00:00 -`)
 		case "/sitematrix":
 			_, _ = fmt.Fprint(w, `{"sitematrix":{"count":1,"0":{"code":"test","name":"Testish","localname":"Test","dir":"ltr","site":[{"url":"https://test.wikipedia.org","dbname":"testwiki","code":"wiki","sitename":"Wikipedia"}]}}}`)
-		case "/testwiki/20260801/dumpstatus.json":
-			_, _ = fmt.Fprintf(w, `{"jobs":{"articlesmultistreamdump":{"status":"done","files":{"testwiki-20260801-pages-articles-multistream.xml.bz2":{"size":%d,"url":"/files/dump","sha1":"%s"},"testwiki-20260801-pages-articles-multistream-index.txt.bz2":{"size":%d,"url":"/files/index","sha1":"%s"}}}}}`, len(payload), sha, len(payload), sha)
-		case "/files/dump", "/files/index":
+		case "/other/mediawiki_content_current/testwiki/2026-08-01/xml/bzip2/SHA256SUMS":
+			_, _ = fmt.Fprintf(w, "%s  testwiki-2026-08-01-p1p9.xml.bz2\n", sha)
+		case "/other/mediawiki_content_current/testwiki/2026-08-01/xml/bzip2/":
+			_, _ = fmt.Fprintf(w, `<a href="testwiki-2026-08-01-p1p9.xml.bz2">testwiki-2026-08-01-p1p9.xml.bz2</a> 01-Aug-2026 00:00 %d`, len(payload))
+		case "/other/mediawiki_content_current/testwiki/2026-08-01/xml/bzip2/testwiki-2026-08-01-p1p9.xml.bz2":
 			if r.Header.Get("Range") == "bytes=4-" {
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes 4-%d/%d", len(payload)-1, len(payload)))
 				w.WriteHeader(http.StatusPartialContent)
@@ -72,14 +76,38 @@ func TestCatalogMetadataAndDownload(t *testing.T) {
 	}
 }
 
+func TestEmptyExportRootFallsBackToUnavailableSiteMatrixCatalog(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/other/mediawiki_content_current/":
+			_, _ = fmt.Fprint(w, "<html><body>No completed exports</body></html>")
+		case "/sitematrix":
+			_, _ = fmt.Fprint(w, `{"sitematrix":{"count":1,"0":{"code":"da","name":"dansk","localname":"Danish","dir":"ltr","site":[{"url":"https://da.wikipedia.org","dbname":"dawiki","code":"wiki","sitename":"Wikipedia"}]}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := NewClientWithBaseURL(server.URL)
+	result, err := client.ListAvailable(context.Background(), "dawiki", 0, -1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Datasets) != 1 || result.Datasets[0].Available || result.Datasets[0].ReleaseDate != "" {
+		t.Fatalf("fallback=%+v", result.Datasets)
+	}
+}
+
 func TestFullCatalogIsCachedAndFilteredLocally(t *testing.T) {
 	t.Parallel()
 	var catalogRequests, matrixRequests, metadataRequests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/backup-index-bydb.html":
+		case "/other/mediawiki_content_current/":
 			catalogRequests.Add(1)
-			_, _ = fmt.Fprint(w, `<li>2026-08-04 00:00:00 <a href="abstractwiki/20260801">abstractwiki</a>: <span class='done'>Dump complete</span></li><li>2026-08-04 00:00:00 <a href="dawiki/20260801">dawiki</a>: <span class='done'>Dump complete</span></li>`)
+			_, _ = fmt.Fprint(w, `<a href="abstractwiki/">abstractwiki/</a> 01-Aug-2026 00:00 -
+<a href="dawiki/">dawiki/</a> 01-Aug-2026 00:00 -`)
 		case "/sitematrix":
 			matrixRequests.Add(1)
 			_, _ = fmt.Fprint(w, `{"sitematrix":{"count":2,"0":{"code":"da","name":"dansk","localname":"Danish","dir":"ltr","site":[{"url":"https://da.wikipedia.org","dbname":"dawiki","code":"wiki","sitename":"Wikipedia"}]},"specials":[{"url":"https://abstract.wikipedia.org","dbname":"abstractwiki","code":"abstract","lang":"en","sitename":"Abstract Wikipedia"}]}}`)
@@ -180,15 +208,17 @@ func TestMultipartMetadataIsOrderedAndSummed(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/backup-index-bydb.html":
-			_, _ = fmt.Fprint(w, `<li>2026-08-04 00:00:00 <a href="enwiki/20260801">enwiki</a>: <span class='done'>Dump complete</span></li>`)
-		case "/enwiki/20260801/dumpstatus.json":
-			_, _ = fmt.Fprint(w, `{"jobs":{"articlesmultistreamdump":{"status":"done","files":{`+
-				`"enwiki-20260801-pages-articles-multistream2.xml-p20p29.bz2":{"size":200,"url":"/part2","sha1":"dump2"},`+
-				`"enwiki-20260801-pages-articles-multistream-index2.txt-p20p29.bz2":{"size":20,"url":"/index2","sha1":"index2"},`+
-				`"enwiki-20260801-pages-articles-multistream1.xml-p1p19.bz2":{"size":100,"url":"/part1","sha1":"dump1"},`+
-				`"enwiki-20260801-pages-articles-multistream-index1.txt-p1p19.bz2":{"size":10,"url":"/index1","sha1":"index1"}`+
-				`}}}}`)
+		case "/other/mediawiki_content_current/":
+			_, _ = fmt.Fprint(w, `<a href="enwiki/">enwiki/</a> 01-Aug-2026 00:00 -`)
+		case "/other/mediawiki_content_current/enwiki/2026-08-01/xml/bzip2/SHA256SUMS":
+			_, _ = fmt.Fprint(w, strings.Repeat("a", 64)+"  enwiki-2026-08-01-p20p29.xml.bz2\n"+strings.Repeat("b", 64)+"  enwiki-2026-08-01-p1p19.xml.bz2\n")
+		case "/other/mediawiki_content_current/enwiki/2026-08-01/xml/bzip2/":
+			_, _ = fmt.Fprint(w, `<a href="enwiki-2026-08-01-p20p29.xml.bz2">enwiki-2026-08-01-p20p29.xml.bz2</a> 01-Aug-2026 00:00 200
+<a href="enwiki-2026-08-01-p1p19.xml.bz2">enwiki-2026-08-01-p1p19.xml.bz2</a> 01-Aug-2026 00:00 100`)
+		case "/other/mediawiki_content_current/enwiki/2026-08-01/xml/bzip2/enwiki-2026-08-01-p1p19.xml.bz2":
+			w.Header().Set("Content-Length", "100")
+		case "/other/mediawiki_content_current/enwiki/2026-08-01/xml/bzip2/enwiki-2026-08-01-p20p29.xml.bz2":
+			w.Header().Set("Content-Length", "200")
 		default:
 			http.NotFound(w, r)
 		}
@@ -204,14 +234,14 @@ func TestMultipartMetadataIsOrderedAndSummed(t *testing.T) {
 		t.Fatalf("wikis = %#v", result.Datasets)
 	}
 	wiki := result.Datasets[0]
-	if !wiki.Available || wiki.PartCount != 2 || wiki.RawSize != 300 || wiki.ProviderMetadataSize != 30 || wiki.Fingerprint == "" {
+	if !wiki.Available || wiki.PartCount != 2 || wiki.RawSize != 300 || wiki.ProviderMetadataSize != 0 || wiki.Fingerprint == "" {
 		t.Fatalf("unexpected multipart wiki: %#v", wiki)
 	}
 	metadata, err := client.LatestMetadata(context.Background(), "enwiki")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Parts[0].Key != "1/p1p19" || metadata.Parts[1].Key != "2/p20p29" {
+	if metadata.Parts[0].Key != "enwiki-2026-08-01-p1p19.xml.bz2" || metadata.Parts[1].Key != "enwiki-2026-08-01-p20p29.xml.bz2" {
 		t.Fatalf("parts are not ordered: %#v", metadata.Parts)
 	}
 }

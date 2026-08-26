@@ -1965,6 +1965,17 @@ func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xml
 		}
 	}
 	wantedID, _ := strconv.ParseUint(hit.ID, 10, 64)
+	if locator, _ := hit.Fields["locator"].(string); strings.HasPrefix(locator, "file:") {
+		partNumber, parseErr := strconv.Atoi(strings.TrimPrefix(locator, "file:"))
+		if parseErr != nil || partNumber < 0 {
+			return xmlPage{}, fmt.Errorf("invalid Wikimedia file locator %q", locator)
+		}
+		page, readErr := ReadBzip2Page(ctx, filepath.Join(r.generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", partNumber)), wantedID)
+		if readErr != nil {
+			return xmlPage{}, readErr
+		}
+		return sourceXMLPage(page), nil
+	}
 	partNumber, streamOffset, streamEnd, err := streamLocation(hit.Fields)
 	if err != nil {
 		return xmlPage{}, err
