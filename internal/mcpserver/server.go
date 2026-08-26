@@ -74,7 +74,6 @@ type readInput struct {
 	Dataset         string `json:"dataset,omitempty" jsonschema:"installed dataset ID"`
 	ID              string `json:"id,omitempty" jsonschema:"opaque document identifier returned by knowledge_search; mutually exclusive with title"`
 	Title           string `json:"title,omitempty" jsonschema:"exact document title; mutually exclusive with id"`
-	Format          string `json:"format,omitempty" jsonschema:"markdown (default), text, or provider-native source"`
 	Section         string `json:"section,omitempty" jsonschema:"article section heading or anchor; offsets apply within the selected section"`
 	Offset          int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
 	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum article-content characters; defaults to 50000 and is capped at 500000"`
@@ -97,7 +96,6 @@ func New(service Service) *mcp.Server {
 	setIntegerBounds(searchSchema, "limit", 1, intPointer(50))
 	readSchema := mustSchemaFor[readInput]()
 	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"ref"}}, {Required: []string{"dataset", "title"}}, {Required: []string{"dataset", "id"}}}
-	readSchema.Properties["format"].Enum = []any{"markdown", "text", "source"}
 	setIntegerBounds(readSchema, "offset", 0, nil)
 	setIntegerBounds(readSchema, "max_chars", 1, intPointer(500_000))
 	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_available", Description: "Discover downloadable knowledge datasets with provider-defined descriptions, selection metadata, and variants.", InputSchema: listAvailableSchema, Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
@@ -144,7 +142,7 @@ func New(service Service) *mcp.Server {
 		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Mode: in.Mode, Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets})
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a document using the opaque temporary ref returned by knowledge_search or an embedded link. Legacy dataset plus id/title arguments remain supported. Markdown is the default; continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a Markdown document using the opaque temporary ref returned by knowledge_search or an embedded link. Legacy dataset plus id/title arguments remain supported. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
 		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
 		maxChars := in.MaxChars
 		if maxChars <= 0 {
@@ -153,7 +151,7 @@ func New(service Service) *mcp.Server {
 			maxChars = 500_000
 		}
 		includeOutline := in.IncludeOutline != nil && *in.IncludeOutline || in.IncludeOutline == nil && in.Offset == 0 && in.Section == ""
-		options := model.ReadOptions{Format: in.Format, Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000}
+		options := model.ReadOptions{Format: "markdown", Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000}
 		var out model.Document
 		var err error
 		if in.Ref != "" {

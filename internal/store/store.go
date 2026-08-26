@@ -817,6 +817,9 @@ func (s *Store) searchDataset(ctx context.Context, dataset, query string, option
 }
 
 func (s *Store) Read(ctx context.Context, dataset, title, id string, options model.ReadOptions) (model.Document, error) {
+	// Markdown is the sole external document representation. Providers may still
+	// use other representations internally while building and querying indexes.
+	options.Format = "markdown"
 	owner, ownerErr := s.providers.ForCollection(dataset)
 	if ownerErr != nil {
 		return model.Document{}, ownerErr

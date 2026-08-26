@@ -130,14 +130,14 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if federated.SearchMode != "federated" || len(federated.Hits) != 1 || federated.Hits[0].Ref != result.Hits[0].Ref {
 		t.Fatalf("unexpected federated search result: %#v", federated)
 	}
-	page, err := backend.Read(context.Background(), "testwiki", "Test Article", "", model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true})
+	page, err := backend.Read(context.Background(), "testwiki", "Test Article", "", model.ReadOptions{Format: "source", MaxChars: 1000, FollowRedirects: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.NumericID != 7 || page.Content != "A remarkable capybara appears here." {
+	if page.NumericID != 7 || page.Format != "markdown" || page.Content != "A remarkable capybara appears here." {
 		t.Fatalf("unexpected page: %#v", page)
 	}
-	pageByReference, err := backend.ReadReference(context.Background(), result.Hits[0].Ref, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true})
+	pageByReference, err := backend.ReadReference(context.Background(), result.Hits[0].Ref, model.ReadOptions{Format: "source", MaxChars: 1000, FollowRedirects: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -80,7 +80,6 @@ All non-server commands call the running MCP backend once.
 ./wikipedia-multistream-mcp search rfc "HTTP status codes"
 ./wikipedia-multistream-mcp search rfc "RFC 9110" --mode full_text
 ./wikipedia-multistream-mcp read rfc --id 9110
-./wikipedia-multistream-mcp read rfc --id 9110 --format source
 
 # Wikimedia remains a provider, not a special core concept.
 ./wikipedia-multistream-mcp dataset download dawiki --variant multistream
@@ -105,10 +104,8 @@ endpoint. The legacy `WIKIPEDIA_MULTISTREAM_MCP_SERVER` name remains accepted.
 | `knowledge_search` | Search one local dataset, or omit `dataset` to search all ready datasets concurrently; returns opaque references. |
 | `knowledge_read` | Read by opaque `ref`; `dataset` plus `id` or exact title remains supported for compatibility. |
 
-`knowledge_read` returns Markdown by default. `format: "text"` requests a lossy
-plain-text representation; `format: "source"` returns the provider-native raw
-record. Large documents return `offset`, `returned_chars`, `total_chars`,
-`truncated`, and `next_offset` for continuation.
+`knowledge_read` always returns Markdown. Large documents return `offset`,
+`returned_chars`, `total_chars`, `truncated`, and `next_offset` for continuation.
 
 Wikimedia reads preserve headings, lists, tables, links, infobox fields,
 citations, redirects, outlines, and bounded references. RFC reads add lifecycle

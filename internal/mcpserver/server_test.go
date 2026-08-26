@@ -119,7 +119,7 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		}
 		if tool.Name == "knowledge_read" {
 			schemaJSON, marshalErr := json.Marshal(tool.InputSchema)
-			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":500000`) {
+			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":500000`) || strings.Contains(string(schemaJSON), `"format"`) {
 				t.Errorf("knowledge_read schema lacks conditional/bound constraints: %s, %v", schemaJSON, marshalErr)
 			}
 			if !strings.Contains(tool.Description, "temporary ref") || !strings.Contains(tool.Description, "Legacy") {
@@ -194,7 +194,7 @@ func TestWikiReadAppliesAgentSizedDefaults(t *testing.T) {
 	if err != nil || result.IsError {
 		t.Fatalf("knowledge_read = %#v, %v", result, err)
 	}
-	if service.readOptions.MaxChars != 50_000 || !service.readOptions.AlignBoundaries || service.readOptions.ReferenceBudgetChars != 10_000 || service.readOptions.ReferenceMaxChars != 4_000 || !service.readOptions.IncludeOutline {
+	if service.readOptions.Format != "markdown" || service.readOptions.MaxChars != 50_000 || !service.readOptions.AlignBoundaries || service.readOptions.ReferenceBudgetChars != 10_000 || service.readOptions.ReferenceMaxChars != 4_000 || !service.readOptions.IncludeOutline {
 		t.Fatalf("read options = %#v", service.readOptions)
 	}
 	result, err = session.CallTool(context.Background(), &mcp.CallToolParams{Name: "knowledge_read", Arguments: map[string]any{"ref": "r_123456"}})

@@ -225,7 +225,7 @@ func newSearchCommand(opts *options) *cobra.Command {
 
 func newReadCommand(opts *options) *cobra.Command {
 	var id, ref string
-	var format, section string
+	var section string
 	var offset, maxChars int
 	var followRedirects, outline bool
 	command := &cobra.Command{
@@ -241,7 +241,7 @@ func newReadCommand(opts *options) *cobra.Command {
 					return errors.New("provide --ref alone")
 				}
 				return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-					result, err := client.ReadReference(cmd.Context(), ref, model.ReadOptions{Format: format, Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
+					result, err := client.ReadReference(cmd.Context(), ref, model.ReadOptions{Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
 					return printResult(result, err)
 				})
 			}
@@ -256,14 +256,13 @@ func newReadCommand(opts *options) *cobra.Command {
 				return errors.New("provide exactly one TITLE or --id")
 			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Read(cmd.Context(), args[0], title, id, model.ReadOptions{Format: format, Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
+				result, err := client.Read(cmd.Context(), args[0], title, id, model.ReadOptions{Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
 				return printResult(result, err)
 			})
 		},
 	}
 	command.Flags().StringVar(&ref, "ref", "", "temporary opaque reference returned by search or an embedded link")
 	command.Flags().StringVar(&id, "id", "", "opaque document ID returned by search")
-	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or provider-native source")
 	command.Flags().StringVar(&section, "section", "", "read one article section by heading or anchor")
 	command.Flags().IntVar(&offset, "offset", 0, "character offset")
 	command.Flags().IntVar(&maxChars, "max-chars", 50_000, "maximum returned characters (up to 500000)")
