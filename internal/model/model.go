@@ -218,6 +218,7 @@ type OperationalStatus struct {
 }
 
 type SearchHit struct {
+	TemporalMetadata
 	Ref          string   `json:"ref,omitempty"`
 	Dataset      string   `json:"dataset,omitempty"`
 	Provider     string   `json:"provider,omitempty"`
@@ -257,9 +258,26 @@ type SearchOptions struct {
 	Limit            int
 	IncludeSecondary bool
 	Snippets         bool
+	PublishedAfter   *time.Time
+	PublishedBefore  *time.Time
+	Sort             string
+}
+
+// TemporalMetadata is the provider-neutral document time model. Providers
+// populate only dates their source actually defines; an absent value is never
+// inferred from the local download time. Precision describes the granularity
+// of the published date when its source does not provide a complete timestamp.
+type TemporalMetadata struct {
+	CreatedAt          *time.Time `json:"created_at,omitempty"`
+	PublishedAt        *time.Time `json:"published_at,omitempty"`
+	ModifiedAt         *time.Time `json:"modified_at,omitempty"`
+	EffectiveFrom      *time.Time `json:"effective_from,omitempty"`
+	EffectiveTo        *time.Time `json:"effective_to,omitempty"`
+	PublishedPrecision string     `json:"published_precision,omitempty"`
 }
 
 type Document struct {
+	TemporalMetadata
 	Ref                 string                 `json:"ref,omitempty"`
 	ID                  string                 `json:"id"`
 	Dataset             string                 `json:"dataset"`

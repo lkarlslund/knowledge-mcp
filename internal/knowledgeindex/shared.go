@@ -262,6 +262,15 @@ func (s *SharedIndex) build(ctx context.Context, providerID, dataset, fingerprin
 	pendingBytes := 0
 	err := corpus.ScanBodies(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
 		lastBoundary, lastPosition = position.Boundary, position
+		if record.Deleted {
+			key := sharedDocumentKey(generation, record.ID)
+			shard := sharedDocumentShard(key)
+			batches[shard].batch.Delete(key)
+			if pendingBytes >= batchSize && position.Boundary {
+				return flush(position)
+			}
+			return nil
+		}
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
 			return nil
 		}
@@ -296,7 +305,27 @@ func (s *SharedIndex) build(ctx context.Context, providerID, dataset, fingerprin
 			return 0, 0, err
 		}
 	}
+	documents, err = s.generationDocumentCount(ctx, generation)
+	if err != nil {
+		return 0, 0, err
+	}
 	return documents, indexedBytes, nil
+}
+
+func (s *SharedIndex) generationDocumentCount(ctx context.Context, generation string) (uint64, error) {
+	term := bleve.NewTermQuery(generation)
+	term.SetField("generation")
+	var total uint64
+	for shard, idx := range s.indexes {
+		s.shardMu[shard].RLock()
+		response, err := idx.SearchInContext(ctx, bleve.NewSearchRequestOptions(term, 0, 0, false))
+		s.shardMu[shard].RUnlock()
+		if err != nil {
+			return 0, fmt.Errorf("count shared generation in shard %d: %w", shard, err)
+		}
+		total += uint64(response.Total)
+	}
+	return total, nil
 }
 
 func (s *SharedIndex) Activate(providerID, dataset, fingerprint string, documents uint64, indexedBytes int64) error {
@@ -399,6 +428,9 @@ func (s *SharedIndex) Search(ctx context.Context, dataset, text string, options 
 	if options.Limit <= 0 || options.Limit > 50 {
 		options.Limit = 10
 	}
+	if options.Sort != "" && options.Sort != "relevance" && options.Sort != "newest" && options.Sort != "oldest" {
+		return model.SearchResult{}, errors.New("sort must be relevance, newest, or oldest")
+	}
 	if options.Mode == "" || options.Mode == "auto" {
 		options.Mode = "full_text"
 	}
@@ -441,14 +473,16 @@ func (s *SharedIndex) Search(ctx context.Context, dataset, text string, options 
 	}
 	sort.Strings(searched)
 	activeFilter := bleve.NewDisjunctionQuery(filters...)
-	searchQuery := bleve.NewConjunctionQuery(rankedQuery(text, options.Mode != "title"), activeFilter)
+	var searchQuery blevequery.Query = bleve.NewConjunctionQuery(rankedQuery(text, options.Mode != "title"), activeFilter)
 	if !options.IncludeSecondary {
 		primary := bleve.NewTermQuery("1")
 		primary.SetField("primary")
 		searchQuery = bleve.NewConjunctionQuery(searchQuery, primary)
 	}
+	searchQuery = applyDateFilter(searchQuery, options)
 	request := bleve.NewSearchRequestOptions(searchQuery, min(500, max(100, options.Offset+options.Limit*10)), 0, false)
-	request.Fields = []string{"provider", "dataset", "document_id", "title", "url", "namespace", "identifiers", "status", "rank_weight"}
+	request.Fields = []string{"provider", "dataset", "document_id", "title", "url", "namespace", "identifiers", "status", "rank_weight", "created_at", "published_at", "modified_at", "effective_from", "effective_to", "published_precision"}
+	applyDateSort(request, options.Sort)
 	response, err := s.alias.SearchInContext(ctx, request)
 	if err != nil {
 		return model.SearchResult{}, err
@@ -466,15 +500,17 @@ func (s *SharedIndex) Search(ctx context.Context, dataset, text string, options 
 			rankWeight = 1
 		}
 		status, _ := hit.Fields["status"].(string)
-		hits = append(hits, model.SearchHit{Provider: providerID, Dataset: datasetID, ID: documentID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score * rankWeight, MatchMode: "shared", Identifiers: stringSliceField(hit.Fields["identifiers"]), Status: status})
+		hits = append(hits, model.SearchHit{TemporalMetadata: temporalFromFields(hit.Fields), Provider: providerID, Dataset: datasetID, ID: documentID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score * rankWeight, MatchMode: "shared", Identifiers: stringSliceField(hit.Fields["identifiers"]), Status: status})
 	}
-	sort.SliceStable(hits, func(i, j int) bool {
-		iExact, jExact := normalize(hits[i].Title) == normalize(text), normalize(hits[j].Title) == normalize(text)
-		if iExact != jExact {
-			return iExact
-		}
-		return hits[i].Score > hits[j].Score
-	})
+	if options.Sort == "" || options.Sort == "relevance" {
+		sort.SliceStable(hits, func(i, j int) bool {
+			iExact, jExact := normalize(hits[i].Title) == normalize(text), normalize(hits[j].Title) == normalize(text)
+			if iExact != jExact {
+				return iExact
+			}
+			return hits[i].Score > hits[j].Score
+		})
+	}
 	total := uint64(response.Total)
 	start := min(max(options.Offset, 0), len(hits))
 	end := min(start+options.Limit, len(hits))

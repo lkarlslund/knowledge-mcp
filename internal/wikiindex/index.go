@@ -145,6 +145,7 @@ type SourceBody struct {
 	Title     string
 	Namespace int
 	Body      string
+	Timestamp string
 }
 
 type sourceBodyCursor struct {
@@ -373,7 +374,7 @@ func ScanSourceBodies(ctx context.Context, parts []Part, after string, paralleli
 					if redirectTarget(page) == "" {
 						body = PlainText(page.Revision.Text)
 					}
-					documents = append(documents, SourceBody{ID: page.ID, Title: page.Title, Namespace: page.Namespace, Body: body})
+					documents = append(documents, SourceBody{ID: page.ID, Title: page.Title, Namespace: page.Namespace, Body: body, Timestamp: page.Revision.Timestamp})
 				}
 				select {
 				case results <- result{index: index, documents: documents, err: errors.Join(decodeErr, closeErr)}:

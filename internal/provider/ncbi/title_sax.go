@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
 	"github.com/orisano/gosax"
 )
@@ -26,18 +29,25 @@ const (
 	titleFieldAuthorLast
 	titleFieldAuthorFore
 	titleFieldAuthorCollective
+	titleFieldDateYear
+	titleFieldDateMonth
+	titleFieldDateDay
+	titleFieldMedlineDate
 )
 
 type pubmedTitle struct {
-	id          string
-	title       string
-	journal     string
-	identifiers []string
-	keywords    []string
-	mesh        []string
-	languages   []string
-	authors     []string
-	abstracts   []abstractText
+	id                string
+	title             string
+	journal           string
+	identifiers       []string
+	keywords          []string
+	mesh              []string
+	languages         []string
+	authors           []string
+	abstracts         []abstractText
+	temporal          model.TemporalMetadata
+	publishedPriority int
+	deleted           bool
 }
 
 func (article pubmedTitle) record(locator string, body bool) provider.Record {
@@ -49,11 +59,22 @@ func (article pubmedTitle) record(locator string, body bool) provider.Record {
 		URL: "https://pubmed.ncbi.nlm.nih.gov/" + article.id + "/", Locator: locator,
 		Primary: true, Identifiers: identifiers, Keywords: article.keywords, RankWeight: 1,
 		Metadata: map[string]string{"journal": article.journal, "language": strings.Join(article.languages, " ")},
+		Temporal: article.temporal, Deleted: article.deleted,
 	}
 	if body {
 		record.Body = article.markdown()
 	}
 	return record
+}
+
+type pubmedDateParts struct {
+	year, month, day, medline string
+}
+
+type pubmedDateCapture struct {
+	depth, priority int
+	target          string
+	parts           pubmedDateParts
 }
 
 func (article pubmedTitle) markdown() string {
@@ -89,7 +110,9 @@ func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) er
 	var value strings.Builder
 	depth := 0
 	inArticle := false
+	inDelete := false
 	journalDepth, abstractDepth, authorDepth := 0, 0, 0
+	var dateCapture pubmedDateCapture
 
 	for {
 		event, err := reader.Event()
@@ -102,6 +125,18 @@ func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) er
 		case gosax.EventStart:
 			name := pubmedElementName(event.Bytes)
 			if !inArticle {
+				if inDelete {
+					depth++
+					if bytes.Equal(name, []byte("PMID")) {
+						field, fieldDepth = titleFieldPMID, depth
+						value.Reset()
+					}
+					continue
+				}
+				if bytes.Equal(name, []byte("DeleteCitation")) {
+					inDelete, depth = true, 1
+					continue
+				}
 				if bytes.Equal(name, []byte("PubmedArticle")) || bytes.Equal(name, []byte("PubmedBookArticle")) {
 					article = pubmedTitle{}
 					depth = 1
@@ -110,6 +145,25 @@ func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) er
 				continue
 			}
 			depth++
+			switch {
+			case bytes.Equal(name, []byte("DateRevised")):
+				dateCapture = pubmedDateCapture{depth: depth, target: "modified", priority: 1}
+			case bytes.Equal(name, []byte("ArticleDate")):
+				dateCapture = pubmedDateCapture{depth: depth, target: "published", priority: 2}
+			case bytes.Equal(name, []byte("PubDate")):
+				dateCapture = pubmedDateCapture{depth: depth, target: "published", priority: 1}
+			case bytes.Equal(name, []byte("PubMedPubDate")):
+				status, attributeErr := pubmedAttribute(event.Bytes, "PubStatus")
+				if attributeErr != nil {
+					return attributeErr
+				}
+				switch strings.ToLower(status) {
+				case "entrez":
+					dateCapture = pubmedDateCapture{depth: depth, target: "created", priority: 1}
+				case "pubmed":
+					dateCapture = pubmedDateCapture{depth: depth, target: "published", priority: 3}
+				}
+			}
 			if !bodies && (bytes.Equal(name, []byte("Abstract")) || bytes.Equal(name, []byte("AuthorList"))) {
 				if err := gosax.Skip(reader); err != nil {
 					return fmt.Errorf("skip PubMed body field: %w", err)
@@ -129,6 +183,14 @@ func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) er
 				}
 			}
 			switch {
+			case dateCapture.depth > 0 && bytes.Equal(name, []byte("Year")):
+				field = titleFieldDateYear
+			case dateCapture.depth > 0 && bytes.Equal(name, []byte("Month")):
+				field = titleFieldDateMonth
+			case dateCapture.depth > 0 && bytes.Equal(name, []byte("Day")):
+				field = titleFieldDateDay
+			case dateCapture.depth > 0 && bytes.Equal(name, []byte("MedlineDate")):
+				field = titleFieldMedlineDate
 			case article.id == "" && bytes.Equal(name, []byte("PMID")):
 				field = titleFieldPMID
 			case bytes.Equal(name, []byte("ArticleTitle")) || bytes.Equal(name, []byte("BookTitle")):
@@ -180,11 +242,33 @@ func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) er
 				_, _ = value.Write(bytes.TrimSuffix(bytes.TrimPrefix(event.Bytes, []byte("<![CDATA[")), []byte("]]>")))
 			}
 		case gosax.EventEnd:
+			if inDelete {
+				if field == titleFieldPMID && depth == fieldDepth {
+					id := strings.Join(strings.Fields(value.String()), " ")
+					if id != "" {
+						if err := emit(pubmedTitle{id: id, deleted: true}); err != nil {
+							return err
+						}
+					}
+					field, fieldDepth = titleFieldNone, 0
+					value.Reset()
+				}
+				if depth == 1 {
+					inDelete, depth = false, 0
+					continue
+				}
+				depth--
+				continue
+			}
 			if !inArticle {
 				continue
 			}
 			if field != titleFieldNone && depth == fieldDepth {
-				assignPubMedTitleField(&article, field, articleIDType, abstractLabel, value.String(), &authorLast, &authorFore, &authorCollective)
+				if field >= titleFieldDateYear {
+					assignPubMedDateField(&dateCapture.parts, field, value.String())
+				} else {
+					assignPubMedTitleField(&article, field, articleIDType, abstractLabel, value.String(), &authorLast, &authorFore, &authorCollective)
+				}
 				field, fieldDepth, articleIDType, abstractLabel = titleFieldNone, 0, "", ""
 				value.Reset()
 			}
@@ -204,6 +288,10 @@ func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) er
 			if depth == journalDepth {
 				journalDepth = 0
 			}
+			if depth == dateCapture.depth {
+				article.applyDate(dateCapture)
+				dateCapture = pubmedDateCapture{}
+			}
 			if depth == 1 {
 				if err := emit(article); err != nil {
 					return err
@@ -215,6 +303,75 @@ func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) er
 			depth--
 		}
 	}
+}
+
+func assignPubMedDateField(parts *pubmedDateParts, field titleField, raw string) {
+	value := strings.Join(strings.Fields(raw), " ")
+	switch field {
+	case titleFieldDateYear:
+		parts.year = value
+	case titleFieldDateMonth:
+		parts.month = value
+	case titleFieldDateDay:
+		parts.day = value
+	case titleFieldMedlineDate:
+		parts.medline = value
+	case titleFieldNone, titleFieldPMID, titleFieldTitle, titleFieldArticleID, titleFieldPublicationType, titleFieldDescriptor, titleFieldQualifier, titleFieldJournal, titleFieldLanguage, titleFieldAbstract, titleFieldAuthorLast, titleFieldAuthorFore, titleFieldAuthorCollective:
+	}
+}
+
+func (article *pubmedTitle) applyDate(capture pubmedDateCapture) {
+	value, precision := parsePubMedDate(capture.parts)
+	if value == nil {
+		return
+	}
+	switch capture.target {
+	case "created":
+		article.temporal.CreatedAt = value
+	case "modified":
+		article.temporal.ModifiedAt = value
+	case "published":
+		if capture.priority >= article.publishedPriority {
+			article.temporal.PublishedAt = value
+			article.temporal.PublishedPrecision = precision
+			article.publishedPriority = capture.priority
+		}
+	}
+}
+
+func parsePubMedDate(parts pubmedDateParts) (*time.Time, string) {
+	year, err := strconv.Atoi(parts.year)
+	if err != nil && len(parts.medline) >= 4 {
+		year, err = strconv.Atoi(parts.medline[:4])
+		if err == nil && parts.month == "" {
+			fields := strings.Fields(parts.medline)
+			if len(fields) > 1 {
+				parts.month = strings.Trim(fields[1], "-.,")
+			}
+		}
+	}
+	if err != nil || year < 1000 || year > 9999 {
+		return nil, ""
+	}
+	month, precision := time.January, "year"
+	if parts.month != "" {
+		if numeric, numericErr := strconv.Atoi(parts.month); numericErr == nil && numeric >= 1 && numeric <= 12 {
+			month, precision = time.Month(numeric), "month"
+		} else {
+			for candidate := time.January; candidate <= time.December; candidate++ {
+				if strings.HasPrefix(strings.ToLower(candidate.String()), strings.ToLower(parts.month)) {
+					month, precision = candidate, "month"
+					break
+				}
+			}
+		}
+	}
+	day := 1
+	if parsed, dayErr := strconv.Atoi(parts.day); dayErr == nil && parsed >= 1 && parsed <= 31 {
+		day, precision = parsed, "day"
+	}
+	value := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	return &value, precision
 }
 
 func assignPubMedTitleField(article *pubmedTitle, field titleField, idType, abstractLabel, raw string, authorLast, authorFore, authorCollective *string) {
@@ -246,7 +403,7 @@ func assignPubMedTitleField(article *pubmedTitle, field titleField, idType, abst
 		*authorFore = value
 	case titleFieldAuthorCollective:
 		*authorCollective = value
-	case titleFieldNone:
+	case titleFieldNone, titleFieldDateYear, titleFieldDateMonth, titleFieldDateDay, titleFieldMedlineDate:
 	}
 }
 

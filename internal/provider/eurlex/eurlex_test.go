@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -106,5 +108,36 @@ func TestEURLexRetriesTransientCatalogFailure(t *testing.T) {
 	resolved, ok := latest.Value.(*release)
 	if !ok || len(resolved.Entries) != 1 || attempts != 2 {
 		t.Fatalf("release=%+v attempts=%d", latest, attempts)
+	}
+}
+
+func TestEURLexDownloadsMultipleChoiceDocumentParts(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/expression":
+			response.WriteHeader(http.StatusMultipleChoices)
+			_, _ = response.Write([]byte(`<html><body><a href="/part/1">one</a><a href="/part/2">two</a></body></html>`))
+		case "/part/1":
+			_, _ = response.Write([]byte(`<html><body><h1>First official part</h1></body></html>`))
+		case "/part/2":
+			_, _ = response.Write([]byte(`<html><body><h1>Second official part</h1></body></html>`))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	backend := NewWithURLs(server.URL, server.URL)
+	destination := filepath.Join(t.TempDir(), "document.xhtml")
+	if err := backend.download(context.Background(), entry{CELEX: "TEST", Expression: "expression", Format: "xhtml"}, destination); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := xhtmlMarkdown(data)
+	if !strings.Contains(markdown, "First official part") || !strings.Contains(markdown, "Second official part") {
+		t.Fatalf("assembled markdown=%q", markdown)
 	}
 }

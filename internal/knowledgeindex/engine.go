@@ -34,23 +34,29 @@ type TitleProgress func(documents uint64, completed, total int64)
 type BodyProgress func(documents uint64, completed, total int64, units string)
 
 type indexDocument struct {
-	Provider        string   `json:"provider,omitempty"`
-	Dataset         string   `json:"dataset,omitempty"`
-	Generation      string   `json:"generation,omitempty"`
-	DocumentID      string   `json:"document_id,omitempty"`
-	Title           string   `json:"title"`
-	TitleExact      string   `json:"title_exact"`
-	Body            string   `json:"body,omitempty"`
-	URL             string   `json:"url,omitempty"`
-	Locator         string   `json:"locator,omitempty"`
-	Namespace       string   `json:"namespace"`
-	Primary         string   `json:"primary"`
-	Identifiers     []string `json:"identifiers,omitempty"`
-	IdentifierExact []string `json:"identifier_exact,omitempty"`
-	Aliases         []string `json:"aliases,omitempty"`
-	Keywords        []string `json:"keywords,omitempty"`
-	Status          string   `json:"status,omitempty"`
-	RankWeight      string   `json:"rank_weight"`
+	Provider           string     `json:"provider,omitempty"`
+	Dataset            string     `json:"dataset,omitempty"`
+	Generation         string     `json:"generation,omitempty"`
+	DocumentID         string     `json:"document_id,omitempty"`
+	Title              string     `json:"title"`
+	TitleExact         string     `json:"title_exact"`
+	Body               string     `json:"body,omitempty"`
+	URL                string     `json:"url,omitempty"`
+	Locator            string     `json:"locator,omitempty"`
+	Namespace          string     `json:"namespace"`
+	Primary            string     `json:"primary"`
+	Identifiers        []string   `json:"identifiers,omitempty"`
+	IdentifierExact    []string   `json:"identifier_exact,omitempty"`
+	Aliases            []string   `json:"aliases,omitempty"`
+	Keywords           []string   `json:"keywords,omitempty"`
+	Status             string     `json:"status,omitempty"`
+	RankWeight         string     `json:"rank_weight"`
+	CreatedAt          *time.Time `json:"created_at,omitempty"`
+	PublishedAt        *time.Time `json:"published_at,omitempty"`
+	ModifiedAt         *time.Time `json:"modified_at,omitempty"`
+	EffectiveFrom      *time.Time `json:"effective_from,omitempty"`
+	EffectiveTo        *time.Time `json:"effective_to,omitempty"`
+	PublishedPrecision string     `json:"published_precision,omitempty"`
 }
 
 type buildCheckpoint struct {
@@ -128,6 +134,13 @@ func buildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
 	err = corpus.ScanTitles(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
 		lastPosition, lastBoundary = position, position.Boundary
+		if record.Deleted {
+			batch.Delete(record.ID)
+			if batch.Size() >= batchSize && position.Boundary {
+				return commit(position)
+			}
+			return nil
+		}
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
 			if batch.Size() >= batchSize && position.Boundary {
 				return commit(position)
@@ -156,6 +169,10 @@ func buildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 			return 0, err
 		}
 	}
+	documentCount, err := idx.DocCount()
+	if err != nil {
+		return 0, err
+	}
 	if err := idx.Close(); err != nil {
 		return 0, err
 	}
@@ -163,7 +180,7 @@ func buildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 	if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, err
 	}
-	return count, nil
+	return documentCount, nil
 }
 
 func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, progress BodyProgress) error {
@@ -262,6 +279,14 @@ func buildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
 	err := corpus.ScanBodies(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
 		lastPosition, lastBoundary = position, position.Boundary
+		if record.Deleted {
+			shard := recordShard(record.ID)
+			batches[shard].batch.Delete(record.ID)
+			if pendingBytes >= batchSize && position.Boundary {
+				return flushAll(position)
+			}
+			return nil
+		}
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
 			if pendingBytes >= batchSize && position.Boundary {
 				if err := flushAll(position); err != nil {
@@ -330,7 +355,7 @@ func toIndexDocument(record provider.Record, body bool) indexDocument {
 			identifiers = append(identifiers, normalized)
 		}
 	}
-	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Namespace: strconv.Itoa(record.Namespace), Primary: primary, Identifiers: record.Identifiers, IdentifierExact: identifiers, Aliases: record.Aliases, Keywords: record.Keywords, Status: record.Status, RankWeight: strconv.FormatFloat(rankWeight, 'g', -1, 64)}
+	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Namespace: strconv.Itoa(record.Namespace), Primary: primary, Identifiers: record.Identifiers, IdentifierExact: identifiers, Aliases: record.Aliases, Keywords: record.Keywords, Status: record.Status, RankWeight: strconv.FormatFloat(rankWeight, 'g', -1, 64), CreatedAt: record.Temporal.CreatedAt, PublishedAt: record.Temporal.PublishedAt, ModifiedAt: record.Temporal.ModifiedAt, EffectiveFrom: record.Temporal.EffectiveFrom, EffectiveTo: record.Temporal.EffectiveTo, PublishedPrecision: record.Temporal.PublishedPrecision}
 	if body {
 		document.Body = record.Body
 	}
@@ -414,6 +439,9 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	if options.Limit <= 0 || options.Limit > 50 {
 		options.Limit = 10
 	}
+	if options.Sort != "" && options.Sort != "relevance" && options.Sort != "newest" && options.Sort != "oldest" {
+		return model.SearchResult{}, errors.New("sort must be relevance, newest, or oldest")
+	}
 	idx, mode := r.title, "title"
 	if fullText {
 		idx, mode = r.body, "full_text"
@@ -427,8 +455,10 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 		primary.SetField("primary")
 		searchQuery = bleve.NewConjunctionQuery(searchQuery, primary)
 	}
+	searchQuery = applyDateFilter(searchQuery, options)
 	request := bleve.NewSearchRequestOptions(searchQuery, 500, 0, false)
-	request.Fields = []string{"title", "url", "namespace", "primary", "identifiers", "status", "rank_weight"}
+	request.Fields = []string{"title", "url", "namespace", "primary", "identifiers", "status", "rank_weight", "created_at", "published_at", "modified_at", "effective_from", "effective_to", "published_precision"}
+	applyDateSort(request, options.Sort)
 	response, err := idx.SearchInContext(ctx, request)
 	if err != nil {
 		return model.SearchResult{}, err
@@ -443,15 +473,17 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 			rankWeight = 1
 		}
 		status, _ := hit.Fields["status"].(string)
-		hits = append(hits, model.SearchHit{ID: hit.ID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score * rankWeight, MatchMode: mode, Identifiers: stringSliceField(hit.Fields["identifiers"]), Status: status})
+		hits = append(hits, model.SearchHit{TemporalMetadata: temporalFromFields(hit.Fields), ID: hit.ID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score * rankWeight, MatchMode: mode, Identifiers: stringSliceField(hit.Fields["identifiers"]), Status: status})
 	}
-	sort.SliceStable(hits, func(i, j int) bool {
-		iExact, jExact := normalize(hits[i].Title) == normalize(query), normalize(hits[j].Title) == normalize(query)
-		if iExact != jExact {
-			return iExact
-		}
-		return hits[i].Score > hits[j].Score
-	})
+	if options.Sort == "" || options.Sort == "relevance" {
+		sort.SliceStable(hits, func(i, j int) bool {
+			iExact, jExact := normalize(hits[i].Title) == normalize(query), normalize(hits[j].Title) == normalize(query)
+			if iExact != jExact {
+				return iExact
+			}
+			return hits[i].Score > hits[j].Score
+		})
+	}
 	total := uint64(len(hits))
 	start := min(max(options.Offset, 0), len(hits))
 	end := min(start+options.Limit, len(hits))
@@ -489,7 +521,7 @@ func (r *Reader) lookup(ctx context.Context, title, id string) (provider.Record,
 		query = term
 	}
 	request := bleve.NewSearchRequestOptions(query, 1, 0, false)
-	request.Fields = []string{"title", "url", "locator", "namespace", "primary"}
+	request.Fields = []string{"title", "url", "locator", "namespace", "primary", "created_at", "published_at", "modified_at", "effective_from", "effective_to", "published_precision"}
 	response, err := r.title.SearchInContext(ctx, request)
 	if err != nil {
 		return provider.Record{}, err
@@ -503,7 +535,7 @@ func (r *Reader) lookup(ctx context.Context, title, id string) (provider.Record,
 	locator, _ := hit.Fields["locator"].(string)
 	namespace, _ := numberField(hit.Fields["namespace"])
 	primary, _ := numberField(hit.Fields["primary"])
-	return provider.Record{ID: hit.ID, Title: titleValue, URL: url, Locator: locator, Namespace: int(namespace), Primary: primary == 1}, nil
+	return provider.Record{ID: hit.ID, Title: titleValue, URL: url, Locator: locator, Namespace: int(namespace), Primary: primary == 1, Temporal: temporalFromFields(hit.Fields)}, nil
 }
 
 func rankedQuery(text string, fullText bool) blevequery.Query {
@@ -551,6 +583,60 @@ func rankedQuery(text string, fullText bool) blevequery.Query {
 		}
 	}
 	return bleve.NewDisjunctionQuery(queries...)
+}
+
+func applyDateFilter(query blevequery.Query, options model.SearchOptions) blevequery.Query {
+	if options.PublishedAfter == nil && options.PublishedBefore == nil {
+		return query
+	}
+	var start, end time.Time
+	if options.PublishedAfter != nil {
+		start = *options.PublishedAfter
+	}
+	if options.PublishedBefore != nil {
+		end = *options.PublishedBefore
+	}
+	rangeQuery := bleve.NewDateRangeQuery(start, end)
+	rangeQuery.SetField("published_at")
+	return bleve.NewConjunctionQuery(query, rangeQuery)
+}
+
+func applyDateSort(request *bleve.SearchRequest, order string) {
+	switch order {
+	case "newest":
+		request.SortBy([]string{"-published_at", "-_score"})
+	case "oldest":
+		request.SortBy([]string{"published_at", "-_score"})
+	}
+}
+
+func temporalFromFields(fields map[string]any) model.TemporalMetadata {
+	return model.TemporalMetadata{
+		CreatedAt:          dateField(fields["created_at"]),
+		PublishedAt:        dateField(fields["published_at"]),
+		ModifiedAt:         dateField(fields["modified_at"]),
+		EffectiveFrom:      dateField(fields["effective_from"]),
+		EffectiveTo:        dateField(fields["effective_to"]),
+		PublishedPrecision: stringField(fields["published_precision"]),
+	}
+}
+
+func dateField(value any) *time.Time {
+	switch value := value.(type) {
+	case time.Time:
+		return &value
+	case string:
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err == nil {
+			return &parsed
+		}
+	}
+	return nil
+}
+
+func stringField(value any) string {
+	result, _ := value.(string)
+	return result
 }
 
 func looksLikeIdentifier(value string) bool {
@@ -617,6 +703,15 @@ func indexMapping(body bool) mapping.IndexMapping {
 		field.Store, field.Index, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = true, false, false, false, false
 		doc.AddFieldMappingsAt(fieldName, field)
 	}
+	for _, fieldName := range []string{"created_at", "published_at", "modified_at", "effective_from", "effective_to"} {
+		field := bleve.NewDateTimeFieldMapping()
+		field.Store, field.Index, field.IncludeInAll, field.DocValues = true, true, false, true
+		doc.AddFieldMappingsAt(fieldName, field)
+	}
+	precision := bleve.NewTextFieldMapping()
+	precision.Analyzer = "keyword"
+	precision.Store, precision.Index, precision.IncludeInAll, precision.DocValues = true, false, false, false
+	doc.AddFieldMappingsAt("published_precision", precision)
 	primary := bleve.NewTextFieldMapping()
 	primary.Analyzer = "keyword"
 	primary.Store, primary.Index, primary.IncludeTermVectors, primary.IncludeInAll, primary.DocValues = true, true, false, false, false

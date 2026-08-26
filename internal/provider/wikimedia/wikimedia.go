@@ -63,10 +63,12 @@ func (c *wikimediaCorpus) ScanBodies(ctx context.Context, after string, options 
 			return sink(provider.Record{}, position)
 		}
 		for index, source := range documents {
-			if err := sink(provider.Record{
+			record := provider.Record{
 				ID: strconv.FormatUint(source.ID, 10), Title: source.Title, Body: source.Body,
 				URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, source.Title), Namespace: source.Namespace, Primary: source.Namespace == 0,
-			}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total, Units: "streams", Boundary: index == len(documents)-1}); err != nil {
+			}
+			record.Temporal.ModifiedAt = parseTimestamp(source.Timestamp)
+			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total, Units: "streams", Boundary: index == len(documents)-1}); err != nil {
 				return err
 			}
 		}
@@ -93,6 +95,7 @@ func (c *wikimediaCorpus) scanContentFiles(ctx context.Context, after string, bo
 				body = wikiindex.PlainText(page.Wikitext)
 			}
 			record := provider.Record{ID: strconv.FormatUint(page.ID, 10), Title: page.Title, Body: body, URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, page.Title), Locator: fmt.Sprintf("file:%d", part), Namespace: page.Namespace, Primary: page.Namespace == 0}
+			record.Temporal.ModifiedAt = parseTimestamp(page.Timestamp)
 			return sink(record, provider.ScanPosition{Cursor: fmt.Sprintf("f1:%d:%d:%d", part, current, completed), Completed: completed, Units: "documents", Boundary: true})
 		})
 		if err != nil {
@@ -138,6 +141,7 @@ func (c *wikimediaCorpus) Read(ctx context.Context, record provider.Record, opti
 		document.Format = "source"
 	}
 	document.ID = strconv.FormatUint(document.NumericID, 10)
+	document.ModifiedAt = parseTimestamp(document.Timestamp)
 	for index := range document.RedirectChain {
 		document.RedirectChain[index].FromID = strconv.FormatUint(document.RedirectChain[index].FromNumericID, 10)
 	}
@@ -145,6 +149,15 @@ func (c *wikimediaCorpus) Read(ctx context.Context, record provider.Record, opti
 		err = provider.ErrDocumentNotFound
 	}
 	return document, err
+}
+
+func parseTimestamp(value string) *time.Time {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil
+	}
+	parsed = parsed.UTC()
+	return &parsed
 }
 
 func (c *wikimediaCorpus) Close() error {

@@ -150,6 +150,40 @@ func TestSharedIndexEstimatedBytesDoesNotOverflow(t *testing.T) {
 	}
 }
 
+func TestSharedIndexFiltersAndSortsPublicationDates(t *testing.T) {
+	root := t.TempDir()
+	index, err := OpenShared(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = index.Close() }()
+	date := func(value string) *time.Time {
+		parsed, parseErr := time.Parse("2006-01-02", value)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		return &parsed
+	}
+	corpus := &testCorpus{records: []provider.Record{
+		{ID: "old", Title: "Older research", Body: "alzheimer evidence", Primary: true, Temporal: model.TemporalMetadata{PublishedAt: date("2020-01-02"), PublishedPrecision: "day"}},
+		{ID: "new", Title: "Newer research", Body: "alzheimer evidence", Primary: true, Temporal: model.TemporalMetadata{PublishedAt: date("2025-03-04"), PublishedPrecision: "day"}},
+	}}
+	documents, indexedBytes, err := index.Build(context.Background(), "example", "dated", "release-1", corpus, provider.ScanOptions{}, func(uint64, int64, int64, string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Activate("example", "dated", "release-1", documents, indexedBytes); err != nil {
+		t.Fatal(err)
+	}
+	result, err := index.Search(context.Background(), "dated", "alzheimer evidence", model.SearchOptions{Limit: 10, PublishedAfter: date("2024-01-01"), Sort: "newest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Hits) != 1 || result.Hits[0].ID != "new" || result.Hits[0].PublishedAt == nil || result.Hits[0].PublishedPrecision != "day" {
+		t.Fatalf("date-filtered search = %#v", result)
+	}
+}
+
 func assertSharedHit(t *testing.T, index *SharedIndex, dataset, query, wantDataset, wantID string) {
 	t.Helper()
 	result, err := index.Search(context.Background(), dataset, query, model.SearchOptions{Limit: 10})

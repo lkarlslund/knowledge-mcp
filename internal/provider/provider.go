@@ -40,6 +40,10 @@ type Record struct {
 	Status      string
 	RankWeight  float64
 	Metadata    map[string]string
+	Temporal    model.TemporalMetadata
+	// Deleted is emitted by incremental corpora for a source tombstone. Indexes
+	// must remove the record instead of trying to index its otherwise empty body.
+	Deleted bool
 }
 
 type ScanPosition struct {

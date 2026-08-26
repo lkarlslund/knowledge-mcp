@@ -10,7 +10,7 @@ Included providers:
 - `wikimedia`: official monthly Wikimedia current-content XML exports.
 - `rfc`: the complete RFC Series from the RFC Editor, with a `text` variant.
 - `kiwix`: the complete Kiwix OPDS catalog, grouped into datasets and archive flavours.
-- `ncbi`: the PubMed annual baseline, including citations, abstracts, identifiers, and MeSH terms.
+- `ncbi`: the PubMed annual baseline plus ordered daily additions, revisions, and deletions.
 - `eurlex`: official EU legal acts currently in force, in any of the 24 official EU languages.
 
 Provider URLs and local paths are not part of the agent contract. Search returns
@@ -107,7 +107,7 @@ endpoint. The legacy `WIKIPEDIA_MULTISTREAM_MCP_SERVER` name remains accepted.
 | `knowledge_update` | Submit an atomic background update or finish indexing. |
 | `knowledge_job_status` | Poll one job by `job_id` or `dataset`. |
 | `knowledge_job` | `pause`, `resume`, `cancel`, or `retry` a job. |
-| `knowledge_search` | Search one local dataset, or omit `dataset` to search the shared corpus of all ready datasets; returns opaque references. |
+| `knowledge_search` | Search one local dataset, or omit `dataset` to search the shared corpus of all ready datasets; supports publication-date bounds and newest/oldest sorting and returns opaque references. |
 | `knowledge_read` | Read by opaque `ref`; `dataset` plus `id` or exact title remains supported for compatibility. |
 
 `knowledge_read` always returns Markdown. Large documents return `offset`,
@@ -119,7 +119,7 @@ status and structured relationships and convert RFC references into followable
 Markdown links. Kiwix reads ZIM files natively and converts stored HTML,
 including tables and internal links, to Markdown.
 PubMed reads preserve citation metadata, abstracts, publication types, identifiers,
-and MeSH terms. EUR-Lex reads convert official XHTML and tables to Markdown and
+MeSH terms, and available creation/publication/revision dates. EUR-Lex reads convert official XHTML and tables to Markdown and
 turn CELEX cross-references into followable knowledge links.
 
 ## Provider architecture
@@ -131,7 +131,7 @@ internal/provider/
 ├── provider.go          discovery, acquisition, and common corpus boundary
 ├── eurlex/              CELLAR discovery, EU legal XHTML, and Markdown
 ├── kiwix/               OPDS catalog, native ZIM reader, HTML-to-Markdown
-├── ncbi/                PubMed baseline discovery, XML, and Markdown
+├── ncbi/                PubMed baseline + daily updates, XML, and Markdown
 ├── rfc/                 RFC Editor catalog, raw text, and Markdown
 └── wikimedia/           Current-content discovery, XML, and Markdown
 ```
@@ -144,7 +144,7 @@ A provider supplies:
 - resumable acquisition into a staging generation;
 - resumable title/body record scans through the common corpus interface;
 - provider-owned descriptions, scope, topics, cadence, and source features;
-- stable identifiers, aliases, keywords, lifecycle status, and rank weight; and
+- stable identifiers, aliases, keywords, lifecycle status, temporal metadata, and rank weight; and
 - on-demand conversion to Markdown.
 
 Providers never build or query search indexes. The provider-neutral
@@ -169,9 +169,10 @@ Metalink mirrors, resumes partial ZIM downloads with byte ranges, verifies
 SHA-256, and supports uncompressed, zlib, bzip2, XZ, and Zstandard clusters.
 Zstandard decoding uses Klaus Post's optimized Go implementation.
 
-The NCBI provider discovers the official annual PubMed baseline, resumes its
-compressed XML parts with HTTP ranges, and verifies NCBI's published MD5 for
-each completed part. The EUR-Lex provider discovers in-force sector 3 legal acts
+The NCBI provider applies the official annual PubMed baseline followed by daily
+update files in numeric order, including replacement records and deletion
+tombstones. Acquisition reuses unchanged compressed parts, resumes new parts with
+HTTP ranges, and verifies NCBI's published MD5 for each completed part. The EUR-Lex provider discovers in-force sector 3 legal acts
 through the Publications Office CELLAR endpoint and stores the selected official
 language as resumable XHTML documents. Updates for both providers are built as
 new staging generations and reuse unchanged local source files.
@@ -231,7 +232,7 @@ striped across physical Bleve shards. Body text is indexed but not duplicated as
 a stored field. Wikimedia reads open only the page-range bzip2 source file recorded
 for the selected page;
 RFC reads open the canonical local Markdown source; Kiwix reads only the referenced
-ZIM cluster; PubMed reads one compressed baseline part; and EUR-Lex reads one local
+ZIM cluster; PubMed reads one compressed baseline or update part; and EUR-Lex reads one local
 XHTML document.
 
 An initial install exposes title lookup while shared indexing continues. An
@@ -243,6 +244,10 @@ from that manifest; a managed background cleanup then reclaims its index terms.
 Interrupted builds resume from provider-declared safe cursors. Search supports
 `auto`, `title`, and `full_text` modes, with shared BM25 body relevance plus generic
 title, alias, keyword, exact-identifier, lifecycle, and provider rank signals.
+Providers also expose dates when their sources define them: RFC publication dates,
+Wikimedia revision timestamps, PubMed creation/publication/revision dates, and
+EUR-Lex document dates. `knowledge_search` accepts `published_after`,
+`published_before`, and `sort` (`relevance`, `newest`, or `oldest`).
 
 ## License
 

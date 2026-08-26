@@ -34,14 +34,15 @@ const (
 	datasetID            = "pubmed"
 	variantID            = "baseline"
 	defaultURL           = "https://ftp.ncbi.nlm.nih.gov/pubmed/baseline"
+	defaultUpdatesURL    = "https://ftp.ncbi.nlm.nih.gov/pubmed/updatefiles"
 	pubmedRecordsPerPart = 30_000
 )
 
 var partRE = regexp.MustCompile(`href="(pubmed(\d{2})n\d{4}\.xml\.gz)"[^>]*>[^<]*</a>\s+([0-9-]+\s+[0-9:]+)\s+([0-9.]+[KMGT]?)`) // NCBI Apache listing.
 
 type NCBI struct {
-	baseURL string
-	http    *http.Client
+	baseURL, updatesURL string
+	http                *http.Client
 }
 
 type release struct {
@@ -49,17 +50,23 @@ type release struct {
 }
 
 type part struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-	MD5  string `json:"md5"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	MD5      string `json:"md5"`
+	Kind     string `json:"kind,omitempty"`
+	Modified string `json:"modified,omitempty"`
 }
 
-func New() *NCBI { return NewWithBaseURL(defaultURL) }
+func New() *NCBI { return NewWithURLs(defaultURL, defaultUpdatesURL) }
 
 func NewWithBaseURL(baseURL string) *NCBI {
+	return NewWithURLs(baseURL, "")
+}
+
+func NewWithURLs(baseURL, updatesURL string) *NCBI {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 30 * time.Second
-	return &NCBI{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Transport: transport}}
+	return &NCBI{baseURL: strings.TrimRight(baseURL, "/"), updatesURL: strings.TrimRight(updatesURL, "/"), http: &http.Client{Transport: transport}}
 }
 
 func (*NCBI) ID() string                  { return ProviderID }
@@ -77,15 +84,15 @@ func (p *NCBI) Discover(ctx context.Context, filter string, _ bool) ([]model.Ava
 	for _, item := range resolved.Parts {
 		size += item.Size
 	}
-	year := baselineYear(resolved.Parts)
+	year := pubmedReleaseDate(resolved.Parts)
 	return []model.AvailableDataset{{
 		Provider: ProviderID, Variant: variantID, ID: datasetID, DisplayName: "PubMed",
-		Description: "NCBI PubMed biomedical and life-sciences citations, bibliographic metadata, abstracts, publication types, and MeSH terms from the annual baseline.",
+		Description: "NCBI PubMed biomedical and life-sciences citations, bibliographic metadata, abstracts, publication types, and MeSH terms from the annual baseline plus ordered daily updates.",
 		Project:     "NCBI PubMed", ContentType: "Biomedical citations and abstracts", Profile: profile(),
 		Language:        model.Language{Code: "mul", Name: "Multiple languages", LocalName: "Multiple languages"},
 		OnlineSourceURL: "https://pubmed.ncbi.nlm.nih.gov/", ReleaseDate: year, Available: true,
 		RawSize: size, PartCount: len(resolved.Parts), Fingerprint: fingerprint(resolved),
-		Variants: []model.Variant{{ID: variantID, Name: "Annual baseline", Description: "Complete annual PubMed baseline in NCBI XML, rendered as Markdown", Format: "application/xml+gzip"}},
+		Variants: []model.Variant{{ID: variantID, Name: "Current PubMed", Description: "Complete annual baseline with subsequent daily revisions and deletions applied in order", Format: "application/xml+gzip"}},
 	}}, nil
 }
 
@@ -97,11 +104,28 @@ func (p *NCBI) Latest(ctx context.Context, collection, variant string) (provider
 	if err != nil {
 		return provider.Release{}, err
 	}
-	return provider.Release{Fingerprint: fingerprint(resolved), Date: baselineYear(resolved.Parts), Value: resolved}, nil
+	return provider.Release{Fingerprint: fingerprint(resolved), Date: pubmedReleaseDate(resolved.Parts), Value: resolved}, nil
 }
 
 func (p *NCBI) resolve(ctx context.Context) (*release, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/", nil)
+	baseline, err := p.resolveListing(ctx, p.baseURL, "baseline")
+	if err != nil {
+		return nil, err
+	}
+	resolved := &release{Parts: baseline}
+	if p.updatesURL != "" {
+		updates, updateErr := p.resolveListing(ctx, p.updatesURL, "update")
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		resolved.Parts = append(resolved.Parts, updates...)
+	}
+	sort.SliceStable(resolved.Parts, func(i, j int) bool { return resolved.Parts[i].Name < resolved.Parts[j].Name })
+	return resolved, nil
+}
+
+func (p *NCBI) resolveListing(ctx context.Context, baseURL, kind string) ([]part, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +135,7 @@ func (p *NCBI) resolve(ctx context.Context) (*release, error) {
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("NCBI baseline catalog: %s", response.Status)
+		return nil, fmt.Errorf("NCBI %s catalog: %s", kind, response.Status)
 	}
 	listing, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if err != nil {
@@ -119,13 +143,16 @@ func (p *NCBI) resolve(ctx context.Context) (*release, error) {
 	}
 	matches := partRE.FindAllSubmatch(listing, -1)
 	if len(matches) == 0 {
-		return nil, errors.New("NCBI baseline catalog contained no PubMed parts")
+		if kind == "update" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("NCBI %s catalog contained no PubMed parts", kind)
 	}
-	resolved := &release{Parts: make([]part, 0, len(matches))}
+	resolved := make([]part, 0, len(matches))
 	for _, match := range matches {
-		resolved.Parts = append(resolved.Parts, part{Name: string(match[1]), Size: parseSize(string(match[4]))})
+		resolved = append(resolved, part{Name: string(match[1]), Size: parseSize(string(match[4])), Kind: kind, Modified: strings.Join(strings.Fields(string(match[3])), " ")})
 	}
-	sort.Slice(resolved.Parts, func(i, j int) bool { return resolved.Parts[i].Name < resolved.Parts[j].Name })
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i].Name < resolved[j].Name })
 	return resolved, nil
 }
 
@@ -174,7 +201,7 @@ func (p *NCBI) Acquire(ctx context.Context, collection, _ string, value provider
 				if validFile(destination, item) {
 					progressMu.Lock()
 					completed += item.Size
-					progress("downloading_parts", completed, total, "bytes", 0, "acquiring PubMed baseline")
+					progress("downloading_parts", completed, total, "bytes", 0, "acquiring PubMed baseline and daily updates")
 					progressMu.Unlock()
 					continue
 				}
@@ -195,7 +222,7 @@ func (p *NCBI) Acquire(ctx context.Context, collection, _ string, value provider
 				}
 				progressMu.Lock()
 				completed += item.Size
-				progress("downloading_parts", completed, total, "bytes", 0, "acquiring PubMed baseline")
+				progress("downloading_parts", completed, total, "bytes", 0, "acquiring PubMed baseline and daily updates")
 				progressMu.Unlock()
 			}
 		}()
@@ -230,11 +257,15 @@ send:
 			actualBytes += info.Size()
 		}
 	}
-	return model.Manifest{Provider: ProviderID, Variant: variantID, Dataset: collection, ReleaseDate: value.Date, Fingerprint: value.Fingerprint, PartCount: len(resolved.Parts), RawSize: actualBytes, ProviderMetadataSize: int64(len(metadata)), PublishedAt: time.Now().UTC(), Site: model.DatasetMetadata{Name: "PubMed", Description: "NCBI PubMed biomedical and life-sciences citations, bibliographic metadata, abstracts, publication types, and MeSH terms from the annual baseline.", Project: "NCBI PubMed", ContentType: "Biomedical citations and abstracts", Profile: profile(), Language: model.Language{Code: "mul", Name: "Multiple languages", LocalName: "Multiple languages"}, OnlineSourceURL: "https://pubmed.ncbi.nlm.nih.gov/", MetadataUpdatedAt: time.Now().UTC()}}, nil
+	return model.Manifest{Provider: ProviderID, Variant: variantID, Dataset: collection, ReleaseDate: value.Date, Fingerprint: value.Fingerprint, PartCount: len(resolved.Parts), RawSize: actualBytes, ProviderMetadataSize: int64(len(metadata)), PublishedAt: time.Now().UTC(), Site: model.DatasetMetadata{Name: "PubMed", Description: "NCBI PubMed biomedical and life-sciences citations, bibliographic metadata, abstracts, publication types, and MeSH terms from the annual baseline plus ordered daily updates.", Project: "NCBI PubMed", ContentType: "Biomedical citations and abstracts", Profile: profile(), Language: model.Language{Code: "mul", Name: "Multiple languages", LocalName: "Multiple languages"}, OnlineSourceURL: "https://pubmed.ncbi.nlm.nih.gov/", MetadataUpdatedAt: time.Now().UTC()}}, nil
 }
 
 func (p *NCBI) downloadPart(ctx context.Context, item part, destination string) error {
-	checksum, err := p.fetchText(ctx, p.baseURL+"/"+item.Name+".md5", 1024)
+	baseURL := p.baseURL
+	if item.Kind == "update" {
+		baseURL = p.updatesURL
+	}
+	checksum, err := p.fetchText(ctx, baseURL+"/"+item.Name+".md5", 1024)
 	if err != nil {
 		return err
 	}
@@ -248,7 +279,7 @@ func (p *NCBI) downloadPart(ctx context.Context, item part, destination string) 
 	if info, err := os.Stat(partial); err == nil {
 		offset = info.Size()
 	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/"+item.Name, nil)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/"+item.Name, nil)
 	if offset > 0 {
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
@@ -593,7 +624,7 @@ func document(record provider.Record, content string, options model.ReadOptions)
 	}
 	start := min(max(options.Offset, 0), len(runes))
 	end := min(start+maximum, len(runes))
-	result := model.Document{ID: record.ID, Title: record.Title, URL: record.URL, Format: "markdown", Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
+	result := model.Document{TemporalMetadata: record.Temporal, ID: record.ID, Title: record.Title, URL: record.URL, Format: "markdown", Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
 	if result.Truncated {
 		result.NextOffset = end
 	}
@@ -618,6 +649,15 @@ func baselineYear(parts []part) string {
 	}
 	return time.Now().UTC().Format("2006")
 }
+
+func pubmedReleaseDate(parts []part) string {
+	for index := len(parts) - 1; index >= 0; index-- {
+		if parts[index].Kind == "update" && len(parts[index].Modified) >= len("2006-01-02") {
+			return strings.ReplaceAll(parts[index].Modified[:len("2006-01-02")], "-", "")
+		}
+	}
+	return baselineYear(parts)
+}
 func parseSize(value string) int64 {
 	value = strings.TrimSpace(strings.ToUpper(value))
 	multiplier := float64(1)
@@ -637,5 +677,5 @@ func parseSize(value string) int64 {
 	return int64(number * multiplier)
 }
 func profile() model.DatasetProfile {
-	return model.DatasetProfile{Topics: []string{"medicine", "biomedicine", "life sciences", "health research"}, GeographicScope: []string{"global research literature"}, TimeCoverage: "1946 to present", DocumentTypes: []string{"journal citations", "abstracts", "clinical studies", "reviews"}, UpdateCadence: "Annual baseline", CoverageNotes: "PubMed annual baseline; citations may have abstracts and MeSH indexing depending on the source record.", SourceFeatures: []string{"PMID", "DOI", "abstracts", "MeSH terms", "publication types", "authors"}}
+	return model.DatasetProfile{Topics: []string{"medicine", "biomedicine", "life sciences", "health research"}, GeographicScope: []string{"global research literature"}, TimeCoverage: "1946 to present", DocumentTypes: []string{"journal citations", "abstracts", "clinical studies", "reviews"}, UpdateCadence: "Daily updates after annual baseline", CoverageNotes: "PubMed annual baseline with ordered daily additions, revisions, and deletions; citations may have abstracts and MeSH indexing depending on the source record.", SourceFeatures: []string{"PMID", "DOI", "abstracts", "MeSH terms", "publication types", "authors", "publication and revision dates"}}
 }

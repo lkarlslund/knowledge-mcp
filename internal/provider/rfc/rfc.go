@@ -147,6 +147,7 @@ func (c *rfcCorpus) scan(ctx context.Context, after string, body bool, sink prov
 			rankWeight = 0.8
 		}
 		record := provider.Record{ID: entry.ID, Title: entry.Title, URL: fmt.Sprintf(c.baseURL+"/info/rfc%s", entry.ID), Locator: entry.ID, Primary: true, Identifiers: append([]string{"RFC " + entry.ID}, entry.Also...), Aliases: []string{"RFC " + entry.ID, "RFC" + entry.ID}, Keywords: append(append([]string(nil), entry.Keywords...), entry.Stream, entry.Status), Status: rfcLifecycleStatus(entry), RankWeight: rankWeight, Metadata: map[string]string{"status": entry.Status, "authors": strings.Join(entry.Authors, " "), "date": entry.Date, "stream": entry.Stream}}
+		record.Temporal.PublishedAt, record.Temporal.PublishedPrecision = rfcPublishedDate(entry.Date)
 		if body {
 			data, err := os.ReadFile(filepath.Join(c.path, "raw", entry.ID+".txt"))
 			if err != nil {
@@ -189,7 +190,7 @@ func (c *rfcCorpus) Read(_ context.Context, record provider.Record, options mode
 	if options.AlignBoundaries && end < len(runes) {
 		end = rfcReadableChunkEnd(runes, start, end)
 	}
-	document := model.Document{ID: record.ID, Title: entry.Title, URL: record.URL, Format: format, Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
+	document := model.Document{TemporalMetadata: record.Temporal, ID: record.ID, Title: entry.Title, URL: record.URL, Format: format, Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
 	document.Relationships = rfcRelationships(entry, c.baseURL)
 	if document.Title == "" {
 		document.Title = record.Title
@@ -211,6 +212,19 @@ func rfcReadableChunkEnd(content []rune, start, hardEnd int) int {
 }
 
 func (*rfcCorpus) Close() error { return nil }
+
+func rfcPublishedDate(value string) (*time.Time, string) {
+	for _, candidate := range []struct {
+		layout, precision string
+	}{{"January 2006", "month"}, {"Jan 2006", "month"}, {"2006", "year"}} {
+		parsed, err := time.Parse(candidate.layout, strings.TrimSpace(value))
+		if err == nil {
+			parsed = parsed.UTC()
+			return &parsed, candidate.precision
+		}
+	}
+	return nil, ""
+}
 
 func (p *RFC) Discover(ctx context.Context, filter string, refresh bool) ([]model.AvailableDataset, error) {
 	haystack := "rfc request for comments internet standards ietf irtf iab reference technical specifications"

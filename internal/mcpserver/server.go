@@ -67,6 +67,9 @@ type searchInput struct {
 	Limit            int    `json:"limit,omitempty" jsonschema:"result count; defaults to 10 and is capped at 50"`
 	IncludeSecondary bool   `json:"include_secondary,omitempty" jsonschema:"include provider-defined secondary records; for Wikimedia this includes project, category, draft, talk, and other namespaces"`
 	Snippets         *bool  `json:"snippets,omitempty" jsonschema:"include query-centered result passages; defaults to true"`
+	PublishedAfter   string `json:"published_after,omitempty" jsonschema:"inclusive publication-date lower bound as YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339; records without a publication date are excluded"`
+	PublishedBefore  string `json:"published_before,omitempty" jsonschema:"inclusive publication-date upper bound as YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339; records without a publication date are excluded"`
+	Sort             string `json:"sort,omitempty" jsonschema:"relevance (default), newest, or oldest; date sorting uses provider-supplied publication dates"`
 }
 
 type readInput struct {
@@ -139,7 +142,15 @@ func New(service Service) *mcp.Server {
 			return nil, model.SearchResult{}, errors.New("provide a non-empty query")
 		}
 		snippets := in.Snippets == nil || *in.Snippets
-		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Mode: in.Mode, Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets})
+		publishedAfter, err := parseSearchDate(in.PublishedAfter, false)
+		if err != nil {
+			return nil, model.SearchResult{}, fmt.Errorf("published_after: %w", err)
+		}
+		publishedBefore, err := parseSearchDate(in.PublishedBefore, true)
+		if err != nil {
+			return nil, model.SearchResult{}, fmt.Errorf("published_before: %w", err)
+		}
+		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Mode: in.Mode, Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets, PublishedAfter: publishedAfter, PublishedBefore: publishedBefore, Sort: in.Sort})
 		return nil, out, err
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a Markdown document using the opaque temporary ref returned by knowledge_search or an embedded link. Legacy dataset plus id/title arguments remain supported. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
@@ -168,6 +179,35 @@ func New(service Service) *mcp.Server {
 		return nil, out, err
 	})
 	return server
+}
+
+func parseSearchDate(value string, upper bool) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	for _, candidate := range []struct {
+		layout string
+		span   time.Duration
+	}{{time.RFC3339, 0}, {"2006-01-02", 24 * time.Hour}, {"2006-01", 0}, {"2006", 0}} {
+		parsed, err := time.Parse(candidate.layout, value)
+		if err != nil {
+			continue
+		}
+		if upper {
+			switch candidate.layout {
+			case "2006":
+				parsed = parsed.AddDate(1, 0, 0).Add(-time.Nanosecond)
+			case "2006-01":
+				parsed = parsed.AddDate(0, 1, 0).Add(-time.Nanosecond)
+			case "2006-01-02":
+				parsed = parsed.Add(candidate.span).Add(-time.Nanosecond)
+			}
+		}
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	return nil, errors.New("use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339")
 }
 
 func mustSchemaFor[T any]() *jsonschema.Schema {

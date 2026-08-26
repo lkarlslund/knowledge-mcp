@@ -403,6 +403,13 @@ func (p *EURLEX) downloadOnce(ctx context.Context, item entry, destination strin
 		return "", fmt.Errorf("download CELEX %s: %w", item.CELEX, err)
 	}
 	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode == http.StatusMultipleChoices {
+		choices, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		if readErr != nil {
+			return "", fmt.Errorf("read EUR-Lex choices for CELEX %s: %w", item.CELEX, readErr)
+		}
+		return "", p.downloadChoices(ctx, item, partial, destination, choices, request.URL)
+	}
 	flags := os.O_CREATE | os.O_WRONLY
 	if response.StatusCode == http.StatusPartialContent && offset > 0 {
 		flags |= os.O_APPEND
@@ -424,6 +431,80 @@ func (p *EURLEX) downloadOnce(ctx context.Context, item entry, destination strin
 		return "", closeErr
 	}
 	return "", os.Rename(partial, destination)
+}
+
+func (p *EURLEX) downloadChoices(ctx context.Context, item entry, partial, destination string, source []byte, base *url.URL) error {
+	document, err := html.Parse(bytes.NewReader(source))
+	if err != nil {
+		return fmt.Errorf("parse EUR-Lex choices for CELEX %s: %w", item.CELEX, err)
+	}
+	var choices []*url.URL
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			if href := attribute(node, "href"); href != "" {
+				if parsed, parseErr := url.Parse(href); parseErr == nil {
+					resolved := base.ResolveReference(parsed)
+					if resolved.Host == base.Host || strings.EqualFold(resolved.Host, "publications.europa.eu") {
+						resolved.Scheme = base.Scheme
+						choices = append(choices, resolved)
+					}
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(document)
+	if len(choices) == 0 || len(choices) > 100 {
+		return fmt.Errorf("download CELEX %s: 300 response contained %d usable document parts", item.CELEX, len(choices))
+	}
+	file, err := os.OpenFile(partial, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	failed := true
+	defer func() {
+		_ = file.Close()
+		if failed {
+			_ = os.Remove(partial)
+		}
+	}()
+	if _, err := io.WriteString(file, "<html><body>\n"); err != nil {
+		return err
+	}
+	for _, choice := range choices {
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, choice.String(), nil)
+		if requestErr != nil {
+			return requestErr
+		}
+		request.Header.Set("Accept", "application/xhtml+xml, text/html;q=0.9")
+		response, responseErr := p.http.Do(request)
+		if responseErr != nil {
+			return fmt.Errorf("download EUR-Lex part for CELEX %s: %w", item.CELEX, responseErr)
+		}
+		if response.StatusCode != http.StatusOK {
+			_ = response.Body.Close()
+			return fmt.Errorf("download EUR-Lex part for CELEX %s: %s", item.CELEX, response.Status)
+		}
+		_, copyErr := io.Copy(file, response.Body)
+		closeErr := response.Body.Close()
+		if copyErr != nil || closeErr != nil {
+			return errors.Join(copyErr, closeErr)
+		}
+		if _, err := io.WriteString(file, "\n<hr/>\n"); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(file, "</body></html>\n"); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	failed = false
+	return os.Rename(partial, destination)
 }
 
 func linkOrCopy(source, destination string) error {
@@ -485,6 +566,10 @@ func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provi
 		}
 		item := c.entries[i]
 		record := provider.Record{ID: item.CELEX, Title: item.Title, URL: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:" + item.CELEX, Locator: item.CELEX, Primary: true, Identifiers: []string{"CELEX " + item.CELEX}, Keywords: []string{"European Union law"}, RankWeight: 1, Metadata: map[string]string{"date": item.Date}}
+		if parsed, err := time.Parse("2006-01-02", item.Date); err == nil {
+			parsed = parsed.UTC()
+			record.Temporal.PublishedAt, record.Temporal.PublishedPrecision = &parsed, "day"
+		}
 		if bodies {
 			data, err := os.ReadFile(filepath.Join(c.path, "raw", item.CELEX+".xhtml"))
 			if err != nil {
@@ -531,7 +616,7 @@ func makeDocument(record provider.Record, content string, options model.ReadOpti
 	}
 	start := min(max(options.Offset, 0), len(runes))
 	end := min(start+maximum, len(runes))
-	result := model.Document{ID: record.ID, Title: record.Title, URL: record.URL, Format: "markdown", Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
+	result := model.Document{TemporalMetadata: record.Temporal, ID: record.ID, Title: record.Title, URL: record.URL, Format: "markdown", Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
 	if result.Truncated {
 		result.NextOffset = end
 	}
