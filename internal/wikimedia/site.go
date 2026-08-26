@@ -32,7 +32,7 @@ type matrixLanguage struct {
 	Sites     []matrixSite `json:"site"`
 }
 
-func (c *Client) SiteMetadata(ctx context.Context, wiki string) model.WikiSiteMetadata {
+func (c *Client) SiteMetadata(ctx context.Context, wiki string) model.DatasetMetadata {
 	metadata := inferSiteMetadata(wiki)
 	if sites, err := c.loadSiteMatrix(ctx); err == nil {
 		if found, ok := sites[wiki]; ok {
@@ -45,7 +45,7 @@ func (c *Client) SiteMetadata(ctx context.Context, wiki string) model.WikiSiteMe
 	return metadata
 }
 
-func (c *Client) loadSiteMatrix(ctx context.Context) (map[string]model.WikiSiteMetadata, error) {
+func (c *Client) loadSiteMatrix(ctx context.Context) (map[string]model.DatasetMetadata, error) {
 	c.mu.Lock()
 	if len(c.sites) > 0 && time.Since(c.sitesCached) < 24*time.Hour {
 		sites := cloneSites(c.sites)
@@ -73,7 +73,7 @@ func (c *Client) loadSiteMatrix(ctx context.Context) (map[string]model.WikiSiteM
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&response); err != nil {
 		return nil, err
 	}
-	languages := make(map[string]model.WikiLanguage)
+	languages := make(map[string]model.Language)
 	var groups []matrixLanguage
 	for key, raw := range response.SiteMatrix {
 		if key == "count" || key == "specials" {
@@ -84,9 +84,9 @@ func (c *Client) loadSiteMatrix(ctx context.Context) (map[string]model.WikiSiteM
 			continue
 		}
 		groups = append(groups, group)
-		languages[group.Code] = model.WikiLanguage{Code: group.Code, Name: group.LocalName, LocalName: group.Name, Direction: group.Direction}
+		languages[group.Code] = model.Language{Code: group.Code, Name: group.LocalName, LocalName: group.Name, Direction: group.Direction}
 	}
-	sites := make(map[string]model.WikiSiteMetadata)
+	sites := make(map[string]model.DatasetMetadata)
 	for _, group := range groups {
 		for _, site := range group.Sites {
 			sites[site.DBName] = matrixMetadata(site, languages[group.Code])
@@ -112,26 +112,26 @@ type httpStatusError struct{ status string }
 
 func (e *httpStatusError) Error() string { return e.status }
 
-func cloneSites(source map[string]model.WikiSiteMetadata) map[string]model.WikiSiteMetadata {
-	result := make(map[string]model.WikiSiteMetadata, len(source))
+func cloneSites(source map[string]model.DatasetMetadata) map[string]model.DatasetMetadata {
+	result := make(map[string]model.DatasetMetadata, len(source))
 	for wiki, metadata := range source {
 		result[wiki] = metadata
 	}
 	return result
 }
 
-func matrixMetadata(site matrixSite, language model.WikiLanguage) model.WikiSiteMetadata {
+func matrixMetadata(site matrixSite, language model.Language) model.DatasetMetadata {
 	project := normalizeProject(site.Code)
 	name := site.SiteName
 	if language.Name != "" && isGenericProjectName(site.SiteName, project) {
 		name = language.Name + " " + site.SiteName
 	}
-	return model.WikiSiteMetadata{Name: name, Project: project, ContentType: projectContentType(project), Language: language, OnlineSourceURL: site.URL, Closed: site.Closed}
+	return model.DatasetMetadata{Name: name, Project: project, ContentType: projectContentType(project), Language: language, OnlineSourceURL: site.URL, Closed: site.Closed}
 }
 
-func inferSiteMetadata(wiki string) model.WikiSiteMetadata {
+func inferSiteMetadata(wiki string) model.DatasetMetadata {
 	project, code := projectFromWiki(wiki)
-	return model.WikiSiteMetadata{Project: project, ContentType: projectContentType(project), Language: model.WikiLanguage{Code: code}}
+	return model.DatasetMetadata{Project: project, ContentType: projectContentType(project), Language: model.Language{Code: code}}
 }
 
 func projectFromWiki(wiki string) (string, string) {
@@ -172,7 +172,7 @@ func isGenericProjectName(name, project string) bool {
 	return strings.EqualFold(name, project) || project == "wikipedia" && strings.EqualFold(name, "Wikipedia")
 }
 
-func (c *Client) loadSiteInfo(ctx context.Context, metadata model.WikiSiteMetadata) (model.WikiSiteMetadata, error) {
+func (c *Client) loadSiteInfo(ctx context.Context, metadata model.DatasetMetadata) (model.DatasetMetadata, error) {
 	parsed, err := url.Parse(metadata.OnlineSourceURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return metadata, err
@@ -217,13 +217,13 @@ func (c *Client) loadSiteInfo(ctx context.Context, metadata model.WikiSiteMetada
 	} else if metadata.Language.Direction == "" {
 		metadata.Language.Direction = "ltr"
 	}
-	metadata.ContentArticles = response.Query.Statistics.Articles
+	metadata.SourceDocuments = response.Query.Statistics.Articles
 	metadata.License, metadata.LicenseURL = response.Query.Rights.Text, response.Query.Rights.URL
 	metadata.MetadataUpdatedAt = time.Now().UTC()
 	return metadata, nil
 }
 
-func ReadDumpSiteMetadata(ctx context.Context, wiki, path string) model.WikiSiteMetadata {
+func ReadDumpSiteMetadata(ctx context.Context, wiki, path string) model.DatasetMetadata {
 	metadata := inferSiteMetadata(wiki)
 	f, err := os.Open(path)
 	if err != nil {

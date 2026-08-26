@@ -807,7 +807,7 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	if fullText {
 		recall = strictRecallQuery(query)
 	}
-	if fullText && !options.IncludeNonArticles {
+	if fullText && !options.IncludeSecondary {
 		ranked = namespaceZeroQuery(ranked)
 		recall = namespaceZeroQuery(recall)
 	}
@@ -852,14 +852,14 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 		}
 	}
 	matchedRedirectPageIDs := make(map[uint64]struct{})
-	if exact, matchedPageID, ok := r.exactCanonicalSearchHit(ctx, query, options.IncludeNonArticles); ok {
+	if exact, matchedPageID, ok := r.exactCanonicalSearchHit(ctx, query, options.IncludeSecondary); ok {
 		exact.Score = highestSearchScore(candidates) + 1
 		candidates = append([]model.SearchHit{exact}, candidates...)
 		if matchedPageID != 0 {
 			matchedRedirectPageIDs[matchedPageID] = struct{}{}
 		}
 	} else if fullText {
-		embedded, matchedPageIDs := r.embeddedCanonicalSearchHits(ctx, query, options.IncludeNonArticles)
+		embedded, matchedPageIDs := r.embeddedCanonicalSearchHits(ctx, query, options.IncludeSecondary)
 		if len(embedded) > 0 {
 			insertAt := min(1, len(candidates))
 			tierScore := embeddedSearchScore(candidates, insertAt)
@@ -880,18 +880,18 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	if err := loadSearchHitMetadata(ctx, idx, hits); err != nil {
 		return model.SearchResult{}, err
 	}
-	result := model.SearchResult{Query: query, SearchMode: mode, Total: total, Offset: options.Offset, NamespaceFilterApplied: fullText && !options.IncludeNonArticles, SnippetsAvailable: fullText, SnippetsComplete: fullText, Hits: hits}
+	result := model.SearchResult{Query: query, SearchMode: mode, Total: total, Offset: options.Offset, PrimaryFilterApplied: fullText && !options.IncludeSecondary, SnippetsAvailable: fullText, SnippetsComplete: fullText, Hits: hits}
 	if options.Offset+len(hits) < int(total) {
 		result.NextOffset = options.Offset + len(hits)
 	}
 	if fullText && options.Snippets && r.title != nil {
 		pageIDs := make([]uint64, 0, len(result.Hits))
 		for _, hit := range result.Hits {
-			pageIDs = append(pageIDs, hit.PageID)
+			pageIDs = append(pageIDs, hit.NumericID)
 		}
 		pages := r.loadPagesByID(ctx, pageIDs)
 		for index := range result.Hits {
-			page, ok := pages[result.Hits[index].PageID]
+			page, ok := pages[result.Hits[index].NumericID]
 			if !ok {
 				result.SnippetsComplete = false
 				result.SnippetErrors++
@@ -940,7 +940,7 @@ func (r *Reader) exactCanonicalSearchHit(ctx context.Context, query string, incl
 	} else {
 		matchedPageID = 0
 	}
-	return model.SearchHit{PageID: page.ID, Title: page.Title, Namespace: page.Namespace, MatchMode: mode, MatchedTitle: matchedTitle}, matchedPageID, true
+	return model.SearchHit{NumericID: page.ID, Title: page.Title, Namespace: page.Namespace, MatchMode: mode, MatchedTitle: matchedTitle}, matchedPageID, true
 }
 
 func highestSearchScore(hits []model.SearchHit) float64 {
@@ -967,13 +967,13 @@ func deduplicateSearchHits(hits []model.SearchHit, excludedPageIDs map[uint64]st
 	seenPageIDs := make(map[uint64]struct{}, len(hits))
 	result := make([]model.SearchHit, 0, len(hits))
 	for _, hit := range hits {
-		if _, excluded := excludedPageIDs[hit.PageID]; excluded {
+		if _, excluded := excludedPageIDs[hit.NumericID]; excluded {
 			continue
 		}
-		if _, exists := seenPageIDs[hit.PageID]; exists {
+		if _, exists := seenPageIDs[hit.NumericID]; exists {
 			continue
 		}
-		seenPageIDs[hit.PageID] = struct{}{}
+		seenPageIDs[hit.NumericID] = struct{}{}
 		result = append(result, hit)
 	}
 	return result
@@ -991,22 +991,22 @@ func fuseSearchHits(primary, broad []model.SearchHit) []model.SearchHit {
 	seen := make(map[uint64]struct{}, len(primary)+len(broad))
 	for _, hit := range primary[:protected] {
 		result = append(result, hit)
-		seen[hit.PageID] = struct{}{}
+		seen[hit.NumericID] = struct{}{}
 	}
 	fused := make(map[uint64]fusedHit, len(primary)+len(broad))
 	for index, hit := range primary[protected:] {
-		fused[hit.PageID] = fusedHit{hit: hit, score: 1 / (rankOffset + float64(index+1))}
+		fused[hit.NumericID] = fusedHit{hit: hit, score: 1 / (rankOffset + float64(index+1))}
 	}
 	for index, hit := range broad {
-		if _, exists := seen[hit.PageID]; exists {
+		if _, exists := seen[hit.NumericID]; exists {
 			continue
 		}
-		item, exists := fused[hit.PageID]
+		item, exists := fused[hit.NumericID]
 		if !exists {
 			item.hit = hit
 		}
 		item.score += 1 / (rankOffset + float64(index+1))
-		fused[hit.PageID] = item
+		fused[hit.NumericID] = item
 	}
 	tail := make([]model.SearchHit, 0, len(fused))
 	for _, item := range fused {
@@ -1017,7 +1017,7 @@ func fuseSearchHits(primary, broad []model.SearchHit) []model.SearchHit {
 		if left.Score != right.Score {
 			return cmp.Compare(right.Score, left.Score)
 		}
-		return cmp.Compare(left.PageID, right.PageID)
+		return cmp.Compare(left.NumericID, right.NumericID)
 	})
 	result = append(result, tail...)
 	for index := range result {
@@ -1096,10 +1096,10 @@ func (r *Reader) embeddedCanonicalSearchHits(ctx context.Context, query string, 
 		if !ok || hit.MatchMode != "exact_redirect" {
 			continue
 		}
-		if _, exists := seen[hit.PageID]; exists {
+		if _, exists := seen[hit.NumericID]; exists {
 			continue
 		}
-		seen[hit.PageID] = struct{}{}
+		seen[hit.NumericID] = struct{}{}
 		hit.MatchMode = "embedded_redirect"
 		hits = append(hits, hit)
 		if matchedPageID != 0 {
@@ -1293,7 +1293,7 @@ func searchTier(ctx context.Context, idx bleve.Index, query blevequery.Query, of
 		if math.IsNaN(score) || math.IsInf(score, 0) {
 			score = 0
 		}
-		hits = append(hits, model.SearchHit{PageID: pageID, Score: score, MatchMode: matchMode})
+		hits = append(hits, model.SearchHit{NumericID: pageID, Score: score, MatchMode: matchMode})
 	}
 	return hits, nil
 }
@@ -1305,8 +1305,8 @@ func loadSearchHitMetadata(ctx context.Context, idx bleve.Index, hits []model.Se
 	docIDs := make([]string, 0, len(hits))
 	positions := make(map[uint64]int, len(hits))
 	for index, hit := range hits {
-		docIDs = append(docIDs, strconv.FormatUint(hit.PageID, 10))
-		positions[hit.PageID] = index
+		docIDs = append(docIDs, strconv.FormatUint(hit.NumericID, 10))
+		positions[hit.NumericID] = index
 	}
 	request := bleve.NewSearchRequestOptions(bleve.NewDocIDQuery(docIDs), len(docIDs), 0, false)
 	request.Fields = []string{"title", "namespace"}
@@ -1398,25 +1398,25 @@ func querySnippet(content, query string, maximum int) string {
 	return snippet
 }
 
-func ReadPage(generationPath, title string, pageID uint64, format string, start, maxChars int) (model.Page, error) {
+func ReadPage(generationPath, title string, pageID uint64, format string, start, maxChars int) (model.Document, error) {
 	reader, err := OpenReader(generationPath, false)
 	if err != nil {
-		return model.Page{}, err
+		return model.Document{}, err
 	}
 	defer func() { _ = reader.Close() }()
 	return reader.ReadPage(context.Background(), title, pageID, model.ReadOptions{Format: format, Offset: start, MaxChars: maxChars, FollowRedirects: true}, "")
 }
 
-func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, options model.ReadOptions, baseURL string) (model.Page, error) {
+func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, options model.ReadOptions, baseURL string) (model.Document, error) {
 	if title == "" && pageID == 0 || title != "" && pageID != 0 {
-		return model.Page{}, errors.New("provide exactly one of title or page_id")
+		return model.Document{}, errors.New("provide exactly one of title or page_id")
 	}
 	if r.title == nil {
-		return model.Page{}, errors.New("title index is not open")
+		return model.Document{}, errors.New("title index is not open")
 	}
 	source, err := r.loadPage(ctx, title, pageID)
 	if err != nil {
-		return model.Page{}, err
+		return model.Document{}, err
 	}
 	requestedTitle, requestedPageID := source.Title, source.ID
 	visited := map[uint64]struct{}{source.ID: {}}
@@ -1424,7 +1424,7 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 	redirectSection := ""
 	for target := redirectTarget(source); target != ""; target = redirectTarget(source) {
 		targetTitle, fragment := splitRedirectTarget(target)
-		chain = append(chain, model.RedirectHop{FromTitle: source.Title, FromPageID: source.ID, ToTitle: targetTitle, Fragment: fragment})
+		chain = append(chain, model.RedirectHop{FromTitle: source.Title, FromNumericID: source.ID, ToTitle: targetTitle, Fragment: fragment})
 		if fragment != "" {
 			redirectSection = fragment
 		}
@@ -1432,14 +1432,14 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 			break
 		}
 		if len(chain) > 8 {
-			return model.Page{}, fmt.Errorf("redirect chain from %q exceeds 8 hops", requestedTitle)
+			return model.Document{}, fmt.Errorf("redirect chain from %q exceeds 8 hops", requestedTitle)
 		}
 		source, err = r.loadPage(ctx, targetTitle, 0)
 		if err != nil {
-			return model.Page{}, fmt.Errorf("follow redirect from %q to %q: %w", chain[len(chain)-1].FromTitle, targetTitle, err)
+			return model.Document{}, fmt.Errorf("follow redirect from %q to %q: %w", chain[len(chain)-1].FromTitle, targetTitle, err)
 		}
 		if _, exists := visited[source.ID]; exists {
-			return model.Page{}, fmt.Errorf("redirect loop from %q through %q", requestedTitle, source.Title)
+			return model.Document{}, fmt.Errorf("redirect loop from %q through %q", requestedTitle, source.Title)
 		}
 		visited[source.ID] = struct{}{}
 	}
@@ -1455,7 +1455,7 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 	switch options.Format {
 	case "", "markdown":
 		linkBaseURL := baseURL
-		if options.LinkWiki != "" {
+		if options.LinkDataset != "" {
 			linkBaseURL = ""
 		}
 		document := RenderMarkdown(content, linkBaseURL)
@@ -1488,7 +1488,7 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 			}
 		}
 	default:
-		return model.Page{}, errors.New("format must be markdown, text, or wikitext")
+		return model.Document{}, errors.New("format must be markdown, text, or wikitext")
 	}
 	if options.Offset < 0 {
 		options.Offset = 0
@@ -1507,7 +1507,7 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 		end = readableChunkEnd(runes, options.Offset, end)
 	}
 	excerpt := string(runes[options.Offset:end])
-	pageReferences := make([]model.PageReference, 0)
+	pageReferences := make([]model.DocumentReference, 0)
 	referencesTruncated := false
 	var omittedReferenceIDs []int
 	referenceBudget := options.ReferenceBudgetChars
@@ -1527,17 +1527,17 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 			continue
 		}
 		truncated := allowed < len(original)
-		pageReferences = append(pageReferences, model.PageReference{ID: reference.ID, Name: reference.Name, Content: string(original[:allowed]), Truncated: truncated, OriginalChars: len(original)})
+		pageReferences = append(pageReferences, model.DocumentReference{ID: reference.ID, Name: reference.Name, Content: string(original[:allowed]), Truncated: truncated, OriginalChars: len(original)})
 		referenceBudget -= allowed
 		referencesTruncated = referencesTruncated || truncated
 	}
-	if options.Format == "markdown" && options.LinkWiki != "" {
+	if options.Format == "markdown" && options.LinkDataset != "" {
 		documents := make([]string, 1, len(pageReferences)+1)
 		documents[0] = excerpt
 		for _, reference := range pageReferences {
 			documents = append(documents, reference.Content)
 		}
-		documents = r.rewriteWikiReadLinks(ctx, options.LinkWiki, source.ID, documents)
+		documents = r.rewriteWikiReadLinks(ctx, options.LinkDataset, source.ID, documents)
 		excerpt = documents[0]
 		for index := range pageReferences {
 			pageReferences[index].Content = documents[index+1]
@@ -1549,7 +1549,7 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 		pageURLTarget += "#" + section
 		returnedSection = section
 	}
-	page := model.Page{PageID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, PageURL: PageURL(baseURL, pageURLTarget), Redirected: len(chain) > 0, RedirectChain: chain, Section: returnedSection, SectionFound: sectionFound, Format: options.Format, Content: excerpt, Offset: options.Offset, ReturnedChars: end - options.Offset, TotalChars: len(runes), References: pageReferences, ReferencesTruncated: referencesTruncated, OmittedReferenceIDs: omittedReferenceIDs, Truncated: end < len(runes)}
+	page := model.Document{NumericID: source.ID, RevisionID: source.Revision.ID, Title: source.Title, Timestamp: source.Revision.Timestamp, URL: URL(baseURL, pageURLTarget), Redirected: len(chain) > 0, RedirectChain: chain, Section: returnedSection, SectionFound: sectionFound, Format: options.Format, Content: excerpt, Offset: options.Offset, ReturnedChars: end - options.Offset, TotalChars: len(runes), References: pageReferences, ReferencesTruncated: referencesTruncated, OmittedReferenceIDs: omittedReferenceIDs, Truncated: end < len(runes)}
 	if page.Truncated {
 		page.NextOffset = end
 	}
@@ -1561,7 +1561,7 @@ func (r *Reader) ReadPage(ctx context.Context, title string, pageID uint64, opti
 		}
 	}
 	if len(chain) > 0 {
-		page.RequestedTitle, page.RequestedPageID = requestedTitle, requestedPageID
+		page.RequestedTitle, page.RequestedNumericID = requestedTitle, requestedPageID
 	}
 	return page, nil
 }
@@ -1634,12 +1634,12 @@ func (r *Reader) resolveWikiLinkPageIDs(ctx context.Context, targets map[string]
 	return resolved
 }
 
-func wikiReadLink(wiki, title string, pageID uint64, section string) (string, string) {
-	destination := "wiki-read://read?wiki=" + url.QueryEscape(wiki)
-	hint := "Call wiki_read with wiki=" + wiki
+func wikiReadLink(dataset, title string, pageID uint64, section string) (string, string) {
+	destination := "knowledge-read://read?dataset=" + url.QueryEscape(dataset)
+	hint := "Call knowledge_read with dataset=" + dataset
 	if pageID != 0 {
-		destination += "&page_id=" + strconv.FormatUint(pageID, 10)
-		hint += " and page_id=" + strconv.FormatUint(pageID, 10)
+		destination += "&id=" + strconv.FormatUint(pageID, 10)
+		hint += " and id=" + strconv.FormatUint(pageID, 10)
 	} else {
 		destination += "&title=" + url.QueryEscape(title)
 		hint += " and title=" + title
@@ -1793,8 +1793,8 @@ func normalizeSectionHeading(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
-func pageSectionOutline(content string) []model.PageSection {
-	sections := make([]model.PageSection, 0)
+func pageSectionOutline(content string) []model.DocumentSection {
+	sections := make([]model.DocumentSection, 0)
 	for _, line := range strings.Split(content, "\n") {
 		level, heading, ok := wikiHeading(line)
 		if !ok {
@@ -1804,7 +1804,7 @@ func pageSectionOutline(content string) []model.PageSection {
 		if heading == "" {
 			continue
 		}
-		sections = append(sections, model.PageSection{Heading: heading, Anchor: strings.ReplaceAll(strings.Join(strings.Fields(heading), " "), " ", "_"), Level: level})
+		sections = append(sections, model.DocumentSection{Heading: heading, Anchor: strings.ReplaceAll(strings.Join(strings.Fields(heading), " "), " ", "_"), Level: level})
 	}
 	return sections
 }

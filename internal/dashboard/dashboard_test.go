@@ -21,22 +21,22 @@ type fakeService struct {
 }
 
 func (f *fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
-	return model.AvailableResult{Wikis: []model.OnlineWiki{{Name: "testwiki", Available: true}}}, nil
+	return model.AvailableResult{Datasets: []model.AvailableDataset{{ID: "testwiki", Available: true}}}, nil
 }
-func (f *fakeService) ListLocal() ([]model.LocalWiki, error) {
+func (f *fakeService) ListLocal() ([]model.LocalDataset, error) {
 	f.listCalls.Add(1)
-	return []model.LocalWiki{{Manifest: model.Manifest{Wiki: "testwiki", TitleReady: true}}}, nil
+	return []model.LocalDataset{{Manifest: model.Manifest{Dataset: "testwiki", TitleReady: true}}}, nil
 }
-func (f *fakeService) ListUpgrades(context.Context) ([]model.OnlineWiki, error) {
-	return []model.OnlineWiki{{Name: "testwiki", Installed: true, UpdateAvailable: true}}, nil
+func (f *fakeService) ListUpgrades(context.Context) ([]model.AvailableDataset, error) {
+	return []model.AvailableDataset{{ID: "testwiki", Installed: true, UpdateAvailable: true}}, nil
 }
 func (f *fakeService) ListJobs() []model.Job { return []model.Job{{ID: "job-1"}} }
-func (f *fakeService) Submit(wiki, kind string) (model.Job, error) {
-	f.submitted = wiki + "/" + kind
-	return model.Job{ID: "job-2", Wiki: wiki, Kind: kind}, nil
+func (f *fakeService) Submit(dataset, variant, kind string) (model.Job, error) {
+	f.submitted = dataset + "/" + kind
+	return model.Job{ID: "job-2", Dataset: dataset, Kind: kind}, nil
 }
-func (f *fakeService) DeleteWiki(wiki string) error {
-	f.submitted = wiki + "/delete"
+func (f *fakeService) DeleteDataset(dataset string) error {
+	f.submitted = dataset + "/delete"
 	return nil
 }
 func (f *fakeService) JobAction(id, action string) (model.Job, error) {
@@ -95,32 +95,32 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Wikipedia Multistream MCP") || !strings.Contains(page.Body.String(), `href="https://github.com/lkarlslund/wikipedia-multistream-mcp"`) || !strings.Contains(page.Body.String(), `aria-label="View Wikipedia Multistream on GitHub"`) || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || strings.Contains(page.Body.String(), "Search-ready") || !strings.Contains(page.Body.String(), "Total pages") || !strings.Contains(page.Body.String(), "bi-trash3") || !strings.Contains(page.Body.String(), `id="onlineWikisModal"`) || !strings.Contains(page.Body.String(), "limit=-1") || !strings.Contains(page.Body.String(), "All Languages") || !strings.Contains(page.Body.String(), "hideInstalled") || !strings.Contains(page.Body.String(), "filteredAvailable") || !strings.Contains(page.Body.String(), "dump index") || !strings.Contains(page.Body.String(), "storage-column") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Knowledge Dataset MCP") || !strings.Contains(page.Body.String(), `href="https://github.com/lkarlslund/wikipedia-multistream-mcp"`) || !strings.Contains(page.Body.String(), `aria-label="View Knowledge Dataset MCP on GitHub"`) || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || !strings.Contains(page.Body.String(), "Total documents") || !strings.Contains(page.Body.String(), "bi-trash3") || !strings.Contains(page.Body.String(), `id="onlineDatasetsModal"`) || !strings.Contains(page.Body.String(), "limit=-1") || !strings.Contains(page.Body.String(), "All Languages") || !strings.Contains(page.Body.String(), "hideInstalled") || !strings.Contains(page.Body.String(), "filteredAvailable") || !strings.Contains(page.Body.String(), "provider metadata") || !strings.Contains(page.Body.String(), "storage-column") {
 		t.Fatalf("unexpected dashboard response: %d %q", page.Code, page.Body.String())
 	}
 
 	forbidden := httptest.NewRecorder()
-	handler.ServeHTTP(forbidden, httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/wiki/testwiki/update", nil))
+	handler.ServeHTTP(forbidden, httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/dataset/testwiki/update", nil))
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("maintenance without header returned %d", forbidden.Code)
 	}
 
-	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/wiki/testwiki/update", nil)
-	request.Header.Set("X-Wikipedia-MCP", "1")
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/dataset/testwiki/update", nil)
+	request.Header.Set("X-Knowledge-MCP", "1")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || service.submitted != "testwiki/update" {
 		t.Fatalf("maintenance response %d, submitted %q", response.Code, service.submitted)
 	}
-	deleteRequest := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/wiki/testwiki/delete", nil)
-	deleteRequest.Header.Set("X-Wikipedia-MCP", "1")
+	deleteRequest := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/dataset/testwiki/delete", nil)
+	deleteRequest.Header.Set("X-Knowledge-MCP", "1")
 	deleteResponse := httptest.NewRecorder()
 	handler.ServeHTTP(deleteResponse, deleteRequest)
 	if deleteResponse.Code != http.StatusOK || service.submitted != "testwiki/delete" {
 		t.Fatalf("delete response %d, submitted %q", deleteResponse.Code, service.submitted)
 	}
 	jobRequest := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/job/job-1/pause", nil)
-	jobRequest.Header.Set("X-Wikipedia-MCP", "1")
+	jobRequest.Header.Set("X-Knowledge-MCP", "1")
 	jobResponse := httptest.NewRecorder()
 	handler.ServeHTTP(jobResponse, jobRequest)
 	if jobResponse.Code != http.StatusOK || service.submitted != "job-1/pause" {

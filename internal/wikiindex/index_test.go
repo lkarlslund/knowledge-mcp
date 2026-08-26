@@ -71,7 +71,7 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if err != nil {
 		t.Fatalf("ReadPage: %v", err)
 	}
-	if page.PageID != 2 || page.Content != "Beta contains a distinctive platypus phrase." {
+	if page.NumericID != 2 || page.Content != "Beta contains a distinctive platypus phrase." {
 		t.Fatalf("unexpected page: %#v", page)
 	}
 	markdownPage, err := ReadPage(dir, "Alpha Page", 0, "", 0, 1000)
@@ -109,14 +109,14 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	if err != nil {
 		t.Fatalf("body Search: %v", err)
 	}
-	if len(bodyResult.Hits) != 1 || bodyResult.Hits[0].PageID != 2 {
+	if len(bodyResult.Hits) != 1 || bodyResult.Hits[0].NumericID != 2 {
 		t.Fatalf("unexpected body hits: %#v", bodyResult.Hits)
 	}
 	exactResult, err := Search(dir, "Mette Frederiksen", 0, 10, true)
 	if err != nil {
 		t.Fatalf("exact-title Search: %v", err)
 	}
-	if len(exactResult.Hits) == 0 || exactResult.Hits[0].PageID != 5 {
+	if len(exactResult.Hits) == 0 || exactResult.Hits[0].NumericID != 5 {
 		t.Fatalf("exact-title hits: %#v", exactResult.Hits)
 	}
 	for _, hit := range exactResult.Hits {
@@ -125,14 +125,14 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 		}
 	}
 	redirectResult, err := Search(dir, "Alpha alias", 0, 10, true)
-	if err != nil || len(redirectResult.Hits) == 0 || redirectResult.Hits[0].PageID != 1 || redirectResult.Hits[0].Title != "Alpha Page" || redirectResult.Hits[0].MatchedTitle != "Alpha alias" || redirectResult.Hits[0].MatchMode != "exact_redirect" {
+	if err != nil || len(redirectResult.Hits) == 0 || redirectResult.Hits[0].NumericID != 1 || redirectResult.Hits[0].Title != "Alpha Page" || redirectResult.Hits[0].MatchedTitle != "Alpha alias" || redirectResult.Hits[0].MatchMode != "exact_redirect" {
 		t.Fatalf("exact redirect search = %#v, %v", redirectResult.Hits, err)
 	}
 	if math.IsNaN(redirectResult.Hits[0].Score) || math.IsInf(redirectResult.Hits[0].Score, 0) || redirectResult.Hits[0].Score <= 0 || redirectResult.Hits[0].Score >= 1_000 {
 		t.Fatalf("exact redirect score is not a finite hard-tier score: %#v", redirectResult.Hits)
 	}
 	for _, hit := range redirectResult.Hits[1:] {
-		if hit.PageID == redirectResult.Hits[0].PageID {
+		if hit.NumericID == redirectResult.Hits[0].NumericID {
 			t.Fatalf("canonical result was not deduplicated: %#v", redirectResult.Hits)
 		}
 	}
@@ -142,7 +142,7 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	}
 	embeddedRedirect, _ := embeddedReader.embeddedCanonicalSearchHits(context.Background(), "about Alpha alias", false)
 	_ = embeddedReader.Close()
-	if len(embeddedRedirect) == 0 || embeddedRedirect[0].PageID != 1 || embeddedRedirect[0].MatchedTitle != "Alpha alias" || embeddedRedirect[0].MatchMode != "embedded_redirect" {
+	if len(embeddedRedirect) == 0 || embeddedRedirect[0].NumericID != 1 || embeddedRedirect[0].MatchedTitle != "Alpha alias" || embeddedRedirect[0].MatchMode != "embedded_redirect" {
 		t.Fatalf("embedded redirect search = %#v", embeddedRedirect)
 	}
 	redirectNoise, err := Search(dir, "unique_redirect_stub_noise", 0, 10, true)
@@ -150,7 +150,7 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 		t.Fatalf("redirect stub text was indexed: %#v, %v", redirectNoise.Hits, err)
 	}
 	relevance, err := Search(dir, "Trump Frederiksen phone call Greenland", 0, 10, true)
-	if err != nil || len(relevance.Hits) < 2 || relevance.Hits[0].PageID != 5 || relevance.Hits[0].MatchMode != "bm25" || relevance.Hits[1].PageID != 6 || relevance.Hits[1].MatchMode != "bm25" {
+	if err != nil || len(relevance.Hits) < 2 || relevance.Hits[0].NumericID != 5 || relevance.Hits[0].MatchMode != "bm25" || relevance.Hits[1].NumericID != 6 || relevance.Hits[1].MatchMode != "bm25" {
 		t.Fatalf("all-term relevance ordering = %#v, %v", relevance.Hits, err)
 	}
 	if relevance.Hits[0].Namespace != 0 || !strings.Contains(relevance.Hits[0].Snippet, "Trump phone call") {
@@ -168,10 +168,10 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 		t.Fatalf("bounded first search page = %#v, %v", paged, err)
 	}
 	pagedNext, err := fullReader.Search(context.Background(), "phone call", model.SearchOptions{Offset: paged.NextOffset, Limit: 1}, true)
-	if err != nil || pagedNext.Total != paged.Total || len(pagedNext.Hits) != 1 || pagedNext.Hits[0].PageID == paged.Hits[0].PageID || pagedNext.NextOffset != 0 {
+	if err != nil || pagedNext.Total != paged.Total || len(pagedNext.Hits) != 1 || pagedNext.Hits[0].NumericID == paged.Hits[0].NumericID || pagedNext.NextOffset != 0 {
 		t.Fatalf("bounded second search page = %#v, %v", pagedNext, err)
 	}
-	withProjects, err := fullReader.Search(context.Background(), "Trump Frederiksen phone call Greenland", model.SearchOptions{Limit: 10, IncludeNonArticles: true}, true)
+	withProjects, err := fullReader.Search(context.Background(), "Trump Frederiksen phone call Greenland", model.SearchOptions{Limit: 10, IncludeSecondary: true}, true)
 	_ = fullReader.Close()
 	if err != nil || len(withProjects.Hits) < 2 || withProjects.Hits[0].Namespace != 4 {
 		t.Fatalf("non-article namespace search = %#v, %v", withProjects.Hits, err)
@@ -183,20 +183,20 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 	}
 	defer func() { _ = readReader.Close() }()
 	firstPooledRead, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true}, "")
-	if err != nil || firstPooledRead.PageID != 1 {
+	if err != nil || firstPooledRead.NumericID != 1 {
 		t.Fatalf("first pooled page read = %#v, %v", firstPooledRead, err)
 	}
 	secondPooledRead, err := readReader.ReadPage(context.Background(), "Beta: Details", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true}, "")
-	if err != nil || secondPooledRead.PageID != 2 {
+	if err != nil || secondPooledRead.NumericID != 2 {
 		t.Fatalf("second pooled page read = %#v, %v", secondPooledRead, err)
 	}
-	linkedPage, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", LinkWiki: "enwiki", MaxChars: 1000, FollowRedirects: true}, "https://en.wikipedia.org")
+	linkedPage, err := readReader.ReadPage(context.Background(), "Alpha Page", 0, model.ReadOptions{Format: "markdown", LinkDataset: "enwiki", MaxChars: 1000, FollowRedirects: true}, "https://en.wikipedia.org")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`[known page](wiki-read://read?wiki=enwiki&page_id=2&section=Overview "Call wiki_read with wiki=enwiki and page_id=2 and section=Overview")`,
-		`[useful label](wiki-read://read?wiki=enwiki&title=Useful+link "Call wiki_read with wiki=enwiki and title=Useful link")`,
+		`[known page](knowledge-read://read?dataset=enwiki&id=2&section=Overview "Call knowledge_read with dataset=enwiki and id=2 and section=Overview")`,
+		`[useful label](knowledge-read://read?dataset=enwiki&title=Useful+link "Call knowledge_read with dataset=enwiki and title=Useful link")`,
 	} {
 		if !strings.Contains(linkedPage.Content, want) {
 			t.Errorf("linked Markdown does not contain %q:\n%s", want, linkedPage.Content)
@@ -244,10 +244,10 @@ unique_redirect_stub_noise</text></revision></page><page><title>Alpha double ali
 
 func TestFuseSearchHitsPreservesPrimaryAndRecoversBroadCandidates(t *testing.T) {
 	t.Parallel()
-	primary := []model.SearchHit{{PageID: 1, MatchMode: "bm25"}, {PageID: 2, MatchMode: "bm25"}}
-	broad := []model.SearchHit{{PageID: 2, MatchMode: "bm25_recall"}, {PageID: 3, MatchMode: "bm25_recall"}}
+	primary := []model.SearchHit{{NumericID: 1, MatchMode: "bm25"}, {NumericID: 2, MatchMode: "bm25"}}
+	broad := []model.SearchHit{{NumericID: 2, MatchMode: "bm25_recall"}, {NumericID: 3, MatchMode: "bm25_recall"}}
 	got := fuseSearchHits(primary, broad)
-	if len(got) != 3 || got[0].PageID != 1 || got[1].PageID != 2 || got[2].PageID != 3 {
+	if len(got) != 3 || got[0].NumericID != 1 || got[1].NumericID != 2 || got[2].NumericID != 3 {
 		t.Fatalf("fused hits = %#v", got)
 	}
 	if got[0].MatchMode != "bm25" || got[2].MatchMode != "bm25_recall" {
@@ -499,7 +499,7 @@ func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Hits) == 0 || result.Hits[0].PageID != uint64(pageID) {
+		if len(result.Hits) == 0 || result.Hits[0].NumericID != uint64(pageID) {
 			t.Fatalf("resumed index missing page %d: %#v", pageID, result.Hits)
 		}
 	}
@@ -553,7 +553,7 @@ func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Hits) == 0 || result.Hits[0].PageID != pageCount {
+	if len(result.Hits) == 0 || result.Hits[0].NumericID != pageCount {
 		t.Fatalf("resumed title index missing final page: %#v", result.Hits)
 	}
 }

@@ -14,6 +14,9 @@ import (
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpclient"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	rfcprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/rfc"
+	wikimediaprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/wikimedia"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/store"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
 	"github.com/spf13/cobra"
@@ -29,17 +32,20 @@ func Execute() error {
 	opts := &options{}
 	root := &cobra.Command{
 		Use:           "wikipedia-multistream-mcp",
-		Short:         "Search local Wikimedia multistream dumps through MCP",
+		Short:         "Search locally indexed knowledge datasets through MCP",
 		Version:       mcpserver.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	defaultServer := os.Getenv("WIKIPEDIA_MULTISTREAM_MCP_SERVER")
+	defaultServer := os.Getenv("KNOWLEDGE_DATASET_MCP_SERVER")
+	if defaultServer == "" {
+		defaultServer = os.Getenv("WIKIPEDIA_MULTISTREAM_MCP_SERVER")
+	}
 	if defaultServer == "" {
 		defaultServer = defaultEndpoint
 	}
 	root.PersistentFlags().StringVar(&opts.server, "server", defaultServer, "running MCP endpoint")
-	root.AddCommand(newServeCommand(), newMCPCommand(opts), newWikiCommand(opts), newSearchCommand(opts), newReadCommand(opts))
+	root.AddCommand(newServeCommand(), newMCPCommand(opts), newDatasetCommand(opts), newSearchCommand(opts), newReadCommand(opts))
 	return root.Execute()
 }
 
@@ -53,7 +59,11 @@ func newServeCommand() *cobra.Command {
 			if err := requireLoopback(listen); err != nil {
 				return err
 			}
-			backend, err := store.Open(dataDir, wikimedia.NewClient(downloadConnections), store.Options{DownloadWorkers: downloadWorkers, IndexWorkers: indexWorkers})
+			providers, err := provider.NewRegistry(wikimediaprovider.New(wikimedia.NewClient(downloadConnections)), rfcprovider.New())
+			if err != nil {
+				return err
+			}
+			backend, err := store.Open(dataDir, providers, store.Options{DownloadWorkers: downloadWorkers, IndexWorkers: indexWorkers})
 			if err != nil {
 				return err
 			}
@@ -89,14 +99,14 @@ func newMCPCommand(opts *options) *cobra.Command {
 	return mcpCommand
 }
 
-func newWikiCommand(opts *options) *cobra.Command {
-	wiki := &cobra.Command{Use: "wiki", Short: "Discover and manage local wikis"}
+func newDatasetCommand(opts *options) *cobra.Command {
+	datasets := &cobra.Command{Use: "dataset", Short: "Discover and manage knowledge datasets"}
 	var filter string
 	var offset, limit int
 	var refresh bool
 	available := &cobra.Command{
 		Use:   "available [filter]",
-		Short: "List online multistream dumps",
+		Short: "List datasets offered by all providers",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -113,7 +123,7 @@ func newWikiCommand(opts *options) *cobra.Command {
 	available.Flags().BoolVar(&refresh, "refresh", false, "refresh online catalog metadata")
 	list := &cobra.Command{
 		Use:   "list",
-		Short: "List local wikis",
+		Short: "List local datasets",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
 				result, err := client.ListLocal()
@@ -122,19 +132,22 @@ func newWikiCommand(opts *options) *cobra.Command {
 		},
 	}
 	submit := func(kind string) *cobra.Command {
-		return &cobra.Command{
-			Use:   kind + " WIKI",
-			Short: "Submit a background wiki " + kind + " and return its job ID",
+		var variant string
+		command := &cobra.Command{
+			Use:   kind + " DATASET",
+			Short: "Submit a background dataset " + kind + " and return its job ID",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-					result, err := client.Submit(args[0], kind)
+					result, err := client.Submit(args[0], variant, kind)
 					return printResult(result, err)
 				})
 			},
 		}
+		command.Flags().StringVar(&variant, "variant", "", "provider-defined dataset variant")
+		return command
 	}
-	var statusWiki string
+	var statusDataset string
 	status := &cobra.Command{
 		Use:   "status [job-id]",
 		Short: "Poll one job status snapshot",
@@ -144,16 +157,16 @@ func newWikiCommand(opts *options) *cobra.Command {
 			if len(args) == 1 {
 				id = args[0]
 			}
-			if id == "" && statusWiki == "" {
-				return errors.New("provide a job ID or --wiki")
+			if id == "" && statusDataset == "" {
+				return errors.New("provide a job ID or --dataset")
 			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Job(id, statusWiki)
+				result, err := client.Job(id, statusDataset)
 				return printResult(result, err)
 			})
 		},
 	}
-	status.Flags().StringVar(&statusWiki, "wiki", "", "return the latest job for this wiki")
+	status.Flags().StringVar(&statusDataset, "dataset", "", "return the latest job for this dataset")
 	var jobAction string
 	job := &cobra.Command{
 		Use:   "job JOB_ID",
@@ -170,39 +183,39 @@ func newWikiCommand(opts *options) *cobra.Command {
 		},
 	}
 	job.Flags().StringVar(&jobAction, "action", "", "pause, resume, cancel, or retry")
-	wiki.AddCommand(available, list, submit("download"), submit("update"), status, job)
-	return wiki
+	datasets.AddCommand(available, list, submit("download"), submit("update"), status, job)
+	return datasets
 }
 
 func newSearchCommand(opts *options) *cobra.Command {
 	var offset, limit int
-	var includeNonArticles, noSnippets bool
+	var includeSecondary, noSnippets bool
 	command := &cobra.Command{
-		Use:   "search WIKI QUERY",
-		Short: "Search titles or full text in a local wiki",
+		Use:   "search DATASET QUERY",
+		Short: "Search titles or full text in a local dataset",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Search(cmd.Context(), args[0], args[1], model.SearchOptions{Offset: offset, Limit: limit, IncludeNonArticles: includeNonArticles, Snippets: !noSnippets})
+				result, err := client.Search(cmd.Context(), args[0], args[1], model.SearchOptions{Offset: offset, Limit: limit, IncludeSecondary: includeSecondary, Snippets: !noSnippets})
 				return printResult(result, err)
 			})
 		},
 	}
 	command.Flags().IntVar(&offset, "offset", 0, "result offset")
 	command.Flags().IntVar(&limit, "limit", 10, "maximum results (up to 50)")
-	command.Flags().BoolVar(&includeNonArticles, "include-non-articles", false, "include project, category, draft, talk, and other namespaces")
+	command.Flags().BoolVar(&includeSecondary, "include-secondary", false, "include provider-defined secondary records")
 	command.Flags().BoolVar(&noSnippets, "no-snippets", false, "omit query-centered result snippets")
 	return command
 }
 
 func newReadCommand(opts *options) *cobra.Command {
-	var pageID uint64
+	var id string
 	var format, section string
 	var offset, maxChars int
 	var followRedirects, outline bool
 	command := &cobra.Command{
-		Use:   "read WIKI [TITLE]",
-		Short: "Read a local wiki page",
+		Use:   "read DATASET [TITLE]",
+		Short: "Read a document from a local dataset",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if maxChars < 1 || maxChars > 50_000 {
@@ -212,17 +225,17 @@ func newReadCommand(opts *options) *cobra.Command {
 			if len(args) == 2 {
 				title = args[1]
 			}
-			if title == "" && pageID == 0 || title != "" && pageID != 0 {
-				return errors.New("provide exactly one TITLE or --page-id")
+			if (title == "") == (id == "") {
+				return errors.New("provide exactly one TITLE or --id")
 			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Read(cmd.Context(), args[0], title, pageID, model.ReadOptions{Format: format, Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
+				result, err := client.Read(cmd.Context(), args[0], title, id, model.ReadOptions{Format: format, Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
 				return printResult(result, err)
 			})
 		},
 	}
-	command.Flags().Uint64Var(&pageID, "page-id", 0, "read by numeric page ID")
-	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or wikitext")
+	command.Flags().StringVar(&id, "id", "", "opaque document ID returned by search")
+	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or provider-native source")
 	command.Flags().StringVar(&section, "section", "", "read one article section by heading or anchor")
 	command.Flags().IntVar(&offset, "offset", 0, "character offset")
 	command.Flags().IntVar(&maxChars, "max-chars", 12_000, "maximum returned characters (up to 50000)")

@@ -34,9 +34,9 @@ var (
 )
 
 type catalogEntry struct {
-	Name     string
-	DumpDate string
-	Closed   bool
+	Name        string
+	ReleaseDate string
+	Closed      bool
 }
 
 type Client struct {
@@ -49,12 +49,12 @@ type Client struct {
 	catalog       []catalogEntry
 	cached        time.Time
 	metadata      map[string]cachedMetadata
-	sites         map[string]model.WikiSiteMetadata
+	sites         map[string]model.DatasetMetadata
 	sitesCached   time.Time
 }
 
 type cachedMetadata struct {
-	value  model.DumpMetadata
+	value  model.ReleaseMetadata
 	cached time.Time
 }
 
@@ -80,7 +80,7 @@ func NewClientWithBaseURL(baseURL string, parallel ...int) *Client {
 		parallel:      connections,
 		downloadSlots: make(chan struct{}, connections),
 		metadata:      make(map[string]cachedMetadata),
-		sites:         make(map[string]model.WikiSiteMetadata),
+		sites:         make(map[string]model.DatasetMetadata),
 	}
 }
 
@@ -95,10 +95,10 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 	}
 	sites, _ := c.loadSiteMatrix(ctx)
 	filter = strings.ToLower(strings.TrimSpace(filter))
-	filtered := make([]model.OnlineWiki, 0, len(entries))
+	filtered := make([]model.AvailableDataset, 0, len(entries))
 	for _, entry := range entries {
 		wiki := onlineWikiFromCatalog(entry, sites[entry.Name])
-		haystack := strings.ToLower(strings.Join([]string{wiki.Name, wiki.DisplayName, wiki.Project, wiki.ContentType, wiki.Language.Code, wiki.Language.Name, wiki.Language.LocalName}, " "))
+		haystack := strings.ToLower(strings.Join([]string{wiki.ID, wiki.DisplayName, wiki.Project, wiki.ContentType, wiki.Language.Code, wiki.Language.Name, wiki.Language.LocalName}, " "))
 		if filter == "" || strings.Contains(haystack, filter) {
 			filtered = append(filtered, wiki)
 		}
@@ -119,7 +119,7 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 		end = min(offset+limit, len(filtered))
 	}
 	selected := filtered[offset:end]
-	result.Wikis = append([]model.OnlineWiki(nil), selected...)
+	result.Datasets = append([]model.AvailableDataset(nil), selected...)
 	if fullCatalog {
 		return result, nil
 	}
@@ -132,21 +132,21 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			metadata, metadataErr := c.Metadata(ctx, wiki.Name, wiki.DumpDate)
+			metadata, metadataErr := c.Metadata(ctx, wiki.ID, wiki.ReleaseDate)
 			if metadataErr == nil {
 				wiki.Available = true
 				wiki.Fingerprint = metadata.Fingerprint
 				wiki.PartCount = len(metadata.Parts)
 				for _, part := range metadata.Parts {
-					wiki.DumpSize += part.Dump.Size
-					wiki.IndexSize += part.Index.Size
+					wiki.RawSize += part.Raw.Size
+					wiki.ProviderMetadataSize += part.ProviderMetadata.Size
 				}
 				if len(metadata.Parts) == 1 {
-					wiki.DumpSHA1 = metadata.Parts[0].Dump.SHA1
-					wiki.IndexSHA1 = metadata.Parts[0].Index.SHA1
+					wiki.RawHash = metadata.Parts[0].Raw.SHA1
+					wiki.ProviderMetadataHash = metadata.Parts[0].ProviderMetadata.SHA1
 				}
 			}
-			result.Wikis[i] = wiki
+			result.Datasets[i] = wiki
 		}()
 	}
 	wg.Wait()
@@ -156,36 +156,36 @@ func (c *Client) ListAvailable(ctx context.Context, filter string, offset, limit
 	return result, nil
 }
 
-func onlineWikiFromCatalog(entry catalogEntry, site model.WikiSiteMetadata) model.OnlineWiki {
+func onlineWikiFromCatalog(entry catalogEntry, site model.DatasetMetadata) model.AvailableDataset {
 	if site.Project == "" {
 		site = inferSiteMetadata(entry.Name)
 	}
-	return model.OnlineWiki{
-		Name: entry.Name, DisplayName: site.Name, Project: site.Project, ContentType: site.ContentType,
-		Language: site.Language, OnlineSourceURL: site.OnlineSourceURL, DumpDate: entry.DumpDate,
+	return model.AvailableDataset{
+		ID: entry.Name, DisplayName: site.Name, Project: site.Project, ContentType: site.ContentType,
+		Language: site.Language, OnlineSourceURL: site.OnlineSourceURL, ReleaseDate: entry.ReleaseDate,
 		Closed: entry.Closed || site.Closed, Available: true,
 	}
 }
 
-func (c *Client) LatestMetadata(ctx context.Context, wiki string) (model.DumpMetadata, error) {
+func (c *Client) LatestMetadata(ctx context.Context, wiki string) (model.ReleaseMetadata, error) {
 	if !ValidWikiName(wiki) {
-		return model.DumpMetadata{}, fmt.Errorf("invalid Wikimedia database name %q", wiki)
+		return model.ReleaseMetadata{}, fmt.Errorf("invalid Wikimedia database name %q", wiki)
 	}
 	entries, err := c.loadCatalog(ctx, false)
 	if err != nil {
-		return model.DumpMetadata{}, err
+		return model.ReleaseMetadata{}, err
 	}
 	for _, entry := range entries {
 		if entry.Name == wiki {
-			return c.Metadata(ctx, wiki, entry.DumpDate)
+			return c.Metadata(ctx, wiki, entry.ReleaseDate)
 		}
 	}
-	return model.DumpMetadata{}, fmt.Errorf("wiki %q was not found in the Wikimedia dump catalog", wiki)
+	return model.ReleaseMetadata{}, fmt.Errorf("wiki %q was not found in the Wikimedia dump catalog", wiki)
 }
 
-func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.DumpMetadata, error) {
+func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.ReleaseMetadata, error) {
 	if !ValidWikiName(wiki) || len(dumpDate) != 8 {
-		return model.DumpMetadata{}, errors.New("invalid wiki or dump date")
+		return model.ReleaseMetadata{}, errors.New("invalid wiki or dump date")
 	}
 	cacheKey := wiki + "/" + dumpDate
 	c.mu.Lock()
@@ -199,17 +199,17 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 	url := fmt.Sprintf("%s/%s/%s/dumpstatus.json", c.baseURL, wiki, dumpDate)
 	req, err := http.NewRequestWithContext(metadataCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return model.DumpMetadata{}, err
+		return model.ReleaseMetadata{}, err
 	}
 	req.Header.Set("User-Agent", userAgent)
 	resp, release, err := c.doDownloadRequest(metadataCtx, req)
 	if err != nil {
-		return model.DumpMetadata{}, fmt.Errorf("fetch dump metadata: %w", err)
+		return model.ReleaseMetadata{}, fmt.Errorf("fetch dump metadata: %w", err)
 	}
 	defer release()
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return model.DumpMetadata{}, fmt.Errorf("fetch dump metadata: %s", resp.Status)
+		return model.ReleaseMetadata{}, fmt.Errorf("fetch dump metadata: %s", resp.Status)
 	}
 	var status struct {
 		Jobs map[string]struct {
@@ -222,11 +222,11 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 		} `json:"jobs"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&status); err != nil {
-		return model.DumpMetadata{}, fmt.Errorf("decode dump metadata: %w", err)
+		return model.ReleaseMetadata{}, fmt.Errorf("decode dump metadata: %w", err)
 	}
 	job, ok := status.Jobs["articlesmultistreamdump"]
 	if !ok || job.Status != "done" {
-		return model.DumpMetadata{}, errors.New("completed multistream article dump is unavailable")
+		return model.ReleaseMetadata{}, errors.New("completed multistream article dump is unavailable")
 	}
 	type partialPart struct {
 		key   string
@@ -259,18 +259,18 @@ func (c *Client) Metadata(ctx context.Context, wiki, dumpDate string) (model.Dum
 	ordered := make([]*partialPart, 0, len(parts))
 	for _, part := range parts {
 		if part.dump.URL == "" || part.index.URL == "" {
-			return model.DumpMetadata{}, fmt.Errorf("multistream part %q is missing its dump or index", part.key)
+			return model.ReleaseMetadata{}, fmt.Errorf("multistream part %q is missing its dump or index", part.key)
 		}
 		ordered = append(ordered, part)
 	}
 	if len(ordered) == 0 {
-		return model.DumpMetadata{}, errors.New("multistream dump metadata is incomplete")
+		return model.ReleaseMetadata{}, errors.New("multistream dump metadata is incomplete")
 	}
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].order < ordered[j].order })
-	metadata := model.DumpMetadata{Wiki: wiki, DumpDate: dumpDate, Parts: make([]model.DumpPart, 0, len(ordered))}
+	metadata := model.ReleaseMetadata{Dataset: wiki, ReleaseDate: dumpDate, Parts: make([]model.ReleasePart, 0, len(ordered))}
 	fingerprint := sha256.New()
 	for _, part := range ordered {
-		metadata.Parts = append(metadata.Parts, model.DumpPart{Key: part.key, Dump: part.dump, Index: part.index})
+		metadata.Parts = append(metadata.Parts, model.ReleasePart{Key: part.key, Raw: part.dump, ProviderMetadata: part.index})
 		_, _ = fmt.Fprintf(fingerprint, "%s\x00%s\x00%s\x00", part.key, part.dump.SHA1, part.index.SHA1)
 	}
 	metadata.Fingerprint = hex.EncodeToString(fingerprint.Sum(nil))
@@ -316,7 +316,7 @@ func (c *Client) loadCatalog(ctx context.Context, refresh bool) ([]catalogEntry,
 		if !ValidWikiName(name) {
 			continue
 		}
-		entries = append(entries, catalogEntry{Name: name, DumpDate: match[3], Closed: strings.Contains(match[0], "(closed)")})
+		entries = append(entries, catalogEntry{Name: name, ReleaseDate: match[3], Closed: strings.Contains(match[0], "(closed)")})
 	}
 	if len(entries) == 0 {
 		return nil, errors.New("wikimedia catalog contained no valid entries")

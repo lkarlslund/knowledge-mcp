@@ -1,5 +1,5 @@
 [Unit]
-Description=Wikipedia multistream MCP server
+Description=Knowledge Dataset MCP server
 Documentation=https://github.com/lkarlslund/wikipedia-multistream-mcp
 After=network-online.target
 Wants=network-online.target

@@ -15,14 +15,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikiindex"
-	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
 )
 
 type Store struct {
 	root          string
-	remote        *wikimedia.Client
+	providers     *provider.Registry
 	mu            sync.RWMutex
 	jobs          map[string]*model.Job
 	active        map[string]string
@@ -31,7 +31,7 @@ type Store struct {
 	running       map[string]context.CancelFunc
 	watchers      map[chan struct{}]struct{}
 	readerMu      sync.Mutex
-	readers       map[string]*wikiindex.Reader
+	readers       map[string]provider.Reader
 	storageMu     sync.Mutex
 	storage       map[string]storageSnapshot
 	lastProgress  map[string]time.Time
@@ -54,14 +54,23 @@ type Options struct {
 	IndexWorkers    int
 }
 
-func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, error) {
+func Open(root string, registry *provider.Registry, options ...Options) (*Store, error) {
 	if root == "" {
 		return nil, errors.New("data directory cannot be empty")
 	}
-	for _, dir := range []string{root, filepath.Join(root, "wikis"), filepath.Join(root, ".staging")} {
+	if registry == nil {
+		return nil, errors.New("source provider registry cannot be nil")
+	}
+	if err := migrateLegacyDatasetDirectory(root); err != nil {
+		return nil, err
+	}
+	for _, dir := range []string{root, filepath.Join(root, "datasets"), filepath.Join(root, ".staging")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create data directory: %w", err)
 		}
+	}
+	if err := migrateFlatDatasetDirectories(root, registry); err != nil {
+		return nil, err
 	}
 	config := Options{DownloadWorkers: 3, IndexWorkers: 2}
 	if len(options) > 0 {
@@ -70,7 +79,7 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
 		return nil, errors.New("download and index worker counts must be positive")
 	}
-	s := &Store{root: root, remote: remote, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*wikiindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time)}
+	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]provider.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time)}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
@@ -93,19 +102,144 @@ func Open(root string, remote *wikimedia.Client, options ...Options) (*Store, er
 	return s, nil
 }
 
+func migrateFlatDatasetDirectories(root string, registry *provider.Registry) error {
+	datasets := filepath.Join(root, "datasets")
+	entries, err := os.ReadDir(datasets)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		source := filepath.Join(datasets, entry.Name())
+		manifest, readErr := readManifest(filepath.Join(source, "manifest.json"))
+		if errors.Is(readErr, os.ErrNotExist) {
+			// A directory without a manifest is already a provider namespace.
+			continue
+		}
+		if readErr != nil {
+			return fmt.Errorf("read flat dataset %q during migration: %w", entry.Name(), readErr)
+		}
+		backend, providerErr := providerForDatasetManifest(registry, manifest)
+		if providerErr != nil {
+			return fmt.Errorf("resolve provider for flat dataset %q: %w", entry.Name(), providerErr)
+		}
+		providerDir := filepath.Join(datasets, backend.ID())
+		if err := os.MkdirAll(providerDir, 0o755); err != nil {
+			return fmt.Errorf("create provider directory %q: %w", backend.ID(), err)
+		}
+		destination := filepath.Join(providerDir, entry.Name())
+		if _, statErr := os.Stat(destination); statErr == nil {
+			return fmt.Errorf("cannot migrate flat dataset %q: destination already exists", entry.Name())
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if err := os.Rename(source, destination); err != nil {
+			return fmt.Errorf("migrate flat dataset %q into provider %q: %w", entry.Name(), backend.ID(), err)
+		}
+	}
+	return nil
+}
+
+func providerForDatasetManifest(registry *provider.Registry, manifest model.Manifest) (provider.Provider, error) {
+	if manifest.Provider != "" {
+		return registry.ByID(manifest.Provider)
+	}
+	return registry.ForCollection(manifest.Dataset)
+}
+
+type localDatasetEntry struct {
+	provider string
+	dataset  string
+	path     string
+}
+
+func (s *Store) localDatasetEntries() ([]localDatasetEntry, error) {
+	providerEntries, err := os.ReadDir(filepath.Join(s.root, "datasets"))
+	if err != nil {
+		return nil, err
+	}
+	var result []localDatasetEntry
+	for _, providerEntry := range providerEntries {
+		if !providerEntry.IsDir() {
+			continue
+		}
+		providerID := providerEntry.Name()
+		if _, err := s.providers.ByID(providerID); err != nil {
+			continue
+		}
+		datasetEntries, err := os.ReadDir(filepath.Join(s.root, "datasets", providerID))
+		if err != nil {
+			return nil, err
+		}
+		for _, datasetEntry := range datasetEntries {
+			if datasetEntry.IsDir() {
+				result = append(result, localDatasetEntry{
+					provider: providerID,
+					dataset:  datasetEntry.Name(),
+					path:     s.datasetPath(providerID, datasetEntry.Name()),
+				})
+			}
+		}
+	}
+	return result, nil
+}
+
+func migrateLegacyDatasetDirectory(root string) error {
+	legacy, datasets := filepath.Join(root, "wikis"), filepath.Join(root, "datasets")
+	if _, err := os.Stat(legacy); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if _, err := os.Stat(datasets); errors.Is(err, os.ErrNotExist) {
+		if err := os.Rename(legacy, datasets); err != nil {
+			return fmt.Errorf("migrate legacy dataset directory: %w", err)
+		}
+		return nil
+	} else if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(legacy)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		destination := filepath.Join(datasets, entry.Name())
+		if _, statErr := os.Stat(destination); statErr == nil {
+			return fmt.Errorf("cannot migrate legacy dataset %q: destination already exists", entry.Name())
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if err := os.Rename(filepath.Join(legacy, entry.Name()), destination); err != nil {
+			return fmt.Errorf("migrate legacy dataset %q: %w", entry.Name(), err)
+		}
+	}
+	if err := os.Remove(legacy); err != nil {
+		return fmt.Errorf("migrate legacy dataset directory: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) queueStaleIndexes() error {
-	entries, err := os.ReadDir(filepath.Join(s.root, "wikis"))
+	entries, err := s.localDatasetEntries()
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, entry := range entries {
-		if !entry.IsDir() || s.active[entry.Name()] != "" {
+		if s.active[entry.dataset] != "" {
 			continue
 		}
-		manifest, readErr := readManifest(filepath.Join(s.wikiPath(entry.Name()), "manifest.json"))
-		if readErr != nil || manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentTitleIndexVersion && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion {
+		manifest, readErr := readManifest(filepath.Join(entry.path, "manifest.json"))
+		provider, providerErr := s.providerForManifest(manifest)
+		if readErr != nil || providerErr != nil {
+			continue
+		}
+		titleCurrent, bodyCurrent := provider.IndexCurrent(manifest)
+		if titleCurrent && bodyCurrent {
 			continue
 		}
 		id, idErr := newID()
@@ -113,8 +247,8 @@ func (s *Store) queueStaleIndexes() error {
 			return idErr
 		}
 		now := time.Now().UTC()
-		job := &model.Job{ID: id, Wiki: entry.Name(), Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued index schema upgrade", CreatedAt: now, UpdatedAt: now}
-		s.jobs[id], s.active[entry.Name()] = job, id
+		job := &model.Job{ID: id, Dataset: entry.dataset, Provider: provider.ID(), Variant: manifest.Variant, Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued index schema upgrade", CreatedAt: now, UpdatedAt: now}
+		s.jobs[id], s.active[entry.dataset] = job, id
 		if err := s.saveJobsLocked(); err != nil {
 			return err
 		}
@@ -130,30 +264,47 @@ func (s *Store) Close() {
 }
 
 func (s *Store) ListAvailable(ctx context.Context, filter string, offset, limit int, refresh bool) (model.AvailableResult, error) {
-	result, err := s.remote.ListAvailable(ctx, filter, offset, limit, refresh)
+	items, err := s.providers.Discover(ctx, filter, refresh)
 	if err != nil {
-		return result, err
+		return model.AvailableResult{}, err
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit == 0 || limit < -1 || limit > 50 {
+		limit = 20
+	}
+	result := model.AvailableResult{Offset: offset, Total: len(items)}
+	if offset < len(items) {
+		end := len(items)
+		if limit != -1 {
+			end = min(end, offset+limit)
+		}
+		result.Datasets = append([]model.AvailableDataset(nil), items[offset:end]...)
+		if end < len(items) {
+			result.NextOffset = end
+		}
 	}
 	locals, err := s.ListLocal()
 	if err != nil {
 		return result, err
 	}
-	byName := make(map[string]model.LocalWiki, len(locals))
+	byName := make(map[string]model.LocalDataset, len(locals))
 	for _, local := range locals {
-		byName[local.Wiki] = local
+		byName[local.Dataset] = local
 	}
-	for i := range result.Wikis {
-		local, ok := byName[result.Wikis[i].Name]
+	for i := range result.Datasets {
+		local, ok := byName[result.Datasets[i].ID]
 		if !ok {
 			continue
 		}
-		result.Wikis[i].Installed = true
-		result.Wikis[i].UpdateAvailable = result.Wikis[i].Fingerprint != "" && result.Wikis[i].Fingerprint != local.Fingerprint
+		result.Datasets[i].Installed = true
+		result.Datasets[i].UpdateAvailable = result.Datasets[i].Fingerprint != "" && result.Datasets[i].Fingerprint != local.Fingerprint
 	}
 	return result, nil
 }
 
-func (s *Store) ListLocal() ([]model.LocalWiki, error) {
+func (s *Store) ListLocal() ([]model.LocalDataset, error) {
 	s.mu.RLock()
 	active := make(map[string]string, len(s.active))
 	states := make(map[string]string, len(s.active))
@@ -164,56 +315,54 @@ func (s *Store) ListLocal() ([]model.LocalWiki, error) {
 		}
 	}
 	s.mu.RUnlock()
-	entries, err := os.ReadDir(filepath.Join(s.root, "wikis"))
+	entries, err := s.localDatasetEntries()
 	if err != nil {
 		return nil, err
 	}
-	result := make([]model.LocalWiki, 0, len(entries))
+	result := make([]model.LocalDataset, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		manifest, err := readManifest(filepath.Join(s.wikiPath(entry.Name()), "manifest.json"))
+		manifest, err := readManifest(filepath.Join(entry.path, "manifest.json"))
 		if err != nil {
 			continue
 		}
-		local := model.LocalWiki{Manifest: manifest, State: model.StateDownloaded, SearchMode: "none"}
-		local.TitleReady = manifest.TitleReady && manifest.TitleIndexVersion == wikiindex.CurrentTitleIndexVersion
-		local.BodyReady = local.TitleReady && manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion
+		local := model.LocalDataset{Manifest: manifest, State: model.StateDownloaded, SearchMode: "none"}
+		if provider, providerErr := s.providerForManifest(manifest); providerErr == nil {
+			local.TitleReady, local.BodyReady = provider.IndexCurrent(manifest)
+		}
 		if local.TitleReady {
 			local.State, local.SearchMode = model.StateTitleReady, "title"
 		}
 		if local.BodyReady {
 			local.State, local.SearchMode = model.StateReady, "full_text"
 		}
-		if jobID := active[entry.Name()]; jobID != "" {
+		if jobID := active[entry.dataset]; jobID != "" {
 			local.ActiveJob = jobID
-			local.State = states[entry.Name()]
+			local.State = states[entry.dataset]
 		}
-		local.DiskBytes, local.CompressedDumpBytes, local.MultistreamIndexBytes, local.TitleIndexBytes, local.BodyIndexBytes = s.localStorage(s.wikiPath(entry.Name()))
-		local.OtherBytes = max(local.DiskBytes-local.CompressedDumpBytes-local.MultistreamIndexBytes-local.TitleIndexBytes-local.BodyIndexBytes, 0)
+		local.DiskBytes, local.RawBytes, local.ProviderMetadataBytes, local.TitleIndexBytes, local.BodyIndexBytes = s.localStorage(entry.path)
+		local.OtherBytes = max(local.DiskBytes-local.RawBytes-local.ProviderMetadataBytes-local.TitleIndexBytes-local.BodyIndexBytes, 0)
 		result = append(result, local)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Wiki < result[j].Wiki })
+	sort.Slice(result, func(i, j int) bool { return result[i].Dataset < result[j].Dataset })
 	return result, nil
 }
 
-func (s *Store) ListLocalSummary() ([]model.LocalWikiSummary, error) {
+func (s *Store) ListLocalSummary() ([]model.LocalDatasetSummary, error) {
 	locals, err := s.ListLocal()
 	if err != nil {
 		return nil, err
 	}
-	result := make([]model.LocalWikiSummary, 0, len(locals))
+	result := make([]model.LocalDatasetSummary, 0, len(locals))
 	for _, local := range locals {
 		name := local.Site.Name
 		if name == "" {
-			name = local.Wiki
+			name = local.Dataset
 		}
-		result = append(result, model.LocalWikiSummary{
-			Wiki: local.Wiki, Name: name, Project: local.Site.Project, ContentType: local.Site.ContentType,
+		result = append(result, model.LocalDatasetSummary{
+			Provider: local.Provider, Variant: local.Variant, Dataset: local.Dataset, Name: name, Description: local.Site.Description, Project: local.Site.Project, ContentType: local.Site.ContentType,
 			Language: local.Site.Language, OnlineSourceURL: local.Site.OnlineSourceURL,
-			ContentArticles: local.Site.ContentArticles, IndexedPages: local.PageCount,
-			DumpDate: local.DumpDate, SearchMode: local.SearchMode, Closed: local.Site.Closed,
+			SourceDocuments: local.Site.SourceDocuments, IndexedDocuments: local.DocumentCount,
+			ReleaseDate: local.ReleaseDate, SearchMode: local.SearchMode, Closed: local.Site.Closed,
 		})
 	}
 	return result, nil
@@ -257,95 +406,63 @@ func (s *Store) Subscribe(ctx context.Context) <-chan struct{} {
 	return updates
 }
 
-func (s *Store) ListUpgrades(ctx context.Context) ([]model.OnlineWiki, error) {
+func (s *Store) ListUpgrades(ctx context.Context) ([]model.AvailableDataset, error) {
 	locals, err := s.ListLocal()
 	if err != nil {
 		return nil, err
 	}
-	type result struct {
-		wiki model.OnlineWiki
-		err  error
-	}
-	results := make(chan result, len(locals))
-	sem := make(chan struct{}, 3)
-	var wg sync.WaitGroup
+	upgrades := make([]model.AvailableDataset, 0, len(locals))
 	for _, local := range locals {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				results <- result{err: ctx.Err()}
-				return
-			}
-			defer func() { <-sem }()
-			metadata, metadataErr := s.remote.LatestMetadata(ctx, local.Wiki)
-			if metadataErr != nil {
-				results <- result{err: metadataErr}
-				return
-			}
-			online := model.OnlineWiki{Name: local.Wiki, DumpDate: metadata.DumpDate, Available: true, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), Installed: true, UpdateAvailable: metadata.Fingerprint != local.Fingerprint}
-			for _, part := range metadata.Parts {
-				online.DumpSize += part.Dump.Size
-				online.IndexSize += part.Index.Size
-			}
-			if len(metadata.Parts) == 1 {
-				online.DumpSHA1, online.IndexSHA1 = metadata.Parts[0].Dump.SHA1, metadata.Parts[0].Index.SHA1
-			}
-			results <- result{wiki: online}
-		}()
-	}
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-	upgrades := make([]model.OnlineWiki, 0, len(locals))
-	for item := range results {
-		if item.err != nil {
-			if errors.Is(item.err, context.Canceled) {
-				return nil, item.err
+		provider, providerErr := s.providers.ByID(local.Provider)
+		if providerErr != nil {
+			continue
+		}
+		release, releaseErr := provider.Latest(ctx, local.Dataset, local.Variant)
+		if releaseErr != nil {
+			if errors.Is(releaseErr, context.Canceled) {
+				return nil, releaseErr
 			}
 			continue
 		}
-		upgrades = append(upgrades, item.wiki)
+		upgrades = append(upgrades, model.AvailableDataset{Provider: local.Provider, Variant: local.Variant, ID: local.Dataset, DisplayName: local.Site.Name, ReleaseDate: release.Date, Available: true, Fingerprint: release.Fingerprint, Installed: true, UpdateAvailable: release.Fingerprint != local.Fingerprint})
 	}
-	sort.Slice(upgrades, func(i, j int) bool { return upgrades[i].Name < upgrades[j].Name })
+	sort.Slice(upgrades, func(i, j int) bool { return upgrades[i].ID < upgrades[j].ID })
 	return upgrades, nil
 }
 
-func (s *Store) Submit(wiki, kind string) (model.Job, error) {
-	if !wikimedia.ValidWikiName(wiki) {
-		return model.Job{}, fmt.Errorf("invalid Wikimedia database name %q", wiki)
+func (s *Store) Submit(dataset, variant, kind string) (model.Job, error) {
+	provider, err := s.providers.ForCollection(dataset)
+	if err != nil {
+		return model.Job{}, err
 	}
 	if kind != "download" && kind != "update" {
 		return model.Job{}, errors.New("job kind must be download or update")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, installedErr := os.Stat(filepath.Join(s.wikiPath(wiki), "manifest.json"))
+	_, installedErr := os.Stat(filepath.Join(s.datasetPath(provider.ID(), dataset), "manifest.json"))
 	installed := installedErr == nil
 	if kind == "download" && installed {
-		return model.Job{}, fmt.Errorf("wiki %s is already installed; use update", wiki)
+		return model.Job{}, fmt.Errorf("dataset %s is already installed; use update", dataset)
 	}
 	if kind == "update" && !installed {
-		return model.Job{}, fmt.Errorf("wiki %s is not installed; use download", wiki)
+		return model.Job{}, fmt.Errorf("dataset %s is not installed; use download", dataset)
 	}
-	if id := s.active[wiki]; id != "" {
+	if id := s.active[dataset]; id != "" {
 		return *s.jobs[id], nil
 	}
 	if kind == "update" {
 		var failedIndex *model.Job
 		for _, existing := range s.jobs {
-			if existing.Wiki == wiki && existing.Kind == "index" && existing.State == model.StateFailed && (failedIndex == nil || existing.UpdatedAt.After(failedIndex.UpdatedAt)) {
+			if existing.Dataset == dataset && existing.Kind == "index" && existing.State == model.StateFailed && (failedIndex == nil || existing.UpdatedAt.After(failedIndex.UpdatedAt)) {
 				failedIndex = existing
 			}
 		}
 		if failedIndex != nil {
 			failedIndex.State, failedIndex.Phase, failedIndex.Error, failedIndex.Message, failedIndex.UpdatedAt = model.StateQueued, "queued", "", "retrying indexing without another download", time.Now().UTC()
-			s.active[wiki] = failedIndex.ID
+			s.active[dataset] = failedIndex.ID
 			if err := s.saveJobsLocked(); err != nil {
-				delete(s.active, wiki)
+				delete(s.active, dataset)
 				return model.Job{}, err
 			}
 			s.enqueue(failedIndex)
@@ -354,15 +471,15 @@ func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 	}
 	var retry *model.Job
 	for _, existing := range s.jobs {
-		if existing.Wiki == wiki && existing.Kind == kind && existing.State == model.StateFailed && (retry == nil || existing.UpdatedAt.After(retry.UpdatedAt)) {
+		if existing.Dataset == dataset && existing.Kind == kind && existing.State == model.StateFailed && (retry == nil || existing.UpdatedAt.After(retry.UpdatedAt)) {
 			retry = existing
 		}
 	}
 	if retry != nil {
 		retry.State, retry.Phase, retry.Error, retry.Message, retry.UpdatedAt = model.StateQueued, "queued", "", "retrying with existing partial downloads", time.Now().UTC()
-		s.active[wiki] = retry.ID
+		s.active[dataset] = retry.ID
 		if err := s.saveJobsLocked(); err != nil {
-			delete(s.active, wiki)
+			delete(s.active, dataset)
 			return model.Job{}, err
 		}
 		s.enqueue(retry)
@@ -373,40 +490,41 @@ func (s *Store) Submit(wiki, kind string) (model.Job, error) {
 		return model.Job{}, err
 	}
 	now := time.Now().UTC()
-	job := &model.Job{ID: id, Wiki: wiki, Kind: kind, State: model.StateQueued, Phase: "queued", CreatedAt: now, UpdatedAt: now}
-	s.jobs[id], s.active[wiki] = job, id
+	job := &model.Job{ID: id, Dataset: dataset, Provider: provider.ID(), Variant: variant, Kind: kind, State: model.StateQueued, Phase: "queued", CreatedAt: now, UpdatedAt: now}
+	s.jobs[id], s.active[dataset] = job, id
 	if err := s.saveJobsLocked(); err != nil {
 		delete(s.jobs, id)
-		delete(s.active, wiki)
+		delete(s.active, dataset)
 		return model.Job{}, err
 	}
 	s.enqueue(job)
 	return *job, nil
 }
 
-func (s *Store) DeleteWiki(wiki string) error {
-	if !wikimedia.ValidWikiName(wiki) {
-		return fmt.Errorf("invalid Wikimedia database name %q", wiki)
+func (s *Store) DeleteDataset(dataset string) error {
+	backend, err := s.providers.ForCollection(dataset)
+	if err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if id := s.active[wiki]; id != "" {
-		return fmt.Errorf("wiki %s has active job %s; cancel it before deleting", wiki, id)
+	if id := s.active[dataset]; id != "" {
+		return fmt.Errorf("dataset %s has active job %s; cancel it before deleting", dataset, id)
 	}
-	path := s.wikiPath(wiki)
+	path := s.datasetPath(backend.ID(), dataset)
 	if _, err := os.Stat(filepath.Join(path, "manifest.json")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("wiki %s is not installed", wiki)
+			return fmt.Errorf("dataset %s is not installed", dataset)
 		}
 		return err
 	}
 	s.closeReaders(path)
 	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("delete wiki %s: %w", wiki, err)
+		return fmt.Errorf("delete dataset %s: %w", dataset, err)
 	}
 	var cleanupErr error
 	for _, job := range s.jobs {
-		if job.Wiki != wiki {
+		if job.Dataset != dataset {
 			continue
 		}
 		for _, id := range []string{job.ID, job.SourceJobID} {
@@ -429,7 +547,7 @@ func (s *Store) Job(id, wiki string) (model.Job, error) {
 		id = s.active[wiki]
 		if id == "" {
 			for candidateID, job := range s.jobs {
-				if job.Wiki == wiki && (id == "" || job.UpdatedAt.After(s.jobs[id].UpdatedAt)) {
+				if job.Dataset == wiki && (id == "" || job.UpdatedAt.After(s.jobs[id].UpdatedAt)) {
 					id = candidateID
 				}
 			}
@@ -476,7 +594,7 @@ func (s *Store) JobAction(id, action string) (model.Job, error) {
 			return model.Job{}, errors.New("job is still pausing; retry resume shortly")
 		}
 		job.State, job.Phase, job.Message, job.Error, job.UpdatedAt = model.StateQueued, "queued", "resuming preserved work", "", now
-		s.active[job.Wiki] = job.ID
+		s.active[job.Dataset] = job.ID
 	case "cancel":
 		if isTerminal(job.State) || job.State == model.StateCanceled {
 			s.mu.Unlock()
@@ -484,18 +602,18 @@ func (s *Store) JobAction(id, action string) (model.Job, error) {
 		}
 		job.State, job.Phase, job.Message, job.Error, job.UpdatedAt = model.StateCanceled, "canceled", "canceled by user; partial work is preserved for retry", "", now
 		cancel = s.running[id]
-		delete(s.active, job.Wiki)
+		delete(s.active, job.Dataset)
 	case "retry":
 		if job.State != model.StateFailed && job.State != model.StateCanceled {
 			s.mu.Unlock()
 			return model.Job{}, fmt.Errorf("job cannot be retried from state %s", job.State)
 		}
-		if activeID := s.active[job.Wiki]; activeID != "" && activeID != job.ID {
+		if activeID := s.active[job.Dataset]; activeID != "" && activeID != job.ID {
 			s.mu.Unlock()
-			return model.Job{}, fmt.Errorf("wiki %s already has active job %s", job.Wiki, activeID)
+			return model.Job{}, fmt.Errorf("dataset %s already has active job %s", job.Dataset, activeID)
 		}
 		job.State, job.Phase, job.Message, job.Error, job.UpdatedAt = model.StateQueued, "queued", "retrying preserved work", "", now
-		s.active[job.Wiki] = job.ID
+		s.active[job.Dataset] = job.ID
 	default:
 		s.mu.Unlock()
 		return model.Job{}, errors.New("action must be status, pause, resume, cancel, or retry")
@@ -519,15 +637,21 @@ func isTerminal(state string) bool {
 	return state == model.StateDownloaded || state == model.StateReady || state == model.StateUpToDate || state == model.StateFailed || state == model.StateCanceled
 }
 
-func (s *Store) Search(ctx context.Context, wiki, query string, options model.SearchOptions) (model.SearchResult, error) {
-	s.mu.RLock()
-	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
-	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
-		s.mu.RUnlock()
-		return model.SearchResult{}, fmt.Errorf("wiki %s is not title-ready", wiki)
+func (s *Store) Search(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, error) {
+	owner, ownerErr := s.providers.ForCollection(dataset)
+	if ownerErr != nil {
+		return model.SearchResult{}, ownerErr
 	}
-	fullText := manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion
-	reader, err := s.reader(s.wikiPath(wiki), fullText)
+	path := s.datasetPath(owner.ID(), dataset)
+	s.mu.RLock()
+	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
+	backend, providerErr := s.providerForManifest(manifest)
+	if err != nil || providerErr != nil || !manifest.TitleReady {
+		s.mu.RUnlock()
+		return model.SearchResult{}, fmt.Errorf("dataset %s is not title-ready", dataset)
+	}
+	_, fullText := backend.IndexCurrent(manifest)
+	reader, err := s.reader(backend, path, fullText)
 	if err != nil {
 		s.mu.RUnlock()
 		return model.SearchResult{}, err
@@ -542,56 +666,59 @@ func (s *Store) Search(ctx context.Context, wiki, query string, options model.Se
 	if err != nil {
 		return result, err
 	}
-	result.Wiki = wiki
-	for index := range result.Hits {
-		result.Hits[index].PageURL = wikiindex.PageURL(manifest.Site.OnlineSourceURL, result.Hits[index].Title)
-	}
+	result.Dataset = dataset
 	return result, nil
 }
 
-func (s *Store) Read(ctx context.Context, wiki, title string, pageID uint64, options model.ReadOptions) (model.Page, error) {
-	s.mu.RLock()
-	manifest, err := readManifest(filepath.Join(s.wikiPath(wiki), "manifest.json"))
-	if err != nil || !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
-		s.mu.RUnlock()
-		return model.Page{}, fmt.Errorf("wiki %s is not title-ready", wiki)
+func (s *Store) Read(ctx context.Context, dataset, title, id string, options model.ReadOptions) (model.Document, error) {
+	owner, ownerErr := s.providers.ForCollection(dataset)
+	if ownerErr != nil {
+		return model.Document{}, ownerErr
 	}
-	reader, err := s.reader(s.wikiPath(wiki), false)
+	path := s.datasetPath(owner.ID(), dataset)
+	s.mu.RLock()
+	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
+	backend, providerErr := s.providerForManifest(manifest)
+	if err != nil || providerErr != nil || !manifest.TitleReady {
+		s.mu.RUnlock()
+		return model.Document{}, fmt.Errorf("dataset %s is not title-ready", dataset)
+	}
+	reader, err := s.reader(backend, path, false)
 	if err != nil {
 		s.mu.RUnlock()
-		return model.Page{}, err
+		return model.Document{}, err
 	}
 	release, err := reader.Retain()
 	s.mu.RUnlock()
 	if err != nil {
-		return model.Page{}, err
+		return model.Document{}, err
 	}
 	defer release()
-	options.LinkWiki = wiki
-	page, err := reader.ReadPage(ctx, title, pageID, options, manifest.Site.OnlineSourceURL)
-	page.Wiki = wiki
-	if errors.Is(err, wikiindex.ErrPageNotFound) && strings.TrimSpace(title) != "" {
+	options.LinkDataset = dataset
+	page, err := reader.Read(ctx, title, id, options)
+	page.Dataset = dataset
+	if errors.Is(err, provider.ErrDocumentNotFound) && strings.TrimSpace(title) != "" {
 		result, searchErr := reader.Search(ctx, title, model.SearchOptions{Limit: 5}, false)
 		if searchErr == nil && len(result.Hits) > 0 {
 			candidates := make([]string, 0, len(result.Hits))
 			for _, hit := range result.Hits {
-				candidates = append(candidates, fmt.Sprintf("%q (page_id %d)", hit.Title, hit.PageID))
+				candidates = append(candidates, fmt.Sprintf("%q (id %s)", hit.Title, hit.ID))
 			}
-			return page, fmt.Errorf("page %q not found in %s; do not guess another title: call wiki_search, select the relevant hit, and retry wiki_read with its page_id; title-search candidates: %s", title, wiki, strings.Join(candidates, ", "))
+			return page, fmt.Errorf("document %q not found in %s; call knowledge_search and retry knowledge_read with its id; candidates: %s", title, dataset, strings.Join(candidates, ", "))
 		}
-		return page, fmt.Errorf("page %q not found in %s; do not guess another title: call wiki_search, select a relevant hit, and retry wiki_read with its page_id", title, wiki)
+		return page, fmt.Errorf("document %q not found in %s; call knowledge_search and retry knowledge_read with its id", title, dataset)
 	}
 	return page, err
 }
 
-func (s *Store) reader(path string, fullText bool) (*wikiindex.Reader, error) {
+func (s *Store) reader(backend provider.Provider, path string, fullText bool) (provider.Reader, error) {
 	key := fmt.Sprintf("%s:%t", path, fullText)
 	s.readerMu.Lock()
 	defer s.readerMu.Unlock()
 	if reader := s.readers[key]; reader != nil {
 		return reader, nil
 	}
-	reader, err := wikiindex.OpenReader(path, fullText)
+	reader, err := backend.Open(path, fullText)
 	if err != nil {
 		return nil, err
 	}
@@ -658,23 +785,32 @@ func (s *Store) runJob(ctx context.Context, id string) bool {
 }
 
 func (s *Store) runDownloadJob(ctx context.Context, id string) {
-	s.setJob(id, model.StateDiscovering, "discovering", 0, 0, "", 0, "checking Wikimedia dump metadata", "")
+	s.setJob(id, model.StateDiscovering, "discovering", 0, 0, "", 0, "checking provider metadata", "")
 	job, err := s.Job(id, "")
 	if err != nil {
 		return
 	}
-	metadata, err := s.remote.LatestMetadata(ctx, job.Wiki)
+	provider, err := s.providers.ByID(job.Provider)
+	if err != nil {
+		provider, err = s.providers.ForCollection(job.Dataset)
+	}
 	if err != nil {
 		s.failJob(id, err)
 		return
 	}
-	current, currentErr := readManifest(filepath.Join(s.wikiPath(job.Wiki), "manifest.json"))
-	if currentErr == nil && current.Fingerprint == metadata.Fingerprint {
+	release, err := provider.Latest(ctx, job.Dataset, job.Variant)
+	if err != nil {
+		s.failJob(id, err)
+		return
+	}
+	datasetPath := s.datasetPath(provider.ID(), job.Dataset)
+	current, currentErr := readManifest(filepath.Join(datasetPath, "manifest.json"))
+	if currentErr == nil && current.Fingerprint == release.Fingerprint {
 		if current.BodyReady {
-			s.finishJob(id, model.StateUpToDate, "local dump and indexes are current")
+			s.finishJob(id, model.StateUpToDate, "local dataset and indexes are current")
 			return
 		}
-		s.finishDownloadAndQueueIndex(id, job.Wiki, "", "dump is already local; indexing queued")
+		s.finishDownloadAndQueueIndex(id, job.Dataset, "", "dataset is already local; indexing queued")
 		return
 	}
 	stage := filepath.Join(s.root, ".staging", id)
@@ -682,53 +818,12 @@ func (s *Store) runDownloadJob(ctx context.Context, id string) {
 		s.failJob(id, err)
 		return
 	}
-	partsDir := filepath.Join(stage, "parts")
-	if err := os.MkdirAll(partsDir, 0o755); err != nil {
+	manifest, err := provider.Acquire(ctx, job.Dataset, job.Variant, release, stage, datasetPath, func(phase string, completed, total int64, units string, rate float64, message string) {
+		s.setJob(id, model.StateDownloading, phase, completed, total, units, rate, message, "")
+	})
+	if err != nil {
 		s.failJob(id, err)
 		return
-	}
-	if len(metadata.Parts) == 1 {
-		if err := migrateLegacyStage(stage, partsDir); err != nil {
-			s.failJob(id, err)
-			return
-		}
-	}
-	var totalBytes int64
-	for _, part := range metadata.Parts {
-		totalBytes += part.Index.Size + part.Dump.Size
-	}
-	completedBytes := int64(0)
-	download := func(label string, file model.FileMetadata, path string) error {
-		s.setJob(id, model.StateDownloading, "downloading_"+label, completedBytes, totalBytes, "bytes", 0, "downloading "+label, "")
-		return s.remote.Download(ctx, file, path, func(done, total int64, rate float64) {
-			s.setJob(id, model.StateDownloading, "downloading_"+label, completedBytes+done, totalBytes, "bytes", rate, "downloading "+label, "")
-		})
-	}
-	for i, part := range metadata.Parts {
-		indexPath := filepath.Join(partsDir, fmt.Sprintf("%03d.index.bz2", i))
-		dumpPath := filepath.Join(partsDir, fmt.Sprintf("%03d.dump.bz2", i))
-		partLabel := fmt.Sprintf("index part %d/%d", i+1, len(metadata.Parts))
-		if err := download(partLabel, part.Index, indexPath); err != nil {
-			s.failJob(id, err)
-			return
-		}
-		completedBytes += part.Index.Size
-		partLabel = fmt.Sprintf("dump part %d/%d", i+1, len(metadata.Parts))
-		if err := download(partLabel, part.Dump, dumpPath); err != nil {
-			s.failJob(id, err)
-			return
-		}
-		completedBytes += part.Dump.Size
-	}
-	dumpSite := wikimedia.ReadDumpSiteMetadata(ctx, job.Wiki, filepath.Join(partsDir, "000.dump.bz2"))
-	site := mergeSiteMetadata(dumpSite, s.remote.SiteMetadata(ctx, job.Wiki))
-	manifest := model.Manifest{Wiki: job.Wiki, DumpDate: metadata.DumpDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PublishedAt: time.Now().UTC(), Site: site}
-	for _, part := range metadata.Parts {
-		manifest.DumpSize += part.Dump.Size
-		manifest.IndexSize += part.Index.Size
-	}
-	if len(metadata.Parts) == 1 {
-		manifest.DumpSHA1, manifest.IndexSHA1 = metadata.Parts[0].Dump.SHA1, metadata.Parts[0].Index.SHA1
 	}
 	if err := writeJSON(filepath.Join(stage, "manifest.json"), manifest); err != nil {
 		s.failJob(id, err)
@@ -736,13 +831,13 @@ func (s *Store) runDownloadJob(ctx context.Context, id string) {
 	}
 	sourceJobID := id
 	if job.Kind == "download" {
-		if err := s.publish(job.Wiki, stage); err != nil {
+		if err := s.publish(provider.ID(), job.Dataset, stage); err != nil {
 			s.failJob(id, err)
 			return
 		}
 		sourceJobID = ""
 	}
-	s.finishDownloadAndQueueIndex(id, job.Wiki, sourceJobID, "download verified; indexing queued")
+	s.finishDownloadAndQueueIndex(id, job.Dataset, sourceJobID, "download verified; indexing queued")
 }
 
 func (s *Store) finishDownloadAndQueueIndex(id, wiki, sourceJobID, message string) {
@@ -763,7 +858,7 @@ func (s *Store) finishDownloadAndQueueIndex(id, wiki, sourceJobID, message strin
 	now := time.Now().UTC()
 	downloadJob.State, downloadJob.Phase, downloadJob.Message, downloadJob.Error, downloadJob.UpdatedAt = model.StateDownloaded, "complete", message, "", now
 	delete(s.active, wiki)
-	indexJob := &model.Job{ID: indexID, Wiki: wiki, Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued after download", CreatedAt: now, UpdatedAt: now, SourceJobID: sourceJobID}
+	indexJob := &model.Job{ID: indexID, Dataset: wiki, Provider: downloadJob.Provider, Variant: downloadJob.Variant, Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued after download", CreatedAt: now, UpdatedAt: now, SourceJobID: sourceJobID}
 	s.jobs[indexID], s.active[wiki] = indexJob, indexID
 	if err := s.saveJobsLocked(); err != nil {
 		downloadJob.State, downloadJob.Phase, downloadJob.Error = model.StateFailed, "failed", err.Error()
@@ -787,7 +882,7 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 	if err != nil {
 		return false
 	}
-	path := s.wikiPath(job.Wiki)
+	path := s.datasetPath(job.Provider, job.Dataset)
 	publishAfterTitle := false
 	if job.SourceJobID != "" {
 		staged := filepath.Join(s.root, ".staging", job.SourceJobID)
@@ -800,11 +895,17 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		s.failJob(id, err)
 		return false
 	}
+	provider, err := s.providerForManifest(manifest)
+	if err != nil {
+		s.failJob(id, err)
+		return false
+	}
+	titleCurrent, bodyCurrent := provider.IndexCurrent(manifest)
 	titleBuilt := false
-	if !manifest.TitleReady || manifest.TitleIndexVersion != wikiindex.CurrentTitleIndexVersion {
-		temporary := filepath.Join(path, wikiindex.TitleIndexDir+".building")
+	if !titleCurrent {
+		temporary := filepath.Join(path, knowledgeindex.TitleDirectory+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
-		count, buildErr := wikiindex.BuildTitle(ctx, generationParts(path, manifest.PartCount), temporary, func(pages uint64, compressedDone, compressedTotal int64) {
+		count, buildErr := provider.BuildTitle(ctx, path, manifest, func(pages uint64, compressedDone, compressedTotal int64) {
 			s.setTitleProgress(id, pages, compressedDone, compressedTotal)
 		})
 		if buildErr != nil {
@@ -813,14 +914,14 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		}
 		s.mu.Lock()
 		s.closeReaders(path)
-		final := filepath.Join(path, wikiindex.TitleIndexDir)
+		final := filepath.Join(path, knowledgeindex.TitleDirectory)
 		replaceErr := os.RemoveAll(final)
 		if replaceErr == nil {
 			replaceErr = os.Rename(temporary, final)
 		}
 		if replaceErr == nil {
-			manifest.PageCount, manifest.TitleReady, manifest.TitleIndexVersion, manifest.PublishedAt = count, true, wikiindex.CurrentTitleIndexVersion, time.Now().UTC()
-			if manifest.BodyIndexVersion != wikiindex.CurrentBodyIndexVersion {
+			manifest.DocumentCount, manifest.TitleReady, manifest.TitleIndexVersion, manifest.PublishedAt = count, true, knowledgeindex.TitleVersion, time.Now().UTC()
+			if manifest.BodyIndexVersion != knowledgeindex.BodyVersion {
 				manifest.BodyReady = false
 			}
 			replaceErr = writeJSON(filepath.Join(path, "manifest.json"), manifest)
@@ -833,7 +934,7 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		titleBuilt = true
 	}
 	if publishAfterTitle {
-		if err := s.publish(job.Wiki, path); err != nil {
+		if err := s.publish(job.Provider, job.Dataset, path); err != nil {
 			s.failJob(id, err)
 			return false
 		}
@@ -844,23 +945,23 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		_ = s.saveJobsLocked()
 	}
 	s.mu.Unlock()
-	if manifest.BodyReady && manifest.BodyIndexVersion == wikiindex.CurrentBodyIndexVersion {
+	if bodyCurrent {
 		s.finishJob(id, model.StateReady, "title and full-text indexes are ready")
 		return false
 	}
 	if titleBuilt {
 		return true
 	}
-	s.buildBody(ctx, id, job.Wiki, manifest)
+	s.buildBody(ctx, id, job.Dataset, manifest, provider)
 	return false
 }
 
-func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.Manifest) {
-	path := s.wikiPath(wiki)
-	temporary := filepath.Join(path, wikiindex.BodyIndexDir+".building")
+func (s *Store) buildBody(ctx context.Context, id, dataset string, manifest model.Manifest, provider provider.Provider) {
+	path := s.datasetPath(provider.ID(), dataset)
+	temporary := filepath.Join(path, knowledgeindex.BodyDirectory+".building")
 	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "title search and page reads are available; building full-text index", "")
-	if err := wikiindex.BuildBody(ctx, generationParts(path, manifest.PartCount), temporary, func(done, total int64) {
-		s.setJob(id, model.StateBodyIndexing, "body_indexing", done, total, "streams", 0, "title search and page reads are available; building full-text index", "")
+	if err := provider.BuildBody(ctx, path, manifest, func(done, total int64) {
+		s.setJob(id, model.StateBodyIndexing, "body_indexing", done, total, "documents", 0, "title search and document reads are available; building full-text index", "")
 	}); err != nil {
 		s.failJob(id, err)
 		return
@@ -868,7 +969,7 @@ func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.M
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeReaders(path)
-	final := filepath.Join(path, wikiindex.BodyIndexDir)
+	final := filepath.Join(path, knowledgeindex.BodyDirectory)
 	if err := os.RemoveAll(final); err != nil {
 		s.failJobLocked(id, err)
 		return
@@ -877,20 +978,12 @@ func (s *Store) buildBody(ctx context.Context, id, wiki string, manifest model.M
 		s.failJobLocked(id, err)
 		return
 	}
-	manifest.BodyReady, manifest.BodyIndexVersion = true, wikiindex.CurrentBodyIndexVersion
+	manifest.BodyReady, manifest.BodyIndexVersion = true, knowledgeindex.BodyVersion
 	if err := writeJSON(filepath.Join(path, "manifest.json"), manifest); err != nil {
 		s.failJobLocked(id, err)
 		return
 	}
 	s.finishJobLocked(id, model.StateReady, "full-text index is ready")
-}
-
-func generationParts(path string, count int) []wikiindex.Part {
-	parts := make([]wikiindex.Part, 0, count)
-	for i := range count {
-		parts = append(parts, wikiindex.Part{Number: i, DumpPath: filepath.Join(path, "parts", fmt.Sprintf("%03d.dump.bz2", i)), IndexPath: filepath.Join(path, "parts", fmt.Sprintf("%03d.index.bz2", i))})
-	}
-	return parts
 }
 
 func migrateLegacyStage(stage, partsDir string) error {
@@ -916,10 +1009,13 @@ func migrateLegacyStage(stage, partsDir string) error {
 	return nil
 }
 
-func (s *Store) publish(wiki, stage string) error {
+func (s *Store) publish(providerID, dataset, stage string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	destination := s.wikiPath(wiki)
+	destination := s.datasetPath(providerID, dataset)
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
 	s.closeReaders(destination)
 	old := destination + ".old"
 	if err := os.RemoveAll(old); err != nil {
@@ -945,6 +1041,9 @@ func (s *Store) setJob(id, state, phase string, completed, total int64, units st
 		return
 	}
 	if job.State == model.StatePaused || job.State == model.StateCanceled {
+		return
+	}
+	if job.State == state && job.Phase == phase && job.Units == units && job.Total == total && completed < job.Completed {
 		return
 	}
 	transition := job.State != state || job.Phase != phase || errText != ""
@@ -1008,7 +1107,7 @@ func (s *Store) failJobLocked(id string, err error) {
 		return
 	}
 	job.State, job.Phase, job.Error, job.Message, job.UpdatedAt = model.StateFailed, "failed", err.Error(), "job failed", time.Now().UTC()
-	delete(s.active, job.Wiki)
+	delete(s.active, job.Dataset)
 	_ = s.saveJobsLocked()
 }
 
@@ -1028,16 +1127,22 @@ func (s *Store) finishJobLocked(id, state, message string) {
 	}
 	job.State, job.Phase, job.Message, job.UpdatedAt = state, "complete", message, time.Now().UTC()
 	job.TitleAvailable = state == model.StateReady || job.TitleAvailable
-	delete(s.active, job.Wiki)
+	delete(s.active, job.Dataset)
 	_ = s.saveJobsLocked()
 }
 
-func (s *Store) wikiPath(wiki string) string { return filepath.Join(s.root, "wikis", wiki) }
+func (s *Store) datasetPath(providerID, dataset string) string {
+	return filepath.Join(s.root, "datasets", providerID, dataset)
+}
+
+func (s *Store) providerForManifest(manifest model.Manifest) (provider.Provider, error) {
+	return providerForDatasetManifest(s.providers, manifest)
+}
 
 func (s *Store) jobsPath() string { return filepath.Join(s.root, "jobs.json") }
 
 func (s *Store) backfillSiteMetadata(ctx context.Context) {
-	entries, err := os.ReadDir(filepath.Join(s.root, "wikis"))
+	entries, err := s.localDatasetEntries()
 	if err != nil {
 		return
 	}
@@ -1045,46 +1150,17 @@ func (s *Store) backfillSiteMetadata(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if !entry.IsDir() {
-			continue
-		}
-		path := s.wikiPath(entry.Name())
+		path := entry.path
 		manifestPath := filepath.Join(path, "manifest.json")
 		manifest, readErr := readManifest(manifestPath)
-		if readErr != nil || !manifest.Site.MetadataUpdatedAt.IsZero() && time.Since(manifest.Site.MetadataUpdatedAt) < 24*time.Hour {
+		if readErr != nil {
 			continue
 		}
-		dumpSite := wikimedia.ReadDumpSiteMetadata(ctx, entry.Name(), filepath.Join(path, "parts", "000.dump.bz2"))
-		if s.remote != nil {
-			dumpSite = mergeSiteMetadata(dumpSite, s.remote.SiteMetadata(ctx, entry.Name()))
+		provider, providerErr := s.providerForManifest(manifest)
+		if providerErr == nil && provider.Backfill(ctx, path, &manifest) {
+			_ = writeJSON(manifestPath, manifest)
 		}
-		manifest.Site = dumpSite
-		_ = writeJSON(manifestPath, manifest)
 	}
-}
-
-func mergeSiteMetadata(fallback, preferred model.WikiSiteMetadata) model.WikiSiteMetadata {
-	if preferred.Name != "" {
-		fallback.Name = preferred.Name
-	}
-	if preferred.Project != "" {
-		fallback.Project = preferred.Project
-	}
-	if preferred.ContentType != "" {
-		fallback.ContentType = preferred.ContentType
-	}
-	if preferred.Language.Code != "" {
-		fallback.Language = preferred.Language
-	}
-	if preferred.OnlineSourceURL != "" {
-		fallback.OnlineSourceURL = preferred.OnlineSourceURL
-	}
-	fallback.ContentArticles, fallback.Closed = preferred.ContentArticles, preferred.Closed
-	fallback.License, fallback.LicenseURL = preferred.License, preferred.LicenseURL
-	if !preferred.MetadataUpdatedAt.IsZero() {
-		fallback.MetadataUpdatedAt = preferred.MetadataUpdatedAt
-	}
-	return fallback
 }
 
 func (s *Store) loadJobs() error {
@@ -1099,12 +1175,26 @@ func (s *Store) loadJobs() error {
 	if err := json.Unmarshal(data, &jobs); err != nil {
 		return fmt.Errorf("decode jobs: %w", err)
 	}
+	var legacy []struct{ ID, Wiki string }
+	_ = json.Unmarshal(data, &legacy)
+	legacyDataset := make(map[string]string, len(legacy))
+	for _, job := range legacy {
+		legacyDataset[job.ID] = job.Wiki
+	}
 	for _, job := range jobs {
+		if job.Dataset == "" {
+			job.Dataset = legacyDataset[job.ID]
+		}
+		if job.Provider == "" {
+			if provider, providerErr := s.providers.ForCollection(job.Dataset); providerErr == nil {
+				job.Provider = provider.ID()
+			}
+		}
 		if job.State == model.StatePaused {
-			s.active[job.Wiki] = job.ID
+			s.active[job.Dataset] = job.ID
 		} else if job.State != model.StateDownloaded && job.State != model.StateReady && job.State != model.StateUpToDate && job.State != model.StateFailed && job.State != model.StateCanceled {
 			job.State, job.Phase, job.Message = model.StateQueued, "queued", "resuming after server restart"
-			s.active[job.Wiki] = job.ID
+			s.active[job.Dataset] = job.ID
 			s.enqueue(job)
 		}
 		s.jobs[job.ID] = job
@@ -1143,6 +1233,48 @@ func readManifest(path string) (model.Manifest, error) {
 	var manifest model.Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return model.Manifest{}, err
+	}
+	var legacy struct {
+		Wiki            string `json:"wiki"`
+		DumpDate        string `json:"dump_date"`
+		DumpSHA1        string `json:"dump_sha1"`
+		IndexSHA1       string `json:"index_sha1"`
+		DumpSize        int64  `json:"dump_size"`
+		IndexSize       int64  `json:"index_size"`
+		PageCount       uint64 `json:"page_count"`
+		ContentArticles uint64 `json:"content_articles"`
+		Site            struct {
+			ContentArticles uint64 `json:"content_articles"`
+		} `json:"site"`
+	}
+	if err := json.Unmarshal(data, &legacy); err == nil {
+		if manifest.Dataset == "" {
+			manifest.Dataset = legacy.Wiki
+		}
+		if manifest.ReleaseDate == "" {
+			manifest.ReleaseDate = legacy.DumpDate
+		}
+		if manifest.RawHash == "" {
+			manifest.RawHash = legacy.DumpSHA1
+		}
+		if manifest.ProviderMetadataHash == "" {
+			manifest.ProviderMetadataHash = legacy.IndexSHA1
+		}
+		if manifest.RawSize == 0 {
+			manifest.RawSize = legacy.DumpSize
+		}
+		if manifest.ProviderMetadataSize == 0 {
+			manifest.ProviderMetadataSize = legacy.IndexSize
+		}
+		if manifest.DocumentCount == 0 {
+			manifest.DocumentCount = legacy.PageCount
+		}
+		if manifest.Site.SourceDocuments == 0 {
+			manifest.Site.SourceDocuments = legacy.Site.ContentArticles
+			if manifest.Site.SourceDocuments == 0 {
+				manifest.Site.SourceDocuments = legacy.ContentArticles
+			}
+		}
 	}
 	return manifest, nil
 }
@@ -1183,13 +1315,17 @@ func localStorage(path string) (total, compressedDump, multistreamIndex, titleIn
 			return nil
 		}
 		switch {
+		case strings.HasPrefix(relative, "raw"+string(filepath.Separator)):
+			compressedDump += size
+		case relative == "rfc-index.xml" || relative == "documents.json":
+			multistreamIndex += size
 		case strings.HasPrefix(relative, "parts"+string(filepath.Separator)) && strings.HasSuffix(relative, ".dump.bz2"):
 			compressedDump += size
 		case strings.HasPrefix(relative, "parts"+string(filepath.Separator)) && strings.HasSuffix(relative, ".index.bz2"):
 			multistreamIndex += size
-		case pathInIndex(relative, wikiindex.TitleIndexDir):
+		case pathInIndex(relative, knowledgeindex.TitleDirectory):
 			titleIndex += size
-		case pathInIndex(relative, wikiindex.BodyIndexDir):
+		case pathInIndex(relative, knowledgeindex.BodyDirectory):
 			bodyIndex += size
 		}
 		return nil
@@ -1197,17 +1333,17 @@ func localStorage(path string) (total, compressedDump, multistreamIndex, titleIn
 	return total, compressedDump, multistreamIndex, titleIndex, bodyIndex
 }
 
-func (s *Store) localStorage(wikiPath string) (total, compressedDump, multistreamIndex, titleIndex, bodyIndex int64) {
+func (s *Store) localStorage(datasetPath string) (total, compressedDump, multistreamIndex, titleIndex, bodyIndex int64) {
 	s.storageMu.Lock()
 	defer s.storageMu.Unlock()
 	if s.storage == nil {
 		s.storage = make(map[string]storageSnapshot)
 	}
-	if cached, ok := s.storage[wikiPath]; ok && time.Since(cached.updated) < storageCacheDuration {
+	if cached, ok := s.storage[datasetPath]; ok && time.Since(cached.updated) < storageCacheDuration {
 		return cached.total, cached.compressedDump, cached.multistreamIndex, cached.titleIndex, cached.bodyIndex
 	}
-	total, compressedDump, multistreamIndex, titleIndex, bodyIndex = localStorage(wikiPath)
-	s.storage[wikiPath] = storageSnapshot{updated: time.Now(), total: total, compressedDump: compressedDump, multistreamIndex: multistreamIndex, titleIndex: titleIndex, bodyIndex: bodyIndex}
+	total, compressedDump, multistreamIndex, titleIndex, bodyIndex = localStorage(datasetPath)
+	s.storage[datasetPath] = storageSnapshot{updated: time.Now(), total: total, compressedDump: compressedDump, multistreamIndex: multistreamIndex, titleIndex: titleIndex, bodyIndex: bodyIndex}
 	return total, compressedDump, multistreamIndex, titleIndex, bodyIndex
 }
 

@@ -49,7 +49,7 @@ func TestCatalogMetadataAndDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Wikis) != 1 || !result.Wikis[0].Available || result.Wikis[0].DumpSHA1 != sha || result.Wikis[0].DisplayName != "Test Wikipedia" {
+	if len(result.Datasets) != 1 || !result.Datasets[0].Available || result.Datasets[0].RawHash != sha || result.Datasets[0].DisplayName != "Test Wikipedia" {
 		t.Fatalf("unexpected catalog: %#v", result)
 	}
 	destination := filepath.Join(t.TempDir(), "partial")
@@ -60,7 +60,7 @@ func TestCatalogMetadataAndDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Download(context.Background(), metadata.Parts[0].Dump, destination, func(int64, int64, float64) {}); err != nil {
+	if err := client.Download(context.Background(), metadata.Parts[0].Raw, destination, func(int64, int64, float64) {}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(destination)
@@ -94,15 +94,15 @@ func TestFullCatalogIsCachedAndFilteredLocally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all.Wikis) != 2 || all.Wikis[0].DisplayName == "" || all.Wikis[1].ContentType == "" {
-		t.Fatalf("full catalog = %#v", all.Wikis)
+	if len(all.Datasets) != 2 || all.Datasets[0].DisplayName == "" || all.Datasets[1].ContentType == "" {
+		t.Fatalf("full catalog = %#v", all.Datasets)
 	}
 	filtered, err := client.ListAvailable(context.Background(), "encyclopedia", 0, -1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(filtered.Wikis) != 2 {
-		t.Fatalf("content filter returned %#v", filtered.Wikis)
+	if len(filtered.Datasets) != 2 {
+		t.Fatalf("content filter returned %#v", filtered.Datasets)
 	}
 	if catalogRequests.Load() != 1 || matrixRequests.Load() != 1 || metadataRequests.Load() != 0 {
 		t.Fatalf("requests: catalog=%d matrix=%d metadata=%d", catalogRequests.Load(), matrixRequests.Load(), metadataRequests.Load())
@@ -134,7 +134,7 @@ func TestSiteMetadataIncludesSelectionFields(t *testing.T) {
 	defer server.Close()
 	client := NewClientWithBaseURL(server.URL)
 	metadata := client.SiteMetadata(context.Background(), "dawiki")
-	if metadata.Name != "Danish Wikipedia" || metadata.Project != "wikipedia" || metadata.Language.LocalName != "dansk" || metadata.ContentArticles != 321 || metadata.OnlineSourceURL != server.URL || metadata.License != "CC BY-SA" {
+	if metadata.Name != "Danish Wikipedia" || metadata.Project != "wikipedia" || metadata.Language.LocalName != "dansk" || metadata.SourceDocuments != 321 || metadata.OnlineSourceURL != server.URL || metadata.License != "CC BY-SA" {
 		t.Fatalf("site metadata = %#v", metadata)
 	}
 }
@@ -200,11 +200,11 @@ func TestMultipartMetadataIsOrderedAndSummed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Wikis) != 1 {
-		t.Fatalf("wikis = %#v", result.Wikis)
+	if len(result.Datasets) != 1 {
+		t.Fatalf("wikis = %#v", result.Datasets)
 	}
-	wiki := result.Wikis[0]
-	if !wiki.Available || wiki.PartCount != 2 || wiki.DumpSize != 300 || wiki.IndexSize != 30 || wiki.Fingerprint == "" {
+	wiki := result.Datasets[0]
+	if !wiki.Available || wiki.PartCount != 2 || wiki.RawSize != 300 || wiki.ProviderMetadataSize != 30 || wiki.Fingerprint == "" {
 		t.Fatalf("unexpected multipart wiki: %#v", wiki)
 	}
 	metadata, err := client.LatestMetadata(context.Background(), "enwiki")

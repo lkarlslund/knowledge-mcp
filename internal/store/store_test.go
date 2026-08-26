@@ -16,6 +16,8 @@ import (
 
 	dsbzip2 "github.com/dsnet/compress/bzip2"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	wikimediaprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/wikimedia"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikiindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/wikimedia"
 )
@@ -41,16 +43,20 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	backend, err := Open(t.TempDir(), wikimedia.NewClientWithBaseURL(server.URL))
+	registry, err := provider.NewRegistry(wikimediaprovider.New(wikimedia.NewClientWithBaseURL(server.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := Open(t.TempDir(), registry)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer backend.Close()
-	job, err := backend.Submit("testwiki", "download")
+	job, err := backend.Submit("testwiki", "", "download")
 	if err != nil {
 		t.Fatal(err)
 	}
-	duplicate, err := backend.Submit("testwiki", "download")
+	duplicate, err := backend.Submit("testwiki", "", "download")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +119,11 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if result.SearchMode != "full_text" || len(result.Hits) != 1 {
 		t.Fatalf("unexpected search result: %#v", result)
 	}
-	page, err := backend.Read(context.Background(), "testwiki", "Test Article", 0, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true})
+	page, err := backend.Read(context.Background(), "testwiki", "Test Article", "", model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.PageID != 7 || page.Content != "A remarkable capybara appears here." {
+	if page.NumericID != 7 || page.Content != "A remarkable capybara appears here." {
 		t.Fatalf("unexpected page: %#v", page)
 	}
 }
@@ -151,13 +157,52 @@ func TestMigrateLegacyStagePreservesPartialDownloads(t *testing.T) {
 	}
 }
 
+func TestMigrateFlatDatasetIntoProviderDirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	flat := filepath.Join(root, "datasets", "testwiki")
+	if err := os.MkdirAll(flat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(flat, "manifest.json"), model.Manifest{Dataset: "testwiki", Provider: "wikimedia"}); err != nil {
+		t.Fatal(err)
+	}
+	registry := testProviderRegistry(t)
+	if err := migrateFlatDatasetDirectories(root, registry); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "datasets", "wikimedia", "testwiki", "manifest.json")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("migrated manifest missing: %v", err)
+	}
+	if _, err := os.Stat(flat); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("flat dataset still exists: %v", err)
+	}
+}
+
+func TestReadManifestTranslatesLegacyDatasetFields(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	legacy := []byte(`{"wiki":"dawiki","dump_date":"20260801","dump_sha1":"raw","index_sha1":"metadata","dump_size":123,"index_size":45,"page_count":678,"site":{"content_articles":321}}`)
+	if err := os.WriteFile(path, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Dataset != "dawiki" || manifest.ReleaseDate != "20260801" || manifest.RawHash != "raw" || manifest.ProviderMetadataHash != "metadata" || manifest.RawSize != 123 || manifest.ProviderMetadataSize != 45 || manifest.DocumentCount != 678 || manifest.Site.SourceDocuments != 321 {
+		t.Fatalf("translated manifest = %#v", manifest)
+	}
+}
+
 func TestJobPauseResumeCancelAndRetry(t *testing.T) {
 	t.Parallel()
-	job := &model.Job{ID: "job-1", Wiki: "testwiki", Kind: "download", State: model.StateDownloading, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	job := &model.Job{ID: "job-1", Dataset: "testwiki", Kind: "download", State: model.StateDownloading, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	backend := &Store{
 		root:          t.TempDir(),
 		jobs:          map[string]*model.Job{job.ID: job},
-		active:        map[string]string{job.Wiki: job.ID},
+		active:        map[string]string{job.Dataset: job.ID},
 		downloadQueue: make(chan string, 4),
 		indexQueue:    make(chan string, 4),
 		running:       make(map[string]context.CancelFunc),
@@ -187,32 +232,33 @@ func TestJobPauseResumeCancelAndRetry(t *testing.T) {
 	}
 }
 
-func TestDeleteWikiRemovesLocalAndStagedData(t *testing.T) {
+func TestDeleteDatasetRemovesLocalAndStagedData(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	wiki := "testwiki"
-	job := &model.Job{ID: "job-1", Wiki: wiki, Kind: "download", State: model.StateDownloaded, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	job := &model.Job{ID: "job-1", Dataset: wiki, Kind: "download", State: model.StateDownloaded, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	backend := &Store{
 		root:         root,
+		providers:    testProviderRegistry(t),
 		jobs:         map[string]*model.Job{job.ID: job},
 		active:       map[string]string{},
 		watchers:     map[chan struct{}]struct{}{},
-		readers:      map[string]*wikiindex.Reader{},
+		readers:      map[string]provider.Reader{},
 		storage:      map[string]storageSnapshot{},
 		lastProgress: map[string]time.Time{},
 	}
-	wikiPath := backend.wikiPath(wiki)
+	wikiPath := backend.datasetPath("wikimedia", wiki)
 	if err := os.MkdirAll(filepath.Join(wikiPath, "parts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJSON(filepath.Join(wikiPath, "manifest.json"), model.Manifest{Wiki: wiki}); err != nil {
+	if err := writeJSON(filepath.Join(wikiPath, "manifest.json"), model.Manifest{Dataset: wiki}); err != nil {
 		t.Fatal(err)
 	}
 	stagePath := filepath.Join(root, ".staging", job.ID)
 	if err := os.MkdirAll(stagePath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.DeleteWiki(wiki); err != nil {
+	if err := backend.DeleteDataset(wiki); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{wikiPath, stagePath} {
@@ -225,24 +271,33 @@ func TestDeleteWikiRemovesLocalAndStagedData(t *testing.T) {
 	}
 }
 
-func TestDeleteWikiRejectsActiveJob(t *testing.T) {
+func TestDeleteDatasetRejectsActiveJob(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	wiki := "testwiki"
-	wikiPath := filepath.Join(root, "wikis", wiki)
+	wikiPath := filepath.Join(root, "datasets", "wikimedia", wiki)
 	if err := os.MkdirAll(wikiPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJSON(filepath.Join(wikiPath, "manifest.json"), model.Manifest{Wiki: wiki}); err != nil {
+	if err := writeJSON(filepath.Join(wikiPath, "manifest.json"), model.Manifest{Dataset: wiki}); err != nil {
 		t.Fatal(err)
 	}
-	backend := &Store{root: root, active: map[string]string{wiki: "job-1"}}
-	if err := backend.DeleteWiki(wiki); err == nil {
-		t.Fatal("DeleteWiki succeeded with an active job")
+	backend := &Store{root: root, providers: testProviderRegistry(t), active: map[string]string{wiki: "job-1"}}
+	if err := backend.DeleteDataset(wiki); err == nil {
+		t.Fatal("DeleteDataset succeeded with an active job")
 	}
 	if _, err := os.Stat(wikiPath); err != nil {
 		t.Fatalf("active wiki was removed: %v", err)
 	}
+}
+
+func testProviderRegistry(t *testing.T) *provider.Registry {
+	t.Helper()
+	registry, err := provider.NewRegistry(wikimediaprovider.New(wikimedia.NewClient()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
 }
 
 func TestLocalStorageBreakdown(t *testing.T) {
@@ -363,6 +418,10 @@ func TestJobProgressPersistenceIsThrottled(t *testing.T) {
 	}
 	if status, _ := backend.Job(job.ID, ""); status.Completed != 2 {
 		t.Fatalf("in-memory progress = %d, want 2", status.Completed)
+	}
+	backend.setJob(job.ID, model.StateDownloading, "downloading", 1, 10, "bytes", 1, "stale worker update", "")
+	if status, _ := backend.Job(job.ID, ""); status.Completed != 2 {
+		t.Fatalf("regressing progress update was accepted: %d", status.Completed)
 	}
 	backend.mu.Lock()
 	backend.lastProgress[job.ID] = time.Now().Add(-progressSaveInterval)

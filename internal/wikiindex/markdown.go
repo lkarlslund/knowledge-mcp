@@ -72,8 +72,8 @@ func RenderMarkdown(source, baseURL string) MarkdownDocument {
 	return MarkdownDocument{Content: cleanMarkdown(result), References: references}
 }
 
-// PageURL returns the canonical page URL derived from site metadata.
-func PageURL(baseURL, title string) string {
+// URL returns the canonical page URL derived from site metadata.
+func URL(baseURL, title string) string {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" || title == "" {
 		return ""

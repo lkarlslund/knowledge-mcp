@@ -21,18 +21,18 @@ var dashboardFiles embed.FS
 
 type Service interface {
 	ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error)
-	ListLocal() ([]model.LocalWiki, error)
-	ListUpgrades(context.Context) ([]model.OnlineWiki, error)
+	ListLocal() ([]model.LocalDataset, error)
+	ListUpgrades(context.Context) ([]model.AvailableDataset, error)
 	ListJobs() []model.Job
-	Submit(string, string) (model.Job, error)
-	DeleteWiki(string) error
+	Submit(string, string, string) (model.Job, error)
+	DeleteDataset(string) error
 	JobAction(string, string) (model.Job, error)
 	Subscribe(context.Context) <-chan struct{}
 }
 
 type stateSnapshot struct {
-	Local []model.LocalWiki `json:"local"`
-	Jobs  []model.Job       `json:"jobs"`
+	Local []model.LocalDataset `json:"local"`
+	Jobs  []model.Job          `json:"jobs"`
 }
 
 func Handler(service Service) http.Handler {
@@ -106,26 +106,26 @@ func Handler(service Service) http.Handler {
 		result, err := service.ListAvailable(r.Context(), query.Get("filter"), offset, limit, query.Get("refresh") == "true")
 		writeJSON(w, result, err)
 	})
-	mux.HandleFunc("POST /api/dashboard/wiki/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Wikipedia-MCP") != "1" {
+	mux.HandleFunc("POST /api/dashboard/dataset/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Knowledge-MCP") != "1" {
 			writeJSONStatus(w, nil, errors.New("missing maintenance request header"), http.StatusForbidden)
 			return
 		}
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/dashboard/wiki/"), "/")
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/dashboard/dataset/"), "/")
 		if len(parts) != 2 || parts[0] == "" || parts[1] != "download" && parts[1] != "update" && parts[1] != "delete" {
-			writeJSONStatus(w, nil, errors.New("expected /api/dashboard/wiki/{wiki}/{download|update|delete}"), http.StatusBadRequest)
+			writeJSONStatus(w, nil, errors.New("expected /api/dashboard/dataset/{dataset}/{download|update|delete}"), http.StatusBadRequest)
 			return
 		}
 		if parts[1] == "delete" {
-			err := service.DeleteWiki(parts[0])
-			writeJSON(w, map[string]any{"wiki": parts[0], "deleted": err == nil}, err)
+			err := service.DeleteDataset(parts[0])
+			writeJSON(w, map[string]any{"dataset": parts[0], "deleted": err == nil}, err)
 			return
 		}
-		job, err := service.Submit(parts[0], parts[1])
+		job, err := service.Submit(parts[0], r.URL.Query().Get("variant"), parts[1])
 		writeJSON(w, job, err)
 	})
 	mux.HandleFunc("POST /api/dashboard/job/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Wikipedia-MCP") != "1" {
+		if r.Header.Get("X-Knowledge-MCP") != "1" {
 			writeJSONStatus(w, nil, errors.New("missing maintenance request header"), http.StatusForbidden)
 			return
 		}

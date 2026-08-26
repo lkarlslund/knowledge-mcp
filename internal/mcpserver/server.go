@@ -19,12 +19,12 @@ var Version = "0.1.0"
 
 type Service interface {
 	ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error)
-	ListLocalSummary() ([]model.LocalWikiSummary, error)
-	Submit(string, string) (model.Job, error)
+	ListLocalSummary() ([]model.LocalDatasetSummary, error)
+	Submit(string, string, string) (model.Job, error)
 	Job(string, string) (model.Job, error)
 	JobAction(string, string) (model.Job, error)
 	Search(context.Context, string, string, model.SearchOptions) (model.SearchResult, error)
-	Read(context.Context, string, string, uint64, model.ReadOptions) (model.Page, error)
+	Read(context.Context, string, string, string, model.ReadOptions) (model.Document, error)
 }
 
 type DashboardService interface {
@@ -33,42 +33,43 @@ type DashboardService interface {
 }
 
 type listAvailableInput struct {
-	Filter  string `json:"filter,omitempty" jsonschema:"case-insensitive substring filter for Wikimedia database names"`
+	Filter  string `json:"filter,omitempty" jsonschema:"case-insensitive substring filter across provider dataset metadata"`
 	Offset  int    `json:"offset,omitempty" jsonschema:"zero-based catalog offset"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"number of wikis to return; defaults to 20 and is capped at 50"`
-	Refresh bool   `json:"refresh,omitempty" jsonschema:"bypass the one-hour online catalog cache"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"number of datasets to return; defaults to 20 and is capped at 50"`
+	Refresh bool   `json:"refresh,omitempty" jsonschema:"bypass the one-day online catalog cache"`
 }
 
 type emptyInput struct{}
 
 type submitInput struct {
-	Wiki string `json:"wiki" jsonschema:"Wikimedia database name such as enwiki or dawiki"`
+	Dataset string `json:"dataset" jsonschema:"installed or available dataset ID such as enwiki or rfc"`
+	Variant string `json:"variant,omitempty" jsonschema:"provider-defined variant; omit to use the default"`
 }
 
 type jobStatusInput struct {
-	JobID string `json:"job_id,omitempty" jsonschema:"job identifier returned by wiki_download or wiki_update"`
-	Wiki  string `json:"wiki,omitempty" jsonschema:"wiki whose latest job should be returned when job_id is omitted"`
+	JobID   string `json:"job_id,omitempty" jsonschema:"job identifier returned by knowledge_download or knowledge_update"`
+	Dataset string `json:"dataset,omitempty" jsonschema:"dataset whose latest job should be returned when job_id is omitted"`
 }
 
 type jobInput struct {
 	JobID  string `json:"job_id" jsonschema:"job identifier returned by a background operation"`
-	Action string `json:"action" jsonschema:"one of pause, resume, cancel, or retry; use wiki_job_status to inspect a job"`
+	Action string `json:"action" jsonschema:"one of pause, resume, cancel, or retry; use knowledge_job_status to inspect a job"`
 }
 
 type searchInput struct {
-	Wiki               string `json:"wiki" jsonschema:"installed Wikimedia database name"`
-	Query              string `json:"query" jsonschema:"plain text search query"`
-	Offset             int    `json:"offset,omitempty" jsonschema:"zero-based result offset"`
-	Limit              int    `json:"limit,omitempty" jsonschema:"result count; defaults to 10 and is capped at 50"`
-	IncludeNonArticles bool   `json:"include_non_articles,omitempty" jsonschema:"include project, category, draft, talk, and other non-article namespaces; defaults to false"`
-	Snippets           *bool  `json:"snippets,omitempty" jsonschema:"include query-centered result passages; defaults to true"`
+	Dataset          string `json:"dataset" jsonschema:"installed dataset ID"`
+	Query            string `json:"query" jsonschema:"plain text search query"`
+	Offset           int    `json:"offset,omitempty" jsonschema:"zero-based result offset"`
+	Limit            int    `json:"limit,omitempty" jsonschema:"result count; defaults to 10 and is capped at 50"`
+	IncludeSecondary bool   `json:"include_secondary,omitempty" jsonschema:"include provider-defined secondary records; for Wikimedia this includes project, category, draft, talk, and other namespaces"`
+	Snippets         *bool  `json:"snippets,omitempty" jsonschema:"include query-centered result passages; defaults to true"`
 }
 
 type readInput struct {
-	Wiki            string `json:"wiki" jsonschema:"installed Wikimedia database name"`
-	Title           string `json:"title,omitempty" jsonschema:"exact page title; mutually exclusive with page_id"`
-	PageID          uint64 `json:"page_id,omitempty" jsonschema:"numeric page identifier; mutually exclusive with title"`
-	Format          string `json:"format,omitempty" jsonschema:"markdown (default), text, or wikitext"`
+	Dataset         string `json:"dataset" jsonschema:"installed dataset ID"`
+	ID              string `json:"id,omitempty" jsonschema:"opaque document identifier returned by knowledge_search; mutually exclusive with title"`
+	Title           string `json:"title,omitempty" jsonschema:"exact document title; mutually exclusive with id"`
+	Format          string `json:"format,omitempty" jsonschema:"markdown (default), text, or provider-native source"`
 	Section         string `json:"section,omitempty" jsonschema:"article section heading or anchor; offsets apply within the selected section"`
 	Offset          int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
 	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum article-content characters; defaults to 12000 and is capped at 50000"`
@@ -77,66 +78,66 @@ type readInput struct {
 }
 
 func New(service Service) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "wikipedia-multistream-mcp", Version: Version}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}})
+	server := mcp.NewServer(&mcp.Implementation{Name: "knowledge-dataset-mcp", Version: Version}, &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}})
 	listAvailableSchema := mustSchemaFor[listAvailableInput]()
 	setIntegerBounds(listAvailableSchema, "offset", 0, nil)
 	setIntegerBounds(listAvailableSchema, "limit", 1, intPointer(50))
 	jobStatusSchema := mustSchemaFor[jobStatusInput]()
-	jobStatusSchema.AnyOf = []*jsonschema.Schema{{Required: []string{"job_id"}}, {Required: []string{"wiki"}}}
+	jobStatusSchema.AnyOf = []*jsonschema.Schema{{Required: []string{"job_id"}}, {Required: []string{"dataset"}}}
 	jobSchema := mustSchemaFor[jobInput]()
 	jobSchema.Properties["action"].Enum = []any{"pause", "resume", "cancel", "retry"}
 	searchSchema := mustSchemaFor[searchInput]()
 	setIntegerBounds(searchSchema, "offset", 0, nil)
 	setIntegerBounds(searchSchema, "limit", 1, intPointer(50))
 	readSchema := mustSchemaFor[readInput]()
-	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"title"}}, {Required: []string{"page_id"}}}
-	readSchema.Properties["format"].Enum = []any{"markdown", "text", "wikitext"}
+	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"title"}}, {Required: []string{"id"}}}
+	readSchema.Properties["format"].Enum = []any{"markdown", "text", "source"}
 	setIntegerBounds(readSchema, "offset", 0, nil)
 	setIntegerBounds(readSchema, "max_chars", 1, intPointer(50_000))
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_available", Description: "List and filter Wikimedia wikis with completed online multistream article dumps.", InputSchema: listAvailableSchema, Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_available", Description: "Discover downloadable knowledge datasets with provider-defined descriptions, selection metadata, and variants.", InputSchema: listAvailableSchema, Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
 		out, err := service.ListAvailable(ctx, in.Filter, in.Offset, in.Limit, in.Refresh)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_list_local", Description: "List local wikis with human-readable project, language, content scope, online source, content size, snapshot date, and search capability metadata.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalWikiSummary, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_local", Description: "List installed datasets with provider-defined descriptions plus variant, content scope, source, snapshot, and search metadata to help select the right dataset.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalDatasetSummary, error) {
 		out, err := service.ListLocalSummary()
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_download", Description: "Submit a background download for a new wiki and return immediately with a job ID.", Annotations: changingAnnotations(false, true)}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
-		out, err := service.Submit(in.Wiki, "download")
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_download", Description: "Submit a background download for a dataset and return immediately with a job ID; poll knowledge_job_status.", Annotations: changingAnnotations(false, true)}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
+		out, err := service.Submit(in.Dataset, in.Variant, "download")
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_update", Description: "Submit a background update for an installed wiki and return immediately with a job ID.", Annotations: changingAnnotations(true, true)}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
-		out, err := service.Submit(in.Wiki, "update")
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_update", Description: "Submit a background update for an installed dataset and return immediately with a job ID.", Annotations: changingAnnotations(true, true)}, func(_ context.Context, _ *mcp.CallToolRequest, in submitInput) (*mcp.CallToolResult, model.Job, error) {
+		out, err := service.Submit(in.Dataset, in.Variant, "update")
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job_status", Description: "Poll one download/update job by job ID or wiki name.", InputSchema: jobStatusSchema, Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobStatusInput) (*mcp.CallToolResult, model.Job, error) {
-		if in.JobID == "" && in.Wiki == "" {
-			return nil, model.Job{}, errors.New("provide job_id or wiki")
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_job_status", Description: "Poll one background job by job ID or dataset ID.", InputSchema: jobStatusSchema, Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobStatusInput) (*mcp.CallToolResult, model.Job, error) {
+		if in.JobID == "" && in.Dataset == "" {
+			return nil, model.Job{}, errors.New("provide job_id or dataset")
 		}
-		out, err := service.Job(in.JobID, in.Wiki)
+		out, err := service.Job(in.JobID, in.Dataset)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_job", Description: "Control a background job using action pause, resume, cancel, or retry. Use wiki_job_status to inspect progress.", InputSchema: jobSchema, Annotations: changingAnnotations(true, false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobInput) (*mcp.CallToolResult, model.Job, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_job", Description: "Control a background job using action pause, resume, cancel, or retry. Use knowledge_job_status to inspect progress.", InputSchema: jobSchema, Annotations: changingAnnotations(true, false)}, func(_ context.Context, _ *mcp.CallToolRequest, in jobInput) (*mcp.CallToolResult, model.Job, error) {
 		if in.JobID == "" {
 			return nil, model.Job{}, errors.New("provide job_id")
 		}
 		if in.Action != "pause" && in.Action != "resume" && in.Action != "cancel" && in.Action != "retry" {
-			return nil, model.Job{}, errors.New("action must be pause, resume, cancel, or retry; use wiki_job_status to inspect a job")
+			return nil, model.Job{}, errors.New("action must be pause, resume, cancel, or retry; use knowledge_job_status to inspect a job")
 		}
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_search", Description: "Search an installed offline wiki snapshot. Full-text results fuse a bounded precision-oriented BM25 funnel with an independent strict all-terms recall funnel and title/phrase-proximity relevance signals; total is the deduplicated size of that fused pool. Exact titles and redirects resolve to the canonical page as a hard first tier, distinctive embedded redirect aliases are recognized below the existing first result, and duplicate aliases are collapsed. Results include canonical URLs, page IDs, match metadata, finite relative scores, and query-centered snippets. Encyclopedia articles are searched by default; set include_non_articles to include project, category, draft, talk, and other namespaces. Follow a relevant result with wiki_read using its page_id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
-		if strings.TrimSpace(in.Wiki) == "" || strings.TrimSpace(in.Query) == "" {
-			return nil, model.SearchResult{}, errors.New("provide wiki and a non-empty query")
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_search", Description: "Search an installed dataset using local indexes. Results contain an opaque stable id; follow a result with knowledge_read using dataset and id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+		if strings.TrimSpace(in.Dataset) == "" || strings.TrimSpace(in.Query) == "" {
+			return nil, model.SearchResult{}, errors.New("provide dataset and a non-empty query")
 		}
 		snippets := in.Snippets == nil || *in.Snippets
-		out, err := service.Search(ctx, in.Wiki, in.Query, model.SearchOptions{Offset: in.Offset, Limit: in.Limit, IncludeNonArticles: in.IncludeNonArticles, Snippets: snippets})
+		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets})
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "wiki_read", Description: "Read an installed wiki page by exact title or page ID as structured Markdown by default, plain text, or raw wikitext. Do not guess titles: normally call wiki_search first and pass the selected hit's page_id. Internal Markdown links use the wiki-read:// scheme and a Markdown title that spells out the corresponding wiki_read arguments; follow them by calling wiki_read with the embedded wiki, page_id or title, and optional section. Use section to jump to a heading from the returned outline. Large pages return readable boundary-aligned chunks with offset, returned_chars, total_chars, truncated, and next_offset; continue with next_offset. Redirects are followed by default. Only references used by the current chunk are returned, with explicit truncation metadata when the reference budget is exceeded.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Page, error) {
-		if (strings.TrimSpace(in.Title) == "") == (in.PageID == 0) {
-			return nil, model.Page{}, errors.New("provide exactly one of title or page_id")
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a document by its opaque stable id from knowledge_search or by exact title. Markdown is the default; provider-generated knowledge-read links identify related documents. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
+		if (strings.TrimSpace(in.Title) == "") == (strings.TrimSpace(in.ID) == "") {
+			return nil, model.Document{}, errors.New("provide exactly one of title or id")
 		}
 		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
 		maxChars := in.MaxChars
@@ -146,7 +147,7 @@ func New(service Service) *mcp.Server {
 			maxChars = 50_000
 		}
 		includeOutline := in.IncludeOutline != nil && *in.IncludeOutline || in.IncludeOutline == nil && in.Offset == 0 && in.Section == ""
-		out, err := service.Read(ctx, in.Wiki, in.Title, in.PageID, model.ReadOptions{Format: in.Format, Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000})
+		out, err := service.Read(ctx, in.Dataset, in.Title, in.ID, model.ReadOptions{Format: in.Format, Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000})
 		return nil, out, err
 	})
 	return server
