@@ -37,17 +37,22 @@ The server listens on `http://127.0.0.1:8765`; its MCP endpoint is
   --listen 127.0.0.1:9000 \
   --data-dir /srv/knowledge-data \
   --download-workers 3 \
-  --index-workers 2 \
+  --index-workers 1 \
   --download-connections 3
 ```
 
-Downloads and indexing use independent worker pools. Jobs submit and return
+Downloads and indexing use independent worker pools. One index job runs by
+default to avoid competing Bleve segment merges; each job still uses the
+configured internal decompression parallelism. Jobs submit and return
 immediately; poll their IDs for status. Partial provider downloads are preserved
 and resume after restarts. Updates are built in staging and atomically replace
 the installed generation only after the title index is usable.
 
 The listener intentionally requires an explicit loopback IP and has no
 authentication layer.
+
+Runtime profiles are available only on that loopback listener under
+`/debug/pprof/`, for example `go tool pprof http://127.0.0.1:8765/debug/pprof/profile?seconds=30`.
 
 ## CLI
 

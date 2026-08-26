@@ -25,12 +25,19 @@ import (
 
 const (
 	bodyShards     = 8
-	titleBatchSize = 1_000
+	titleBatchSize = 20_000
 	bodyBatchSize  = 8 << 20
 )
 
-type TitleProgress func(documents uint64, completed, total int64)
-type BodyProgress func(completed, total int64)
+type BuildPhase string
+
+const (
+	BuildPhaseScanning   BuildPhase = "scanning"
+	BuildPhaseCommitting BuildPhase = "committing"
+)
+
+type TitleProgress func(documents uint64, completed, total int64, phase BuildPhase)
+type BodyProgress func(completed, total int64, phase BuildPhase)
 
 type indexDocument struct {
 	Title           string   `json:"title"`
@@ -102,6 +109,10 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 	lastBoundary := true
 	commit := func(position provider.ScanPosition) error {
 		if batch.Size() > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			progress(count, position.Completed, position.Total, BuildPhaseCommitting)
 			if err := idx.Batch(batch); err != nil {
 				return err
 			}
@@ -112,7 +123,7 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
 			return err
 		}
-		progress(count, position.Completed, position.Total)
+		progress(count, position.Completed, position.Total, BuildPhaseScanning)
 		return nil
 	}
 	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
@@ -128,7 +139,7 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 		if batch.Size() >= titleBatchSize && position.Boundary {
 			return commit(position)
 		}
-		progress(count, position.Completed, position.Total)
+		progress(count, position.Completed, position.Total, BuildPhaseScanning)
 		return nil
 	})
 	if err != nil {
@@ -211,6 +222,9 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 		if state.batch.Size() == 0 {
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := indexes[shard].Batch(state.batch); err != nil {
 			return err
 		}
@@ -219,6 +233,7 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 	}
 	documentCount := checkpoint.Documents
 	flushAll := func(position provider.ScanPosition) error {
+		progress(position.Completed, position.Total, BuildPhaseCommitting)
 		for shard := range indexes {
 			if err := flush(shard); err != nil {
 				return err
@@ -229,7 +244,7 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
 			return err
 		}
-		progress(position.Completed, position.Total)
+		progress(position.Completed, position.Total, BuildPhaseScanning)
 		return nil
 	}
 	pendingBytes := 0
@@ -253,7 +268,7 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 			}
 			pendingBytes = 0
 		}
-		progress(position.Completed, position.Total)
+		progress(position.Completed, position.Total, BuildPhaseScanning)
 		return nil
 	})
 	if err != nil {
@@ -545,9 +560,14 @@ func indexMapping(body bool) mapping.IndexMapping {
 	m.DefaultAnalyzer = "knowledge_unicode"
 	m.IndexDynamic, m.StoreDynamic, m.DocValuesDynamic = false, false, false
 	doc := bleve.NewDocumentMapping()
-	for _, fieldName := range []string{"title", "url", "locator"} {
+	for _, fieldName := range []string{"title"} {
 		field := bleve.NewTextFieldMapping()
 		field.Store, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = true, false, false, false
+		doc.AddFieldMappingsAt(fieldName, field)
+	}
+	for _, fieldName := range []string{"url", "locator"} {
+		field := bleve.NewTextFieldMapping()
+		field.Store, field.Index, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = true, false, false, false, false
 		doc.AddFieldMappingsAt(fieldName, field)
 	}
 	exact := bleve.NewTextFieldMapping()
@@ -562,16 +582,22 @@ func indexMapping(body bool) mapping.IndexMapping {
 	identifierExact.Analyzer = "keyword"
 	identifierExact.Store, identifierExact.IncludeTermVectors, identifierExact.IncludeInAll, identifierExact.DocValues = false, false, false, false
 	doc.AddFieldMappingsAt("identifier_exact", identifierExact)
-	for _, fieldName := range []string{"aliases", "keywords", "status"} {
+	for _, fieldName := range []string{"aliases", "keywords"} {
 		field := bleve.NewTextFieldMapping()
-		field.Store, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = fieldName == "status", false, false, false
+		field.Store, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = false, false, false, false
 		doc.AddFieldMappingsAt(fieldName, field)
 	}
-	for _, fieldName := range []string{"part", "offset", "end", "namespace", "primary", "rank_weight"} {
+	status := bleve.NewTextFieldMapping()
+	status.Store, status.Index, status.IncludeTermVectors, status.IncludeInAll, status.DocValues = true, false, false, false, false
+	doc.AddFieldMappingsAt("status", status)
+	for _, fieldName := range []string{"part", "offset", "end", "namespace", "rank_weight"} {
 		field := bleve.NewNumericFieldMapping()
-		field.Store, field.Index, field.IncludeInAll, field.DocValues = true, true, false, false
+		field.Store, field.Index, field.IncludeInAll, field.DocValues = true, false, false, false
 		doc.AddFieldMappingsAt(fieldName, field)
 	}
+	primary := bleve.NewNumericFieldMapping()
+	primary.Store, primary.Index, primary.IncludeInAll, primary.DocValues = true, true, false, false
+	doc.AddFieldMappingsAt("primary", primary)
 	if body {
 		field := bleve.NewTextFieldMapping()
 		field.Store, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = false, false, false, false

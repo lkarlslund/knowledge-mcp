@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpclient"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
@@ -68,17 +69,24 @@ func newServeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer backend.Close()
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			fmt.Fprintf(os.Stderr, "serving MCP at http://%s/mcp using %s\n", listen, dataDir)
-			return mcpserver.ServeHTTP(ctx, listen, backend)
+			serveErr := mcpserver.ServeHTTP(ctx, listen, backend)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if closeErr := backend.CloseContext(shutdownCtx); closeErr != nil && !errors.Is(closeErr, context.DeadlineExceeded) {
+				return closeErr
+			} else if errors.Is(closeErr, context.DeadlineExceeded) {
+				fmt.Fprintln(os.Stderr, "index workers are still finishing an atomic batch; exiting with the last durable checkpoint")
+			}
+			return serveErr
 		},
 	}
 	command.Flags().StringVar(&listen, "listen", "127.0.0.1:8765", "loopback listen address")
 	command.Flags().StringVar(&dataDir, "data-dir", "./data", "runtime data directory")
 	command.Flags().IntVar(&downloadWorkers, "download-workers", 3, "concurrent download/update jobs")
-	command.Flags().IntVar(&indexWorkers, "index-workers", 2, "concurrent indexing jobs")
+	command.Flags().IntVar(&indexWorkers, "index-workers", 1, "concurrent indexing jobs")
 	command.Flags().IntVar(&downloadConnections, "download-connections", 3, "parallel HTTP ranges shared by downloads")
 	return command
 }
