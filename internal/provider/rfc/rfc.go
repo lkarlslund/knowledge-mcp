@@ -21,12 +21,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/blevesearch/bleve/v2"
-	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
-	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
-	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
-	unicodeTokenizer "github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
-	blevequery "github.com/blevesearch/bleve/v2/search/query"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
@@ -95,6 +89,92 @@ func NewWithBaseURL(baseURL string) *RFC {
 
 func (*RFC) ID() string                  { return RFCProviderID }
 func (*RFC) Owns(collection string) bool { return collection == rfcCollection }
+
+func (p *RFC) OpenCorpus(path string, _ model.Manifest) (provider.Corpus, error) {
+	entries, err := readRFCEntries(path)
+	if err != nil {
+		return nil, err
+	}
+	return &rfcCorpus{path: path, baseURL: p.baseURL, entries: entries}, nil
+}
+
+type rfcCorpus struct {
+	path, baseURL string
+	entries       []rfcEntry
+}
+
+func (c *rfcCorpus) ScanTitles(ctx context.Context, after string, sink provider.RecordSink) error {
+	return c.scan(ctx, after, false, sink)
+}
+
+func (c *rfcCorpus) ScanBodies(ctx context.Context, after string, sink provider.RecordSink) error {
+	return c.scan(ctx, after, true, sink)
+}
+
+func (c *rfcCorpus) scan(ctx context.Context, after string, body bool, sink provider.RecordSink) error {
+	start := 0
+	if after != "" {
+		parsed, err := strconv.Atoi(after)
+		if err != nil || parsed < 0 || parsed > len(c.entries) {
+			return fmt.Errorf("invalid RFC scan cursor %q", after)
+		}
+		start = parsed
+	}
+	for index := start; index < len(c.entries); index++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entry := c.entries[index]
+		record := provider.Record{ID: entry.ID, Title: entry.Title, URL: fmt.Sprintf(c.baseURL+"/info/rfc%s", entry.ID), Locator: entry.ID, Primary: true, Metadata: map[string]string{"status": entry.Status, "authors": strings.Join(entry.Authors, " "), "date": entry.Date, "stream": entry.Stream}}
+		if body {
+			data, err := os.ReadFile(filepath.Join(c.path, "raw", entry.ID+".txt"))
+			if err != nil {
+				return err
+			}
+			record.Body = string(data)
+		}
+		if err := sink(record, provider.ScanPosition{Cursor: strconv.Itoa(index + 1), Completed: int64(index + 1), Total: int64(len(c.entries))}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *rfcCorpus) Read(_ context.Context, record provider.Record, options model.ReadOptions) (model.Document, error) {
+	raw, err := os.ReadFile(filepath.Join(c.path, "raw", record.ID+".txt"))
+	if errors.Is(err, os.ErrNotExist) {
+		return model.Document{}, provider.ErrDocumentNotFound
+	}
+	if err != nil {
+		return model.Document{}, err
+	}
+	entry, _ := findRFCEntry(c.path, record.ID)
+	content := string(raw)
+	format := options.Format
+	switch format {
+	case "", "markdown":
+		format = "markdown"
+		content = rfcMarkdown(record.ID, entry, content)
+	case "source":
+		content = string(raw)
+	}
+	maximum := options.MaxChars
+	if maximum <= 0 {
+		maximum = knowledgeindex.DefaultReadCharacters
+	}
+	start := min(max(options.Offset, 0), len(content))
+	end := min(start+maximum, len(content))
+	document := model.Document{ID: record.ID, Title: entry.Title, URL: record.URL, Format: format, Content: content[start:end], Offset: start, ReturnedChars: end - start, TotalChars: len(content), Truncated: end < len(content)}
+	if document.Title == "" {
+		document.Title = record.Title
+	}
+	if document.Truncated {
+		document.NextOffset = end
+	}
+	return document, nil
+}
+
+func (*rfcCorpus) Close() error { return nil }
 
 func (p *RFC) Discover(ctx context.Context, filter string, refresh bool) ([]model.AvailableDataset, error) {
 	haystack := "rfc request for comments internet standards ietf irtf iab reference technical specifications"
@@ -227,122 +307,6 @@ sendLoop:
 	}, nil
 }
 
-func (p *RFC) BuildTitle(ctx context.Context, path string, _ model.Manifest, progress provider.TitleProgress) (uint64, error) {
-	entries, err := readRFCEntries(path)
-	if err != nil {
-		return 0, err
-	}
-	destination := filepath.Join(path, knowledgeindex.TitleDirectory+".building")
-	if err := os.RemoveAll(destination); err != nil {
-		return 0, err
-	}
-	idx, err := newRFCIndex(destination, false)
-	if err != nil {
-		return 0, err
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = idx.Close()
-		}
-	}()
-	batch := idx.NewBatch()
-	for i, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		doc := map[string]any{"title": entry.Title, "title_exact": strings.ToLower(entry.Title), "status": entry.Status, "authors": strings.Join(entry.Authors, " "), "date": entry.Date}
-		if err := batch.Index(entry.ID, doc); err != nil {
-			return 0, err
-		}
-		if batch.Size() >= 1_000 {
-			if err := idx.Batch(batch); err != nil {
-				return 0, err
-			}
-			batch = idx.NewBatch()
-		}
-		progress(uint64(i+1), int64(i+1), int64(len(entries)))
-	}
-	if err := idx.Batch(batch); err != nil {
-		return 0, err
-	}
-	if err := idx.Close(); err != nil {
-		return 0, err
-	}
-	closed = true
-	return uint64(len(entries)), nil
-}
-
-func (p *RFC) BuildBody(ctx context.Context, path string, _ model.Manifest, progress provider.BodyProgress) error {
-	entries, err := readRFCEntries(path)
-	if err != nil {
-		return err
-	}
-	destination := filepath.Join(path, knowledgeindex.BodyDirectory+".building")
-	if err := os.RemoveAll(destination); err != nil {
-		return err
-	}
-	idx, err := newRFCIndex(destination, true)
-	if err != nil {
-		return err
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = idx.Close()
-		}
-	}()
-	batch := idx.NewBatch()
-	batchBytes := 0
-	for i, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		body, readErr := os.ReadFile(filepath.Join(path, "raw", entry.ID+".txt"))
-		if readErr != nil {
-			return readErr
-		}
-		doc := map[string]any{"title": entry.Title, "title_exact": strings.ToLower(entry.Title), "body": string(body), "status": entry.Status, "authors": strings.Join(entry.Authors, " "), "date": entry.Date}
-		if err := batch.Index(entry.ID, doc); err != nil {
-			return err
-		}
-		batchBytes += len(body) + len(entry.Title) + len(entry.Status) + len(entry.Date)
-		if batch.Size() >= 256 || batchBytes >= 8<<20 {
-			if err := idx.Batch(batch); err != nil {
-				return err
-			}
-			batch = idx.NewBatch()
-			batchBytes = 0
-		}
-		progress(int64(i+1), int64(len(entries)))
-	}
-	if err := idx.Batch(batch); err != nil {
-		return err
-	}
-	if err := idx.Close(); err != nil {
-		return err
-	}
-	closed = true
-	return nil
-}
-
-func (*RFC) IndexCurrent(manifest model.Manifest) (bool, bool) {
-	return manifest.TitleReady && manifest.TitleIndexVersion == knowledgeindex.TitleVersion,
-		manifest.BodyReady && manifest.BodyIndexVersion == knowledgeindex.BodyVersion
-}
-
-func (p *RFC) Open(path string, fullText bool) (provider.Reader, error) {
-	indexPath := filepath.Join(path, knowledgeindex.TitleDirectory)
-	if fullText {
-		indexPath = filepath.Join(path, knowledgeindex.BodyDirectory)
-	}
-	idx, err := bleve.OpenUsing(indexPath, map[string]any{"read_only": true})
-	if err != nil {
-		return nil, err
-	}
-	return &rfcReader{path: path, baseURL: p.baseURL, index: idx}, nil
-}
-
 func (*RFC) Backfill(_ context.Context, _ string, manifest *model.Manifest) bool {
 	if manifest.Provider != "" {
 		return false
@@ -468,146 +432,6 @@ func (p *RFC) download(ctx context.Context, id, destination string) error {
 	return os.Rename(partial, destination)
 }
 
-type rfcReader struct {
-	path, baseURL string
-	index         bleve.Index
-	mu            sync.RWMutex
-	closed        bool
-}
-
-func (r *rfcReader) Retain() (func(), error) {
-	r.mu.RLock()
-	if r.closed {
-		r.mu.RUnlock()
-		return nil, errors.New("index reader is closed")
-	}
-	return r.mu.RUnlock, nil
-}
-func (r *rfcReader) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return nil
-	}
-	r.closed = true
-	return r.index.Close()
-}
-
-func (r *rfcReader) Search(ctx context.Context, query string, options model.SearchOptions, fullText bool) (model.SearchResult, error) {
-	if strings.TrimSpace(query) == "" {
-		return model.SearchResult{}, errors.New("query cannot be empty")
-	}
-	if options.Limit <= 0 || options.Limit > 50 {
-		options.Limit = 10
-	}
-	if options.Offset < 0 {
-		options.Offset = 0
-	}
-	queries := make([]blevequery.Query, 0, 3)
-	title := bleve.NewMatchQuery(query)
-	title.SetField("title")
-	title.SetBoost(5)
-	queries = append(queries, title)
-	identifier := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(query)), "rfc")
-	if _, err := strconv.Atoi(strings.TrimSpace(identifier)); err == nil {
-		id := bleve.NewDocIDQuery([]string{strings.TrimSpace(identifier)})
-		id.SetBoost(20)
-		queries = append(queries, id)
-	}
-	if fullText {
-		body := bleve.NewMatchQuery(query)
-		body.SetField("body")
-		queries = append(queries, body)
-	}
-	request := bleve.NewSearchRequestOptions(bleve.NewDisjunctionQuery(queries...), options.Limit, options.Offset, false)
-	request.Fields = []string{"title", "status", "authors", "date"}
-	response, err := r.index.SearchInContext(ctx, request)
-	if err != nil {
-		return model.SearchResult{}, err
-	}
-	result := model.SearchResult{Query: query, SearchMode: map[bool]string{false: "title", true: "full_text"}[fullText], Total: response.Total, Offset: options.Offset, SnippetsAvailable: fullText, SnippetsComplete: fullText}
-	for _, hit := range response.Hits {
-		titleValue, _ := hit.Fields["title"].(string)
-		item := model.SearchHit{ID: hit.ID, Title: titleValue, URL: fmt.Sprintf(r.baseURL+"/info/rfc%s", hit.ID), Score: hit.Score, MatchMode: result.SearchMode}
-		if fullText && options.Snippets {
-			item.Snippet = r.snippet(hit.ID, query)
-		}
-		result.Hits = append(result.Hits, item)
-	}
-	if options.Offset+len(result.Hits) < int(result.Total) {
-		result.NextOffset = options.Offset + len(result.Hits)
-	}
-	return result, nil
-}
-
-func (r *rfcReader) Read(ctx context.Context, title, id string, options model.ReadOptions) (model.Document, error) {
-	if id == "" {
-		result, err := r.Search(ctx, title, model.SearchOptions{Limit: 1}, false)
-		if err != nil || len(result.Hits) == 0 {
-			return model.Document{}, provider.ErrDocumentNotFound
-		}
-		id = result.Hits[0].ID
-	}
-	if _, err := strconv.ParseUint(id, 10, 32); err != nil {
-		return model.Document{}, fmt.Errorf("invalid RFC document ID %q", id)
-	}
-	raw, err := os.ReadFile(filepath.Join(r.path, "raw", id+".txt"))
-	if errors.Is(err, os.ErrNotExist) {
-		return model.Document{}, provider.ErrDocumentNotFound
-	}
-	if err != nil {
-		return model.Document{}, err
-	}
-	entry, _ := findRFCEntry(r.path, id)
-	content := string(raw)
-	format := options.Format
-	if format == "" || format == "markdown" {
-		format = "markdown"
-		content = rfcMarkdown(id, entry, content)
-	}
-	if format == "source" {
-		content = string(raw)
-	}
-	maxChars := options.MaxChars
-	if maxChars <= 0 {
-		maxChars = knowledgeindex.DefaultReadCharacters
-	}
-	start := min(max(options.Offset, 0), len(content))
-	end := min(start+maxChars, len(content))
-	page := model.Document{ID: id, Title: entry.Title, URL: fmt.Sprintf(r.baseURL+"/info/rfc%s", id), Format: format, Content: content[start:end], Offset: start, ReturnedChars: end - start, TotalChars: len(content), Truncated: end < len(content)}
-	if page.Title == "" {
-		page.Title = "RFC " + id
-	}
-	if page.Truncated {
-		page.NextOffset = end
-	}
-	return page, nil
-}
-
-func (r *rfcReader) snippet(id, query string) string {
-	data, err := os.ReadFile(filepath.Join(r.path, "raw", id+".txt"))
-	if err != nil {
-		return ""
-	}
-	text := strings.Join(strings.Fields(string(data)), " ")
-	words := strings.Fields(strings.ToLower(query))
-	position := -1
-	for _, word := range words {
-		if len(word) > 2 {
-			position = strings.Index(strings.ToLower(text), word)
-			if position >= 0 {
-				break
-			}
-		}
-	}
-	if position < 0 {
-		position = 0
-	}
-	start := max(0, position-120)
-	end := min(len(text), position+280)
-	return strings.TrimSpace(text[start:end])
-}
-
 func rfcMarkdown(id string, entry rfcEntry, raw string) string {
 	raw = strings.ReplaceAll(raw, "\f", "\n")
 	var output strings.Builder
@@ -638,40 +462,6 @@ func rfcMarkdown(id string, entry rfcEntry, raw string) string {
 		output.WriteByte('\n')
 	}
 	return output.String()
-}
-
-func newRFCIndex(path string, body bool) (bleve.Index, error) {
-	indexMapping := bleve.NewIndexMapping()
-	if err := indexMapping.AddCustomAnalyzer("knowledge_unicode", map[string]any{"type": custom.Name, "tokenizer": unicodeTokenizer.Name, "token_filters": []string{lowercase.Name}}); err != nil {
-		return nil, err
-	}
-	document := bleve.NewDocumentMapping()
-	for _, name := range []string{"title", "status", "authors", "date"} {
-		field := bleve.NewTextFieldMapping()
-		field.Analyzer = "knowledge_unicode"
-		field.Store = true
-		field.IncludeTermVectors = false
-		document.AddFieldMappingsAt(name, field)
-	}
-	exact := bleve.NewTextFieldMapping()
-	exact.Analyzer = keyword.Name
-	exact.Store = false
-	exact.IncludeTermVectors = false
-	document.AddFieldMappingsAt("title_exact", exact)
-	if body {
-		field := bleve.NewTextFieldMapping()
-		field.Analyzer = "knowledge_unicode"
-		field.Store = false
-		field.IncludeTermVectors = false
-		document.AddFieldMappingsAt("body", field)
-	}
-	indexMapping.DefaultMapping = document
-	indexMapping.TypeField = "_type"
-	indexMapping.DefaultType = "document"
-	indexMapping.StoreDynamic = false
-	indexMapping.IndexDynamic = false
-	indexMapping.DocValuesDynamic = false
-	return bleve.NewUsing(path, indexMapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultKVStore, map[string]any{"create_if_missing": true})
 }
 
 func readRFCEntries(path string) ([]rfcEntry, error) {

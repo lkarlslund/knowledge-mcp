@@ -15,6 +15,7 @@ import (
 	"time"
 
 	dsbzip2 "github.com/dsnet/compress/bzip2"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
 	wikimediaprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/wikimedia"
@@ -243,7 +244,7 @@ func TestDeleteDatasetRemovesLocalAndStagedData(t *testing.T) {
 		jobs:         map[string]*model.Job{job.ID: job},
 		active:       map[string]string{},
 		watchers:     map[chan struct{}]struct{}{},
-		readers:      map[string]provider.Reader{},
+		readers:      map[string]*knowledgeindex.Reader{},
 		storage:      map[string]storageSnapshot{},
 		lastProgress: map[string]time.Time{},
 	}

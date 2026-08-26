@@ -2,12 +2,12 @@ package wikimediaprovider
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
@@ -24,6 +24,88 @@ type Wikimedia struct{ client *wikimedia.Client }
 func New(client *wikimedia.Client) *Wikimedia    { return &Wikimedia{client: client} }
 func (p *Wikimedia) ID() string                  { return WikimediaProviderID }
 func (p *Wikimedia) Owns(collection string) bool { return wikimedia.ValidWikiName(collection) }
+
+func (*Wikimedia) OpenCorpus(path string, manifest model.Manifest) (provider.Corpus, error) {
+	return &wikimediaCorpus{path: path, manifest: manifest}, nil
+}
+
+type wikimediaCorpus struct {
+	path     string
+	manifest model.Manifest
+	mu       sync.Mutex
+	reader   *wikiindex.Reader
+}
+
+func (c *wikimediaCorpus) ScanTitles(ctx context.Context, _ string, sink provider.RecordSink) error {
+	return wikiindex.ScanSourceTitles(ctx, wikiParts(c.path, c.manifest.PartCount), func(source wikiindex.SourceTitle, cursor string, completed, total int64) error {
+		return sink(provider.Record{
+			ID: strconv.FormatUint(source.ID, 10), Title: source.Title,
+			URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, source.Title), Part: source.Part, Offset: source.Offset, End: source.End,
+			Primary: true,
+		}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total})
+	})
+}
+
+func (c *wikimediaCorpus) ScanBodies(ctx context.Context, _ string, sink provider.RecordSink) error {
+	return wikiindex.ScanSourceBodies(ctx, wikiParts(c.path, c.manifest.PartCount), func(documents []wikiindex.SourceBody, cursor string, completed, total int64) error {
+		for _, source := range documents {
+			body := ""
+			if !source.Redirect {
+				body = wikiindex.PlainText(source.Wikitext)
+			}
+			if err := sink(provider.Record{
+				ID: strconv.FormatUint(source.ID, 10), Title: source.Title, Body: body,
+				URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, source.Title), Namespace: source.Namespace, Primary: source.Namespace == 0,
+			}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (c *wikimediaCorpus) Read(ctx context.Context, record provider.Record, options model.ReadOptions) (model.Document, error) {
+	id, err := strconv.ParseUint(record.ID, 10, 64)
+	if err != nil {
+		return model.Document{}, fmt.Errorf("invalid Wikimedia document ID %q", record.ID)
+	}
+	c.mu.Lock()
+	if c.reader == nil {
+		c.reader, err = wikiindex.OpenReader(c.path, false)
+	}
+	reader := c.reader
+	c.mu.Unlock()
+	if err != nil {
+		return model.Document{}, err
+	}
+	sourceFormat := options.Format == "source"
+	if sourceFormat {
+		options.Format = "wikitext"
+	}
+	document, err := reader.ReadPage(ctx, "", id, options, c.manifest.Site.OnlineSourceURL)
+	if sourceFormat {
+		document.Format = "source"
+	}
+	document.ID = strconv.FormatUint(document.NumericID, 10)
+	for index := range document.RedirectChain {
+		document.RedirectChain[index].FromID = strconv.FormatUint(document.RedirectChain[index].FromNumericID, 10)
+	}
+	if errors.Is(err, wikiindex.ErrPageNotFound) {
+		err = provider.ErrDocumentNotFound
+	}
+	return document, err
+}
+
+func (c *wikimediaCorpus) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.reader == nil {
+		return nil
+	}
+	err := c.reader.Close()
+	c.reader = nil
+	return err
+}
 
 func (p *Wikimedia) Discover(ctx context.Context, filter string, refresh bool) ([]model.AvailableDataset, error) {
 	result, err := p.client.ListAvailable(ctx, filter, 0, -1, refresh)
@@ -105,31 +187,6 @@ func (p *Wikimedia) Acquire(ctx context.Context, collection, _ string, release p
 	return manifest, nil
 }
 
-func (p *Wikimedia) BuildTitle(ctx context.Context, path string, manifest model.Manifest, progress provider.TitleProgress) (uint64, error) {
-	return wikiindex.BuildTitle(ctx, wikiParts(path, manifest.PartCount), filepath.Join(path, knowledgeindex.TitleDirectory+".building"), func(pages uint64, completed, total int64) { progress(pages, completed, total) })
-}
-
-func (p *Wikimedia) BuildBody(ctx context.Context, path string, manifest model.Manifest, progress provider.BodyProgress) error {
-	return wikiindex.BuildBody(ctx, wikiParts(path, manifest.PartCount), filepath.Join(path, knowledgeindex.BodyDirectory+".building"), func(completed, total int64) { progress(completed, total) })
-}
-
-func (*Wikimedia) IndexCurrent(manifest model.Manifest) (bool, bool) {
-	return manifest.TitleReady && manifest.TitleIndexVersion == knowledgeindex.TitleVersion,
-		manifest.BodyReady && manifest.BodyIndexVersion == knowledgeindex.BodyVersion
-}
-
-func (p *Wikimedia) Open(path string, fullText bool) (provider.Reader, error) {
-	reader, err := wikiindex.OpenReader(path, fullText)
-	if err != nil {
-		return nil, err
-	}
-	var manifest model.Manifest
-	if data, readErr := os.ReadFile(filepath.Join(path, "manifest.json")); readErr == nil {
-		_ = json.Unmarshal(data, &manifest)
-	}
-	return &wikimediaReader{reader: reader, baseURL: manifest.Site.OnlineSourceURL}, nil
-}
-
 func (p *Wikimedia) Backfill(ctx context.Context, path string, manifest *model.Manifest) bool {
 	changed := false
 	if manifest.Provider == "" {
@@ -174,48 +231,6 @@ func (p *Wikimedia) Backfill(ctx context.Context, path string, manifest *model.M
 	manifest.Site = mergeWikiSite(dump, p.client.SiteMetadata(ctx, manifest.Dataset))
 	manifest.Site.Description = wikimediaDatasetDescription(manifest.Site.Name, manifest.Site.ContentType, manifest.Site.Language)
 	return true
-}
-
-type wikimediaReader struct {
-	reader  *wikiindex.Reader
-	baseURL string
-}
-
-func (r *wikimediaReader) Retain() (func(), error) { return r.reader.Retain() }
-func (r *wikimediaReader) Close() error            { return r.reader.Close() }
-func (r *wikimediaReader) Search(ctx context.Context, query string, options model.SearchOptions, fullText bool) (model.SearchResult, error) {
-	result, err := r.reader.Search(ctx, query, options, fullText)
-	for i := range result.Hits {
-		result.Hits[i].ID = strconv.FormatUint(result.Hits[i].NumericID, 10)
-		result.Hits[i].URL = wikiindex.URL(r.baseURL, result.Hits[i].Title)
-	}
-	return result, err
-}
-func (r *wikimediaReader) Read(ctx context.Context, title, id string, options model.ReadOptions) (model.Document, error) {
-	var pageID uint64
-	var err error
-	if id != "" {
-		pageID, err = strconv.ParseUint(id, 10, 64)
-		if err != nil {
-			return model.Document{}, fmt.Errorf("invalid Wikimedia document ID %q", id)
-		}
-	}
-	sourceFormat := options.Format == "source"
-	if sourceFormat {
-		options.Format = "wikitext"
-	}
-	page, err := r.reader.ReadPage(ctx, title, pageID, options, r.baseURL)
-	if sourceFormat {
-		page.Format = "source"
-	}
-	page.ID = strconv.FormatUint(page.NumericID, 10)
-	for index := range page.RedirectChain {
-		page.RedirectChain[index].FromID = strconv.FormatUint(page.RedirectChain[index].FromNumericID, 10)
-	}
-	if errors.Is(err, wikiindex.ErrPageNotFound) {
-		err = provider.ErrDocumentNotFound
-	}
-	return page, err
 }
 
 func wikiParts(path string, count int) []wikiindex.Part {

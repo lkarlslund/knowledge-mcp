@@ -133,6 +133,170 @@ type xmlPage struct {
 type BuildProgress func(done, total int64)
 type TitleBuildProgress func(pages uint64, compressedDone, compressedTotal int64)
 
+type SourceTitle struct {
+	ID          uint64
+	Title       string
+	Part        int
+	Offset, End int64
+}
+
+type SourceBody struct {
+	ID        uint64
+	Title     string
+	Namespace int
+	Wikitext  string
+	Redirect  bool
+}
+
+func ScanSourceTitles(ctx context.Context, parts []Part, emit func(SourceTitle, string, int64, int64) error) error {
+	var compressedTotal int64
+	for _, part := range parts {
+		size, err := fileSize(part.IndexPath)
+		if err != nil {
+			return err
+		}
+		compressedTotal += size
+	}
+	var compressedBefore int64
+	for partIndex, part := range parts {
+		file, err := os.Open(part.IndexPath)
+		if err != nil {
+			return err
+		}
+		compressed := &countingReader{reader: file}
+		scanner := bufio.NewScanner(pbzip2.NewReader(ctx, compressed))
+		scanner.Buffer(make([]byte, 64<<10), 4<<20)
+		type entry struct {
+			id    uint64
+			title string
+		}
+		var group []entry
+		groupOffset := int64(-1)
+		line := int64(0)
+		flush := func(end int64) error {
+			for _, item := range group {
+				position := compressedBefore + compressed.bytes.Load()
+				if err := emit(SourceTitle{ID: item.id, Title: item.title, Part: part.Number, Offset: groupOffset, End: end}, fmt.Sprintf("%d:%d", partIndex, line), position, compressedTotal); err != nil {
+					return err
+				}
+			}
+			group = group[:0]
+			return nil
+		}
+		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				_ = file.Close()
+				return err
+			}
+			line++
+			offset, pageID, title, parseErr := parseIndexLine(scanner.Text())
+			if parseErr != nil {
+				_ = file.Close()
+				return parseErr
+			}
+			if groupOffset >= 0 && offset != groupOffset {
+				if err := flush(offset); err != nil {
+					_ = file.Close()
+					return err
+				}
+			}
+			groupOffset = offset
+			group = append(group, entry{id: pageID, title: title})
+		}
+		if err := scanner.Err(); err != nil {
+			_ = file.Close()
+			return err
+		}
+		dumpSize, err := fileSize(part.DumpPath)
+		if err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := flush(dumpSize); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+		partSize, err := fileSize(part.IndexPath)
+		if err != nil {
+			return err
+		}
+		compressedBefore += partSize
+	}
+	return nil
+}
+
+func ScanSourceBodies(ctx context.Context, parts []Part, emit func([]SourceBody, string, int64, int64) error) error {
+	var streams []stream
+	for _, part := range parts {
+		partStreams, err := readStreams(ctx, part)
+		if err != nil {
+			return err
+		}
+		streams = append(streams, partStreams...)
+	}
+	type result struct {
+		index int
+		pages []xmlPage
+		err   error
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	results := make(chan result, min(runtime.GOMAXPROCS(0), 8))
+	var workers sync.WaitGroup
+	for range cap(results) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				item := streams[index]
+				file, err := os.Open(item.Path)
+				if err != nil {
+					results <- result{index: index, err: err}
+					continue
+				}
+				pages, decodeErr := decodeStream(workerCtx, io.NewSectionReader(file, item.Offset, item.End-item.Offset))
+				closeErr := file.Close()
+				results <- result{index: index, pages: pages, err: errors.Join(decodeErr, closeErr)}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for index := range streams {
+			select {
+			case jobs <- index:
+			case <-workerCtx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+	completed := int64(0)
+	for decoded := range results {
+		if decoded.err != nil {
+			cancel()
+			return decoded.err
+		}
+		documents := make([]SourceBody, 0, len(decoded.pages))
+		for _, page := range decoded.pages {
+			documents = append(documents, SourceBody{ID: page.ID, Title: page.Title, Namespace: page.Namespace, Wikitext: page.Revision.Text, Redirect: redirectTarget(page) != ""})
+		}
+		completed++
+		if err := emit(documents, strconv.Itoa(decoded.index+1), completed, int64(len(streams))); err != nil {
+			cancel()
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
 var redirectDirectiveRE = regexp.MustCompile(`(?i)^#redirect\s*:?\s*\[\[([^\]|]+)`)
 var wikiLinkDestinationRE = regexp.MustCompile(`\(wiki:([^)]+)\)`)
 

@@ -31,7 +31,7 @@ type Store struct {
 	running       map[string]context.CancelFunc
 	watchers      map[chan struct{}]struct{}
 	readerMu      sync.Mutex
-	readers       map[string]provider.Reader
+	readers       map[string]*knowledgeindex.Reader
 	storageMu     sync.Mutex
 	storage       map[string]storageSnapshot
 	lastProgress  map[string]time.Time
@@ -79,7 +79,7 @@ func Open(root string, registry *provider.Registry, options ...Options) (*Store,
 	if config.DownloadWorkers < 1 || config.IndexWorkers < 1 {
 		return nil, errors.New("download and index worker counts must be positive")
 	}
-	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]provider.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time)}
+	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*knowledgeindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time)}
 	if err := s.loadJobs(); err != nil {
 		return nil, err
 	}
@@ -234,11 +234,11 @@ func (s *Store) queueStaleIndexes() error {
 			continue
 		}
 		manifest, readErr := readManifest(filepath.Join(entry.path, "manifest.json"))
-		provider, providerErr := s.providerForManifest(manifest)
-		if readErr != nil || providerErr != nil {
+		owner, ownerErr := s.providerForManifest(manifest)
+		if readErr != nil || ownerErr != nil {
 			continue
 		}
-		titleCurrent, bodyCurrent := provider.IndexCurrent(manifest)
+		titleCurrent, bodyCurrent := knowledgeindex.Current(manifest)
 		if titleCurrent && bodyCurrent {
 			continue
 		}
@@ -247,7 +247,7 @@ func (s *Store) queueStaleIndexes() error {
 			return idErr
 		}
 		now := time.Now().UTC()
-		job := &model.Job{ID: id, Dataset: entry.dataset, Provider: provider.ID(), Variant: manifest.Variant, Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued index schema upgrade", CreatedAt: now, UpdatedAt: now}
+		job := &model.Job{ID: id, Dataset: entry.dataset, Provider: owner.ID(), Variant: manifest.Variant, Kind: "index", State: model.StateQueued, Phase: "queued", Message: "queued index schema upgrade", CreatedAt: now, UpdatedAt: now}
 		s.jobs[id], s.active[entry.dataset] = job, id
 		if err := s.saveJobsLocked(); err != nil {
 			return err
@@ -326,9 +326,7 @@ func (s *Store) ListLocal() ([]model.LocalDataset, error) {
 			continue
 		}
 		local := model.LocalDataset{Manifest: manifest, State: model.StateDownloaded, SearchMode: "none"}
-		if provider, providerErr := s.providerForManifest(manifest); providerErr == nil {
-			local.TitleReady, local.BodyReady = provider.IndexCurrent(manifest)
-		}
+		local.TitleReady, local.BodyReady = knowledgeindex.Current(manifest)
 		if local.TitleReady {
 			local.State, local.SearchMode = model.StateTitleReady, "title"
 		}
@@ -645,13 +643,12 @@ func (s *Store) Search(ctx context.Context, dataset, query string, options model
 	path := s.datasetPath(owner.ID(), dataset)
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
-	backend, providerErr := s.providerForManifest(manifest)
-	if err != nil || providerErr != nil || !manifest.TitleReady {
+	if err != nil || !manifest.TitleReady {
 		s.mu.RUnlock()
 		return model.SearchResult{}, fmt.Errorf("dataset %s is not title-ready", dataset)
 	}
-	_, fullText := backend.IndexCurrent(manifest)
-	reader, err := s.reader(backend, path, fullText)
+	_, fullText := knowledgeindex.Current(manifest)
+	reader, err := s.reader(owner, path, manifest, fullText)
 	if err != nil {
 		s.mu.RUnlock()
 		return model.SearchResult{}, err
@@ -678,12 +675,11 @@ func (s *Store) Read(ctx context.Context, dataset, title, id string, options mod
 	path := s.datasetPath(owner.ID(), dataset)
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
-	backend, providerErr := s.providerForManifest(manifest)
-	if err != nil || providerErr != nil || !manifest.TitleReady {
+	if err != nil || !manifest.TitleReady {
 		s.mu.RUnlock()
 		return model.Document{}, fmt.Errorf("dataset %s is not title-ready", dataset)
 	}
-	reader, err := s.reader(backend, path, false)
+	reader, err := s.reader(owner, path, manifest, false)
 	if err != nil {
 		s.mu.RUnlock()
 		return model.Document{}, err
@@ -711,15 +707,20 @@ func (s *Store) Read(ctx context.Context, dataset, title, id string, options mod
 	return page, err
 }
 
-func (s *Store) reader(backend provider.Provider, path string, fullText bool) (provider.Reader, error) {
+func (s *Store) reader(owner provider.Provider, path string, manifest model.Manifest, fullText bool) (*knowledgeindex.Reader, error) {
 	key := fmt.Sprintf("%s:%t", path, fullText)
 	s.readerMu.Lock()
 	defer s.readerMu.Unlock()
 	if reader := s.readers[key]; reader != nil {
 		return reader, nil
 	}
-	reader, err := backend.Open(path, fullText)
+	corpus, err := owner.OpenCorpus(path, manifest)
 	if err != nil {
+		return nil, err
+	}
+	reader, err := knowledgeindex.Open(path, corpus, fullText)
+	if err != nil {
+		_ = corpus.Close()
 		return nil, err
 	}
 	s.readers[key] = reader
@@ -895,17 +896,23 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 		s.failJob(id, err)
 		return false
 	}
-	provider, err := s.providerForManifest(manifest)
+	owner, err := s.providerForManifest(manifest)
 	if err != nil {
 		s.failJob(id, err)
 		return false
 	}
-	titleCurrent, bodyCurrent := provider.IndexCurrent(manifest)
+	titleCurrent, bodyCurrent := knowledgeindex.Current(manifest)
+	corpus, err := owner.OpenCorpus(path, manifest)
+	if err != nil {
+		s.failJob(id, err)
+		return false
+	}
+	defer func() { _ = corpus.Close() }()
 	titleBuilt := false
 	if !titleCurrent {
 		temporary := filepath.Join(path, knowledgeindex.TitleDirectory+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
-		count, buildErr := provider.BuildTitle(ctx, path, manifest, func(pages uint64, compressedDone, compressedTotal int64) {
+		count, buildErr := knowledgeindex.BuildTitle(ctx, path, corpus, func(pages uint64, compressedDone, compressedTotal int64) {
 			s.setTitleProgress(id, pages, compressedDone, compressedTotal)
 		})
 		if buildErr != nil {
@@ -952,15 +959,18 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 	if titleBuilt {
 		return true
 	}
-	s.buildBody(ctx, id, job.Dataset, manifest, provider)
+	s.buildBody(ctx, id, job.Dataset, manifest, owner, corpus)
 	return false
 }
 
-func (s *Store) buildBody(ctx context.Context, id, dataset string, manifest model.Manifest, provider provider.Provider) {
-	path := s.datasetPath(provider.ID(), dataset)
+func (s *Store) buildBody(ctx context.Context, id, dataset string, manifest model.Manifest, owner provider.Provider, corpus provider.Corpus) {
+	path := s.datasetPath(manifest.Provider, dataset)
+	if manifest.Provider == "" {
+		path = s.datasetPath(owner.ID(), dataset)
+	}
 	temporary := filepath.Join(path, knowledgeindex.BodyDirectory+".building")
 	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "title search and page reads are available; building full-text index", "")
-	if err := provider.BuildBody(ctx, path, manifest, func(done, total int64) {
+	if err := knowledgeindex.BuildBody(ctx, path, corpus, func(done, total int64) {
 		s.setJob(id, model.StateBodyIndexing, "body_indexing", done, total, "documents", 0, "title search and document reads are available; building full-text index", "")
 	}); err != nil {
 		s.failJob(id, err)
