@@ -8,9 +8,12 @@ require (
 	github.com/cosnicolaou/pbzip2 v1.0.6
 	github.com/dsnet/compress v0.0.1
 	github.com/google/jsonschema-go v0.4.3
+	github.com/klauspost/compress v1.19.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/orisano/gosax v1.1.4
 	github.com/spf13/cobra v1.10.2
+	github.com/ulikunitz/xz v0.5.16
+	golang.org/x/net v0.58.0
 )
 
 require (
@@ -45,7 +48,7 @@ require (
 	go.etcd.io/bbolt v1.4.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )
