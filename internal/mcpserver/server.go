@@ -42,6 +42,34 @@ type listAvailableInput struct {
 	Refresh bool   `json:"refresh,omitempty" jsonschema:"bypass the one-day online catalog cache"`
 }
 
+type availableDatasetOutput struct {
+	Provider        string               `json:"provider"`
+	Variant         string               `json:"variant,omitempty"`
+	Variants        []model.Variant      `json:"variants,omitempty"`
+	ID              string               `json:"id"`
+	DisplayName     string               `json:"display_name,omitempty"`
+	Description     string               `json:"description,omitempty"`
+	Project         string               `json:"project,omitempty"`
+	ContentType     string               `json:"content_type,omitempty"`
+	Profile         model.DatasetProfile `json:"profile,omitempty"`
+	Language        model.Language       `json:"language,omitempty"`
+	Languages       []model.Language     `json:"languages,omitempty"`
+	OnlineSourceURL string               `json:"online_source_url,omitempty"`
+	ReleaseDate     string               `json:"release_date"`
+	RawSize         int64                `json:"raw_size,omitempty"`
+	Installed       bool                 `json:"installed"`
+	UpdateAvailable bool                 `json:"update_available"`
+}
+
+type availableResultOutput struct {
+	Datasets   []availableDatasetOutput `json:"datasets"`
+	Languages  []model.Language         `json:"languages,omitempty"`
+	Sources    []string                 `json:"sources,omitempty"`
+	Offset     int                      `json:"offset"`
+	NextOffset int                      `json:"next_offset,omitempty"`
+	Total      int                      `json:"total"`
+}
+
 type emptyInput struct{}
 
 type submitInput struct {
@@ -77,7 +105,7 @@ type readInput struct {
 	Dataset         string `json:"dataset,omitempty" jsonschema:"installed dataset ID"`
 	ID              string `json:"id,omitempty" jsonschema:"opaque document identifier returned by knowledge_search; mutually exclusive with title"`
 	Title           string `json:"title,omitempty" jsonschema:"exact document title; mutually exclusive with id"`
-	Section         string `json:"section,omitempty" jsonschema:"article section heading or anchor; offsets apply within the selected section"`
+	Section         string `json:"section,omitempty" jsonschema:"document section heading or anchor, such as an RFC section number; offsets apply within the selected section"`
 	Offset          int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
 	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum article-content characters; defaults to 50000 and is capped at 500000"`
 	FollowRedirects *bool  `json:"follow_redirects,omitempty" jsonschema:"follow redirect chains and extract a targeted section; defaults to true"`
@@ -101,11 +129,11 @@ func New(service Service) *mcp.Server {
 	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"ref"}}, {Required: []string{"dataset", "title"}}, {Required: []string{"dataset", "id"}}}
 	setIntegerBounds(readSchema, "offset", 0, nil)
 	setIntegerBounds(readSchema, "max_chars", 1, intPointer(500_000))
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_available", Description: "Discover downloadable knowledge datasets with provider-defined descriptions, selection metadata, and variants.", InputSchema: listAvailableSchema, Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_available", Description: "Discover downloadable knowledge datasets with provider-defined descriptions, selection metadata, and variants.", InputSchema: listAvailableSchema, Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, availableResultOutput, error) {
 		out, err := service.ListAvailable(ctx, in.Filter, in.Offset, in.Limit, in.Refresh)
-		return nil, out, err
+		return nil, agentAvailableResult(out), err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_local", Description: "List installed datasets with provider-defined descriptions plus variant, content scope, source, snapshot, and search metadata to help select the right dataset.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalDatasetSummary, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_local", Description: "List installed datasets with provider-defined descriptions plus variant, content scope, source, snapshot, and explicit search availability and capabilities.", Annotations: readOnlyAnnotations(false)}, func(_ context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []model.LocalDatasetSummary, error) {
 		out, err := service.ListLocalSummary()
 		return nil, out, err
 	})
@@ -153,7 +181,7 @@ func New(service Service) *mcp.Server {
 		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Mode: in.Mode, Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets, PublishedAfter: publishedAfter, PublishedBefore: publishedBefore, Sort: in.Sort})
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a Markdown document using the opaque temporary ref returned by knowledge_search or an embedded link. Legacy dataset plus id/title arguments remain supported. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a Markdown document using the opaque temporary ref returned by knowledge_search or an embedded link. Use section with a returned outline heading or anchor, including RFC section numbers. Legacy dataset plus id/title arguments remain supported. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
 		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
 		maxChars := in.MaxChars
 		if maxChars <= 0 {
@@ -179,6 +207,19 @@ func New(service Service) *mcp.Server {
 		return nil, out, err
 	})
 	return server
+}
+
+func agentAvailableResult(result model.AvailableResult) availableResultOutput {
+	out := availableResultOutput{Languages: result.Languages, Sources: result.Sources, Offset: result.Offset, NextOffset: result.NextOffset, Total: result.Total, Datasets: make([]availableDatasetOutput, 0, len(result.Datasets))}
+	for _, dataset := range result.Datasets {
+		out.Datasets = append(out.Datasets, availableDatasetOutput{
+			Provider: dataset.Provider, Variant: dataset.Variant, Variants: dataset.Variants, ID: dataset.ID, DisplayName: dataset.DisplayName,
+			Description: dataset.Description, Project: dataset.Project, ContentType: dataset.ContentType, Profile: dataset.Profile,
+			Language: dataset.Language, Languages: dataset.Languages, OnlineSourceURL: dataset.OnlineSourceURL, ReleaseDate: dataset.ReleaseDate,
+			RawSize: dataset.RawSize, Installed: dataset.Installed, UpdateAvailable: dataset.UpdateAvailable,
+		})
+	}
+	return out
 }
 
 func parseSearchDate(value string, upper bool) (*time.Time, error) {

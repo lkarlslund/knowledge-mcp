@@ -152,21 +152,21 @@ type LocalDataset struct {
 }
 
 type LocalDatasetSummary struct {
-	Provider         string         `json:"provider"`
-	Variant          string         `json:"variant,omitempty"`
-	Dataset          string         `json:"dataset"`
-	Name             string         `json:"name"`
-	Description      string         `json:"description,omitempty"`
-	Project          string         `json:"project"`
-	ContentType      string         `json:"content_type"`
-	Profile          DatasetProfile `json:"profile,omitempty"`
-	Language         Language       `json:"language"`
-	OnlineSourceURL  string         `json:"online_source_url"`
-	SourceDocuments  uint64         `json:"source_documents"`
-	IndexedDocuments uint64         `json:"indexed_documents"`
-	ReleaseDate      string         `json:"release_date"`
-	SearchMode       string         `json:"search_mode"`
-	Closed           bool           `json:"closed"`
+	Provider           string         `json:"provider"`
+	Variant            string         `json:"variant,omitempty"`
+	Dataset            string         `json:"dataset"`
+	Name               string         `json:"name"`
+	Description        string         `json:"description,omitempty"`
+	Project            string         `json:"project"`
+	ContentType        string         `json:"content_type"`
+	Profile            DatasetProfile `json:"profile,omitempty"`
+	Language           Language       `json:"language"`
+	OnlineSourceURL    string         `json:"online_source_url"`
+	SourceDocuments    uint64         `json:"source_documents"`
+	IndexedDocuments   uint64         `json:"indexed_documents"`
+	ReleaseDate        string         `json:"release_date"`
+	SearchAvailable    bool           `json:"search_available"`
+	SearchCapabilities []string       `json:"search_capabilities"`
 }
 
 type Job struct {

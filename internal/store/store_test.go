@@ -115,7 +115,7 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SearchMode != "shared" || len(result.Hits) != 1 {
+	if result.SearchMode != "full_text" || len(result.Hits) != 1 {
 		t.Fatalf("unexpected search result: %#v", result)
 	}
 	if len(result.Hits[0].Ref) != 8 || result.Hits[0].Dataset != "testwiki" || result.Hits[0].Provider != "wikimedia" {
@@ -125,7 +125,7 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if federated.SearchMode != "shared" || len(federated.Hits) != 1 || federated.Hits[0].Ref != result.Hits[0].Ref {
+	if federated.SearchMode != "full_text" || len(federated.Hits) != 1 || federated.Hits[0].Ref != result.Hits[0].Ref {
 		t.Fatalf("unexpected federated search result: %#v", federated)
 	}
 	page, err := backend.Read(context.Background(), "testwiki", "Test Article", "", model.ReadOptions{Format: "source", MaxChars: 1000, FollowRedirects: true})

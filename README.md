@@ -100,7 +100,7 @@ Set `KNOWLEDGE_MCP_SERVER` or pass `--server` for a non-default endpoint.
 | Tool | Purpose |
 | --- | --- |
 | `knowledge_list_available` | Discover datasets, providers, and variants. |
-| `knowledge_list_local` | List installed datasets and selection/search metadata. |
+| `knowledge_list_local` | List installed datasets with explicit search availability and `title`/`full_text` capabilities. |
 | `knowledge_status` | Inspect worker settings, provider health, and update scheduling. |
 | `knowledge_download` | Submit a first-time background download. |
 | `knowledge_update` | Submit an atomic background update or finish indexing. |
@@ -114,8 +114,8 @@ Set `KNOWLEDGE_MCP_SERVER` or pass `--server` for a non-default endpoint.
 
 Wikimedia reads preserve headings, lists, tables, links, infobox fields,
 citations, redirects, outlines, and bounded references. RFC reads add lifecycle
-status and structured relationships and convert RFC references into followable
-Markdown links. Kiwix reads ZIM files natively and converts stored HTML,
+status, structured relationships, section outlines and targeted section reads,
+and convert RFC references into followable Markdown links. Kiwix reads ZIM files natively and converts stored HTML,
 including tables and internal links, to Markdown.
 PubMed reads preserve citation metadata, abstracts, publication types, identifiers,
 MeSH terms, and available creation/publication/revision dates. EUR-Lex reads convert official XHTML and tables to Markdown and

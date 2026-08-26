@@ -500,7 +500,7 @@ func (s *SharedIndex) Search(ctx context.Context, dataset, text string, options 
 			rankWeight = 1
 		}
 		status, _ := hit.Fields["status"].(string)
-		hits = append(hits, model.SearchHit{TemporalMetadata: temporalFromFields(hit.Fields), Provider: providerID, Dataset: datasetID, ID: documentID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score * rankWeight, MatchMode: "shared", Identifiers: stringSliceField(hit.Fields["identifiers"]), Status: status})
+		hits = append(hits, model.SearchHit{TemporalMetadata: temporalFromFields(hit.Fields), Provider: providerID, Dataset: datasetID, ID: documentID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score * rankWeight, MatchMode: "full_text", Identifiers: stringSliceField(hit.Fields["identifiers"]), Status: status})
 	}
 	if options.Sort == "" || options.Sort == "relevance" {
 		sort.SliceStable(hits, func(i, j int) bool {
@@ -515,7 +515,7 @@ func (s *SharedIndex) Search(ctx context.Context, dataset, text string, options 
 	start := min(max(options.Offset, 0), len(hits))
 	end := min(start+options.Limit, len(hits))
 	hits = hits[start:end]
-	result := model.SearchResult{Dataset: dataset, Query: text, SearchMode: "shared", Total: total, Offset: options.Offset, PrimaryFilterApplied: !options.IncludeSecondary, SnippetsAvailable: false, SearchedDatasets: searched, Hits: hits}
+	result := model.SearchResult{Dataset: dataset, Query: text, SearchMode: "full_text", Total: total, Offset: options.Offset, PrimaryFilterApplied: !options.IncludeSecondary, SnippetsAvailable: false, SearchedDatasets: searched, Hits: hits}
 	if uint64(end) < total {
 		result.NextOffset = end
 	}

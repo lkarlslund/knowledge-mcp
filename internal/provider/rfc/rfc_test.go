@@ -31,7 +31,7 @@ func (transport *rfcTransport) RoundTrip(request *http.Request) (*http.Response,
 	transport.mu.Unlock()
 	content := map[string]string{
 		"/rfc-index.xml":   testRFCIndex,
-		"/rfc/rfc1.txt":    "1. Introduction\n\nThe host software defined an early protocol. See RFC 9110.\n",
+		"/rfc/rfc1.txt":    "Abstract\n\nAn early host protocol.\n\n1. Introduction\n\nThe host software defined an early protocol. See RFC 9110.\n\n1.1. Scope\n\nScope details.\n\n2. Conclusion\n\nClosing text.\n",
 		"/rfc/rfc9110.txt": "1. Introduction\n\nHTTP semantics define methods, status codes, and field values.\n",
 	}[request.URL.Path]
 	status := http.StatusOK
@@ -109,6 +109,21 @@ func TestRFCProviderLifecycleAndOpaqueIDs(t *testing.T) {
 	}
 	if document.ID != "1" || !strings.Contains(document.Content, "knowledge-read://read?dataset=rfc&id=9110") || !strings.Contains(document.Content, "# RFC 1: Host Software") || !strings.Contains(document.Content, "**Lifecycle:** obsoleted") || len(document.Relationships) != 1 || document.Relationships[0].ID != "9110" {
 		t.Fatalf("document = %#v", document)
+	}
+	if !strings.Contains(document.Content, "## 1. Introduction") || len(document.Sections) != 0 {
+		t.Fatalf("RFC Markdown headings = %#v", document)
+	}
+	outlined, err := reader.Read(ctx, "", "1", model.ReadOptions{Format: "markdown", MaxChars: 10_000, IncludeOutline: true})
+	if err != nil || len(outlined.Sections) != 4 || outlined.Sections[2].Anchor != "1.1" || outlined.Sections[2].Level != 3 {
+		t.Fatalf("RFC outline = %#v, %v", outlined, err)
+	}
+	section, err := reader.Read(ctx, "", "1", model.ReadOptions{Format: "markdown", Section: "1", MaxChars: 10_000})
+	if err != nil || section.SectionFound == nil || !*section.SectionFound || !strings.Contains(section.Content, "## 1. Introduction") || !strings.Contains(section.Content, "### 1.1. Scope") || strings.Contains(section.Content, "## 2. Conclusion") {
+		t.Fatalf("RFC section = %#v, %v", section, err)
+	}
+	missing, err := reader.Read(ctx, "", "1", model.ReadOptions{Format: "markdown", Section: "9.9", MaxChars: 10_000})
+	if err != nil || missing.SectionFound == nil || *missing.SectionFound || missing.Content != "" || len(missing.Sections) != 4 {
+		t.Fatalf("missing RFC section = %#v, %v", missing, err)
 	}
 	var reconstructed strings.Builder
 	for offset := 0; ; {

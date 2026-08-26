@@ -35,7 +35,18 @@ const (
 	rfcDocumentURL = "https://www.rfc-editor.org/rfc/rfc%s.txt"
 )
 
-var rfcReferenceRE = regexp.MustCompile(`(?i)\bRFC[ -]?(\d{1,5})\b`)
+var (
+	rfcReferenceRE          = regexp.MustCompile(`(?i)\bRFC[ -]?(\d{1,5})\b`)
+	rfcNumberedHeadingRE    = regexp.MustCompile(`^(\d+(?:\.\d+)*\.)\s+(\S.*)$`)
+	rfcAppendixHeadingRE    = regexp.MustCompile(`^Appendix\s+([A-Z])\.?\s+(\S.*)$`)
+	rfcAppendixSubheadingRE = regexp.MustCompile(`^([A-Z](?:\.\d+)+\.)\s+(\S.*)$`)
+)
+
+var rfcNamedHeadings = map[string]struct{}{
+	"Abstract": {}, "Status of This Memo": {}, "Copyright Notice": {}, "Table of Contents": {},
+	"Acknowledgements": {}, "Acknowledgments": {}, "Contributors": {}, "References": {},
+	"Security Considerations": {}, "IANA Considerations": {}, "Index": {}, "Authors' Addresses": {},
+}
 
 type RFC struct {
 	baseURL string
@@ -180,6 +191,14 @@ func (c *rfcCorpus) Read(_ context.Context, record provider.Record, options mode
 	case "source":
 		content = string(raw)
 	}
+	outline := rfcSectionOutline(content)
+	section := strings.TrimSpace(options.Section)
+	var sectionFound *bool
+	if section != "" && format == "markdown" {
+		var found bool
+		content, found = rfcExtractSection(content, section)
+		sectionFound = &found
+	}
 	maximum := options.MaxChars
 	if maximum <= 0 {
 		maximum = knowledgeindex.DefaultReadCharacters
@@ -190,7 +209,14 @@ func (c *rfcCorpus) Read(_ context.Context, record provider.Record, options mode
 	if options.AlignBoundaries && end < len(runes) {
 		end = rfcReadableChunkEnd(runes, start, end)
 	}
-	document := model.Document{TemporalMetadata: record.Temporal, ID: record.ID, Title: entry.Title, URL: record.URL, Format: format, Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
+	document := model.Document{TemporalMetadata: record.Temporal, ID: record.ID, Title: entry.Title, URL: record.URL, Section: section, SectionFound: sectionFound, Format: format, Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
+	if options.IncludeOutline || sectionFound != nil && !*sectionFound {
+		document.Sections = outline
+		if len(document.Sections) > 200 {
+			document.Sections = document.Sections[:200]
+			document.OutlineTruncated = true
+		}
+	}
 	document.Relationships = rfcRelationships(entry, c.baseURL)
 	if document.Title == "" {
 		document.Title = record.Title
@@ -602,6 +628,10 @@ func rfcMarkdown(id string, entry rfcEntry, raw string) string {
 	scanner.Buffer(make([]byte, 64<<10), 2<<20)
 	for scanner.Scan() {
 		line := strings.TrimRightFunc(scanner.Text(), unicode.IsSpace)
+		if heading, level, ok := rfcMarkdownHeading(line); ok {
+			output.WriteString(strings.Repeat("#", level) + " " + heading + "\n")
+			continue
+		}
 		line = rfcReferenceRE.ReplaceAllStringFunc(line, func(match string) string {
 			parts := rfcReferenceRE.FindStringSubmatch(match)
 			target := strings.TrimLeft(parts[1], "0")
@@ -614,6 +644,100 @@ func rfcMarkdown(id string, entry rfcEntry, raw string) string {
 		output.WriteByte('\n')
 	}
 	return output.String()
+}
+
+func rfcMarkdownHeading(line string) (string, int, bool) {
+	if strings.TrimSpace(line) != line || line == "" {
+		return "", 0, false
+	}
+	if match := rfcNumberedHeadingRE.FindStringSubmatch(line); match != nil {
+		anchor := strings.TrimSuffix(match[1], ".")
+		return anchor + ". " + strings.TrimSpace(match[2]), min(2+strings.Count(anchor, "."), 6), true
+	}
+	if match := rfcAppendixSubheadingRE.FindStringSubmatch(line); match != nil {
+		anchor := strings.TrimSuffix(match[1], ".")
+		return anchor + ". " + strings.TrimSpace(match[2]), min(2+strings.Count(anchor, "."), 6), true
+	}
+	if match := rfcAppendixHeadingRE.FindStringSubmatch(line); match != nil {
+		return "Appendix " + match[1] + ". " + strings.TrimSpace(match[2]), 2, true
+	}
+	if _, ok := rfcNamedHeadings[line]; ok {
+		return line, 2, true
+	}
+	return "", 0, false
+}
+
+type rfcSectionMarker struct {
+	model.DocumentSection
+	start int
+}
+
+func rfcSectionOutline(content string) []model.DocumentSection {
+	markers := rfcSectionMarkers(content)
+	sections := make([]model.DocumentSection, len(markers))
+	for index := range markers {
+		sections[index] = markers[index].DocumentSection
+	}
+	return sections
+}
+
+func rfcExtractSection(content, requested string) (string, bool) {
+	markers := rfcSectionMarkers(content)
+	target := normalizeRFCSection(requested)
+	for index, marker := range markers {
+		if target != normalizeRFCSection(marker.Anchor) && target != normalizeRFCSection(marker.Heading) {
+			continue
+		}
+		end := len(content)
+		for next := index + 1; next < len(markers); next++ {
+			if markers[next].Level <= marker.Level {
+				end = markers[next].start
+				break
+			}
+		}
+		return strings.TrimSpace(content[marker.start:end]) + "\n", true
+	}
+	return "", false
+}
+
+func rfcSectionMarkers(content string) []rfcSectionMarker {
+	lines := strings.SplitAfter(content, "\n")
+	markers := make([]rfcSectionMarker, 0)
+	offset := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSuffix(line, "\n")
+		trimmed = strings.TrimSuffix(trimmed, "\r")
+		level := 0
+		for level < len(trimmed) && trimmed[level] == '#' {
+			level++
+		}
+		if level >= 2 && level <= 6 && len(trimmed) > level && trimmed[level] == ' ' {
+			heading := strings.TrimSpace(trimmed[level+1:])
+			markers = append(markers, rfcSectionMarker{DocumentSection: model.DocumentSection{Heading: heading, Anchor: rfcSectionAnchor(heading), Level: level}, start: offset})
+		}
+		offset += len(line)
+	}
+	return markers
+}
+
+func rfcSectionAnchor(heading string) string {
+	if match := rfcNumberedHeadingRE.FindStringSubmatch(heading); match != nil {
+		return strings.TrimSuffix(match[1], ".")
+	}
+	if match := rfcAppendixSubheadingRE.FindStringSubmatch(heading); match != nil {
+		return strings.TrimSuffix(match[1], ".")
+	}
+	if match := rfcAppendixHeadingRE.FindStringSubmatch(heading); match != nil {
+		return "Appendix_" + match[1]
+	}
+	return strings.ReplaceAll(strings.Join(strings.Fields(heading), " "), " ", "_")
+}
+
+func normalizeRFCSection(value string) string {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "#"))
+	value = strings.NewReplacer("_", " ", "-", " ").Replace(value)
+	value = strings.TrimSuffix(value, ".")
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
 func readRFCEntries(path string) ([]rfcEntry, error) {

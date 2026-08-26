@@ -492,11 +492,18 @@ func (s *Store) ListLocalSummary() ([]model.LocalDatasetSummary, error) {
 		if name == "" {
 			name = local.Dataset
 		}
+		capabilities := make([]string, 0, 2)
+		if local.TitleReady {
+			capabilities = append(capabilities, "title")
+		}
+		if local.BodyReady {
+			capabilities = append(capabilities, "full_text")
+		}
 		result = append(result, model.LocalDatasetSummary{
 			Provider: local.Provider, Variant: local.Variant, Dataset: local.Dataset, Name: name, Description: local.Site.Description, Project: local.Site.Project, ContentType: local.Site.ContentType,
 			Language: local.Site.Language, OnlineSourceURL: local.Site.OnlineSourceURL, Profile: local.Site.Profile,
 			SourceDocuments: local.Site.SourceDocuments, IndexedDocuments: local.DocumentCount,
-			ReleaseDate: local.ReleaseDate, SearchMode: local.SearchMode, Closed: local.Site.Closed,
+			ReleaseDate: local.ReleaseDate, SearchAvailable: len(capabilities) > 0, SearchCapabilities: capabilities,
 		})
 	}
 	return result, nil

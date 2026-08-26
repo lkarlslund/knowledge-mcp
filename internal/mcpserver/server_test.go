@@ -30,10 +30,10 @@ func (service *recordingService) ReadReference(_ context.Context, ref string, op
 }
 
 func (fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
-	return model.AvailableResult{}, nil
+	return model.AvailableResult{Datasets: []model.AvailableDataset{{Provider: "wikimedia", ID: "closedwiki", DisplayName: "Archived Wiki", Closed: true, Available: true}}, Total: 1}, nil
 }
 func (fakeService) ListLocalSummary() ([]model.LocalDatasetSummary, error) {
-	return []model.LocalDatasetSummary{{Dataset: "testwiki", Name: "Test Wikipedia", Description: "A test-language general-purpose encyclopedia.", Project: "wikipedia", ContentType: "general-purpose encyclopedia", Profile: model.DatasetProfile{Topics: []string{"encyclopedia"}, GeographicScope: []string{"global"}, TimeCoverage: "current snapshot", DocumentTypes: []string{"articles"}, UpdateCadence: "monthly", SourceFeatures: []string{"links"}}, OnlineSourceURL: "https://test.wikipedia.org", Language: model.Language{Code: "test", Name: "Test"}, SourceDocuments: 40, IndexedDocuments: 42, SearchMode: "title"}}, nil
+	return []model.LocalDatasetSummary{{Dataset: "testwiki", Name: "Test Wikipedia", Description: "A test-language general-purpose encyclopedia.", Project: "wikipedia", ContentType: "general-purpose encyclopedia", Profile: model.DatasetProfile{Topics: []string{"encyclopedia"}, GeographicScope: []string{"global"}, TimeCoverage: "current snapshot", DocumentTypes: []string{"articles"}, UpdateCadence: "monthly", SourceFeatures: []string{"links"}}, OnlineSourceURL: "https://test.wikipedia.org", Language: model.Language{Code: "test", Name: "Test"}, SourceDocuments: 40, IndexedDocuments: 42, SearchAvailable: true, SearchCapabilities: []string{"title"}}}, nil
 }
 func (fakeService) OperationalStatus() model.OperationalStatus { return model.OperationalStatus{} }
 
@@ -117,6 +117,12 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		if tool.OutputSchema == nil {
 			t.Errorf("tool %s has no output schema", tool.Name)
 		}
+		if tool.Name == "knowledge_list_available" {
+			schemaJSON, marshalErr := json.Marshal(tool.OutputSchema)
+			if marshalErr != nil || strings.Contains(string(schemaJSON), `"closed"`) || !strings.Contains(string(schemaJSON), `"display_name"`) {
+				t.Errorf("knowledge_list_available exposes upstream state or lacks selection metadata: %s, %v", schemaJSON, marshalErr)
+			}
+		}
 		if tool.Name == "knowledge_read" {
 			schemaJSON, marshalErr := json.Marshal(tool.InputSchema)
 			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":500000`) || strings.Contains(string(schemaJSON), `"format"`) {
@@ -164,15 +170,26 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(payload)
-	for _, field := range []string{`"description"`, `"content_type"`, `"language"`, `"online_source_url"`, `"source_documents"`, `"indexed_documents"`, `"search_mode"`, `"topics"`, `"geographic_scope"`, `"time_coverage"`, `"document_types"`, `"update_cadence"`, `"source_features"`} {
+	for _, field := range []string{`"description"`, `"content_type"`, `"language"`, `"online_source_url"`, `"source_documents"`, `"indexed_documents"`, `"search_available"`, `"search_capabilities"`, `"topics"`, `"geographic_scope"`, `"time_coverage"`, `"document_types"`, `"update_cadence"`, `"source_features"`} {
 		if !strings.Contains(text, field) {
 			t.Errorf("knowledge_list_local response lacks %s: %s", field, text)
 		}
 	}
-	for _, field := range []string{`"dump_sha1"`, `"disk_bytes"`, `"body_index_version"`} {
+	for _, field := range []string{`"dump_sha1"`, `"disk_bytes"`, `"body_index_version"`, `"closed"`, `"search_mode"`} {
 		if strings.Contains(text, field) {
 			t.Errorf("knowledge_list_local exposes operational field %s: %s", field, text)
 		}
+	}
+	available, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "knowledge_list_available", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	availablePayload, err := json.Marshal(available.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(availablePayload), `"closed"`) || !strings.Contains(string(availablePayload), `"Archived Wiki"`) {
+		t.Fatalf("knowledge_list_available payload = %s", availablePayload)
 	}
 }
 
