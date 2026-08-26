@@ -30,15 +30,8 @@ const (
 	bodyBatchSize  = 8 << 20
 )
 
-type BuildPhase string
-
-const (
-	BuildPhaseScanning   BuildPhase = "scanning"
-	BuildPhaseCommitting BuildPhase = "committing"
-)
-
-type TitleProgress func(documents uint64, completed, total int64, phase BuildPhase)
-type BodyProgress func(completed, total int64, phase BuildPhase)
+type TitleProgress func(documents uint64, completed, total int64)
+type BodyProgress func(completed, total int64)
 
 type indexDocument struct {
 	Title           string   `json:"title"`
@@ -110,7 +103,6 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			progress(count, position.Completed, position.Total, BuildPhaseCommitting)
 			if err := idx.Batch(batch); err != nil {
 				return err
 			}
@@ -121,23 +113,27 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
 			return err
 		}
-		progress(count, position.Completed, position.Total, BuildPhaseScanning)
+		progress(count, position.Completed, position.Total)
 		return nil
 	}
 	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
 	err = corpus.ScanTitles(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
+		lastPosition, lastBoundary = position, position.Boundary
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
-			return errors.New("provider emitted title record without ID or title")
+			if batch.Size() >= titleBatchSize && position.Boundary {
+				return commit(position)
+			}
+			progress(count, position.Completed, position.Total)
+			return nil
 		}
 		if err := batch.Index(record.ID, toIndexDocument(record, false)); err != nil {
 			return err
 		}
 		count++
-		lastPosition, lastBoundary = position, position.Boundary
 		if batch.Size() >= titleBatchSize && position.Boundary {
 			return commit(position)
 		}
-		progress(count, position.Completed, position.Total, BuildPhaseScanning)
+		progress(count, position.Completed, position.Total)
 		return nil
 	})
 	if err != nil {
@@ -231,7 +227,6 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 	}
 	documentCount := checkpoint.Documents
 	flushAll := func(position provider.ScanPosition) error {
-		progress(position.Completed, position.Total, BuildPhaseCommitting)
 		for shard := range indexes {
 			if err := flush(shard); err != nil {
 				return err
@@ -242,15 +237,23 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
 			return err
 		}
-		progress(position.Completed, position.Total, BuildPhaseScanning)
+		progress(position.Completed, position.Total)
 		return nil
 	}
 	pendingBytes := 0
 	lastBoundary := true
 	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
 	err := corpus.ScanBodies(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
+		lastPosition, lastBoundary = position, position.Boundary
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
-			return errors.New("provider emitted body record without ID or title")
+			if pendingBytes >= bodyBatchSize && position.Boundary {
+				if err := flushAll(position); err != nil {
+					return err
+				}
+				pendingBytes = 0
+			}
+			progress(position.Completed, position.Total)
+			return nil
 		}
 		shard := recordShard(record.ID)
 		if err := batches[shard].batch.Index(record.ID, toIndexDocument(record, true)); err != nil {
@@ -259,14 +262,13 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 		batches[shard].bytes += len(record.Title) + len(record.Body) + len(record.URL) + len(record.Locator)
 		pendingBytes += len(record.Title) + len(record.Body) + len(record.URL) + len(record.Locator)
 		documentCount++
-		lastPosition, lastBoundary = position, position.Boundary
 		if pendingBytes >= bodyBatchSize && position.Boundary {
 			if err := flushAll(position); err != nil {
 				return err
 			}
 			pendingBytes = 0
 		}
-		progress(position.Completed, position.Total, BuildPhaseScanning)
+		progress(position.Completed, position.Total)
 		return nil
 	})
 	if err != nil {

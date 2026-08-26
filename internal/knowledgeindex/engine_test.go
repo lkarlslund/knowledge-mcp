@@ -68,15 +68,9 @@ func TestTitleBuildResumesAtCommittedProviderBoundary(t *testing.T) {
 	}
 	interrupted := errors.New("source interrupted")
 	corpus := &testCorpus{records: records, failAfter: 20_050, failure: interrupted}
-	committingObserved := false
-	progress := func(_ uint64, _, _ int64, phase BuildPhase) {
-		committingObserved = committingObserved || phase == BuildPhaseCommitting
-	}
+	progress := func(uint64, int64, int64) {}
 	if _, err := BuildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, progress); !errors.Is(err, interrupted) {
 		t.Fatalf("first BuildTitle error = %v", err)
-	}
-	if !committingObserved {
-		t.Fatal("title build did not report its committing phase")
 	}
 	corpus.failure = nil
 	count, err := BuildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, progress)
@@ -104,11 +98,11 @@ func TestBodyBuildResumesAtCommittedProviderBoundary(t *testing.T) {
 	}
 	interrupted := errors.New("source interrupted")
 	corpus := &testCorpus{records: records, failAfter: 9, failure: interrupted}
-	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64, BuildPhase) {}); !errors.Is(err, interrupted) {
+	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64) {}); !errors.Is(err, interrupted) {
 		t.Fatalf("first BuildBody error = %v", err)
 	}
 	corpus.failure = nil
-	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64, BuildPhase) {}); err != nil {
+	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64) {}); err != nil {
 		t.Fatal(err)
 	}
 	if got := corpus.observedAfter[len(corpus.observedAfter)-1]; got != "doc-07" {
@@ -126,15 +120,16 @@ func TestGenericEngineIndexesProviderRecords(t *testing.T) {
 		{ID: "http", Title: "HTTP Semantics", Body: "methods status codes fields", URL: "https://example/http", Locator: "raw:1", Primary: true, Identifiers: []string{"RFC 9110"}},
 		{ID: "mail", Title: "Mail Status", Body: "email delivery status codes", URL: "https://example/mail", Locator: "raw:2", Primary: true},
 		{ID: "talk", Title: "Talk: HTTP", Body: "discussion of semantics", Locator: "raw:3", Namespace: 1},
+		{ID: "empty", Title: " ", Body: "invalid source record"},
 	}}
-	count, err := BuildTitle(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(uint64, int64, int64, BuildPhase) {})
+	count, err := BuildTitle(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(uint64, int64, int64) {})
 	if err != nil || count != 3 {
 		t.Fatalf("BuildTitle = %d, %v", count, err)
 	}
 	if err := os.Rename(filepath.Join(path, TitleDirectory+".building"), filepath.Join(path, TitleDirectory)); err != nil {
 		t.Fatal(err)
 	}
-	if err := BuildBody(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(int64, int64, BuildPhase) {}); err != nil {
+	if err := BuildBody(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(int64, int64) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(path, BodyDirectory+".building"), filepath.Join(path, BodyDirectory)); err != nil {

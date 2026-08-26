@@ -987,8 +987,8 @@ func (s *Store) runIndexJob(ctx context.Context, id string) bool {
 	if !titleCurrent {
 		temporary := filepath.Join(path, knowledgeindex.TitleDirectory+".building")
 		s.setJob(id, model.StateTitleIndexing, "title_indexing", 0, 0, "pages", 0, "building title index", "")
-		count, buildErr := knowledgeindex.BuildTitle(ctx, path, manifest.Fingerprint, corpus, scanOptions, func(pages uint64, compressedDone, compressedTotal int64, phase knowledgeindex.BuildPhase) {
-			s.setTitleProgress(id, pages, compressedDone, compressedTotal, phase)
+		count, buildErr := knowledgeindex.BuildTitle(ctx, path, manifest.Fingerprint, corpus, scanOptions, func(pages uint64, compressedDone, compressedTotal int64) {
+			s.setTitleProgress(id, pages, compressedDone, compressedTotal)
 		})
 		if buildErr != nil {
 			s.failJob(id, buildErr)
@@ -1045,12 +1045,8 @@ func (s *Store) buildBody(ctx context.Context, id, dataset string, manifest mode
 	}
 	temporary := filepath.Join(path, knowledgeindex.BodyDirectory+".building")
 	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "title search and page reads are available; building full-text index", "")
-	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}, func(done, total int64, phase knowledgeindex.BuildPhase) {
-		jobPhase, message := "body_indexing", "title search and document reads are available; building full-text index"
-		if phase == knowledgeindex.BuildPhaseCommitting {
-			jobPhase, message = "body_committing", "committing and merging a full-text index segment"
-		}
-		s.setJob(id, model.StateBodyIndexing, jobPhase, done, total, "documents", 0, message, "")
+	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}, func(done, total int64) {
+		s.setJob(id, model.StateBodyIndexing, "body_indexing", done, total, "documents", 0, "title search and document reads are available; building full-text index", "")
 	}); err != nil {
 		s.failJob(id, err)
 		return
@@ -1149,21 +1145,17 @@ func (s *Store) setJob(id, state, phase string, completed, total int64, units st
 	_ = s.saveJobsLocked()
 }
 
-func (s *Store) setTitleProgress(id string, pages uint64, compressedDone, compressedTotal int64, phase knowledgeindex.BuildPhase) {
+func (s *Store) setTitleProgress(id string, pages uint64, compressedDone, compressedTotal int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	job := s.jobs[id]
 	if job == nil || job.State == model.StatePaused || job.State == model.StateCanceled {
 		return
 	}
-	jobPhase, message := "title_indexing", "building title index"
-	if phase == knowledgeindex.BuildPhaseCommitting {
-		jobPhase, message = "title_committing", "committing and merging a title index segment"
-	}
-	transition := job.State != model.StateTitleIndexing || job.Phase != jobPhase
-	job.State, job.Phase = model.StateTitleIndexing, jobPhase
+	transition := job.State != model.StateTitleIndexing || job.Phase != "title_indexing"
+	job.State, job.Phase = model.StateTitleIndexing, "title_indexing"
 	job.Completed, job.Total, job.Units, job.Rate = int64(pages), 0, "pages", 0
-	job.Message, job.Error = message, ""
+	job.Message, job.Error = "building title index", ""
 	job.ProgressPercent, job.ProgressApprox = 0, true
 	if compressedTotal > 0 {
 		job.ProgressPercent = min(100, float64(compressedDone)/float64(compressedTotal)*100)
