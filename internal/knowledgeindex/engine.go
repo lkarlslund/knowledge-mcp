@@ -71,6 +71,10 @@ func Current(manifest model.Manifest) (title, body bool) {
 }
 
 func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, progress TitleProgress) (uint64, error) {
+	return buildTitle(ctx, path, fingerprint, corpus, scanOptions, titleBatchSize, progress)
+}
+
+func buildTitle(ctx context.Context, path, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, batchSize int, progress TitleProgress) (uint64, error) {
 	destination := filepath.Join(path, TitleDirectory+".building")
 	checkpointPath := destination + ".checkpoint.json"
 	checkpoint, resume := loadCheckpoint(checkpointPath, destination, "title", TitleVersion, fingerprint)
@@ -125,7 +129,7 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 	err = corpus.ScanTitles(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
 		lastPosition, lastBoundary = position, position.Boundary
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
-			if batch.Size() >= titleBatchSize && position.Boundary {
+			if batch.Size() >= batchSize && position.Boundary {
 				return commit(position)
 			}
 			progress(count, position.Completed, position.Total)
@@ -135,7 +139,7 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 			return err
 		}
 		count++
-		if batch.Size() >= titleBatchSize && position.Boundary {
+		if batch.Size() >= batchSize && position.Boundary {
 			return commit(position)
 		}
 		progress(count, position.Completed, position.Total)

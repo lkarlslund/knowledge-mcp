@@ -9,7 +9,6 @@ import (
 )
 
 func TestSharedIndexPublishesDatasetGenerationsAtomically(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
 	index, err := OpenShared(root)
 	if err != nil {
@@ -52,7 +51,6 @@ func TestSharedIndexPublishesDatasetGenerationsAtomically(t *testing.T) {
 }
 
 func TestSharedIndexSearchesAcrossDatasetsAndPersistsRemoval(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
 	index, err := OpenShared(root)
 	if err != nil {

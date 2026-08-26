@@ -60,28 +60,27 @@ func (*testCorpus) Read(_ context.Context, record provider.Record, options model
 }
 
 func TestTitleBuildResumesAtCommittedProviderBoundary(t *testing.T) {
-	t.Parallel()
 	path := t.TempDir()
-	records := make([]provider.Record, 20_200)
+	records := make([]provider.Record, 220)
 	for index := range records {
 		records[index] = provider.Record{ID: fmt.Sprintf("doc-%04d", index), Title: fmt.Sprintf("Document %d", index), Primary: true}
 	}
 	interrupted := errors.New("source interrupted")
-	corpus := &testCorpus{records: records, failAfter: 20_050, failure: interrupted}
+	corpus := &testCorpus{records: records, failAfter: 205, failure: interrupted}
 	progress := func(uint64, int64, int64) {}
-	if _, err := BuildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, progress); !errors.Is(err, interrupted) {
+	if _, err := buildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, 200, progress); !errors.Is(err, interrupted) {
 		t.Fatalf("first BuildTitle error = %v", err)
 	}
 	corpus.failure = nil
-	count, err := BuildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, progress)
+	count, err := buildTitle(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, 200, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != uint64(len(records)) {
 		t.Fatalf("resumed count = %d, want %d", count, len(records))
 	}
-	if got := corpus.observedAfter[len(corpus.observedAfter)-1]; got != "doc-19999" {
-		t.Fatalf("resume cursor = %q, want doc-19999", got)
+	if got := corpus.observedAfter[len(corpus.observedAfter)-1]; got != "doc-0199" {
+		t.Fatalf("resume cursor = %q, want doc-0199", got)
 	}
 	if _, err := os.Stat(filepath.Join(path, TitleDirectory+".building.checkpoint.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("checkpoint still exists: %v", err)
@@ -89,7 +88,6 @@ func TestTitleBuildResumesAtCommittedProviderBoundary(t *testing.T) {
 }
 
 func TestBodyBuildResumesAtCommittedProviderBoundary(t *testing.T) {
-	t.Parallel()
 	path := t.TempDir()
 	records := make([]provider.Record, 10)
 	body := strings.Repeat("x", 1<<20)
@@ -114,7 +112,6 @@ func TestBodyBuildResumesAtCommittedProviderBoundary(t *testing.T) {
 }
 
 func TestGenericEngineIndexesProviderRecords(t *testing.T) {
-	t.Parallel()
 	path := t.TempDir()
 	corpus := &testCorpus{records: []provider.Record{
 		{ID: "http", Title: "HTTP Semantics", Body: "methods status codes fields", URL: "https://example/http", Locator: "raw:1", Primary: true, Identifiers: []string{"RFC 9110"}},
