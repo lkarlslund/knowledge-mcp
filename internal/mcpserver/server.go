@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"time"
 
@@ -200,6 +201,7 @@ func ServeHTTP(ctx context.Context, listen string, service DashboardService) err
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	registerPProf(mux)
 	mux.Handle("/", dashboard.Handler(service))
 	httpServer := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 2 * time.Minute}
 	go func() {
@@ -212,6 +214,14 @@ func ServeHTTP(ctx context.Context, listen string, service DashboardService) err
 		return fmt.Errorf("serve MCP HTTP: %w", err)
 	}
 	return nil
+}
+
+func registerPProf(mux *http.ServeMux) {
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 }
 
 func httpHandler(service Service) http.Handler {

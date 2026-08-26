@@ -212,3 +212,19 @@ func TestHTTPHandlerIsStatelessAndRejectsCrossOriginRequests(t *testing.T) {
 		t.Fatalf("cross-origin POST status = %d, want 403", crossOriginResponse.Code)
 	}
 }
+
+func TestPProfHandlerExposesGoroutineProfile(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	registerPProf(mux)
+
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://127.0.0.1/debug/pprof/goroutine?debug=1", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("pprof status = %d, want 200", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "goroutine profile") {
+		t.Fatalf("pprof response lacks goroutine profile: %q", response.Body.String())
+	}
+}
