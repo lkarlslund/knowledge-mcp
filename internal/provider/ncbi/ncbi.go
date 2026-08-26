@@ -340,7 +340,48 @@ type corpus struct {
 }
 
 func (c *corpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
-	return c.scan(ctx, after, false, sink)
+	partIndex, recordIndex, documents, err := parseCursor(after)
+	if err != nil {
+		return err
+	}
+	estimatedDocuments := int64(len(c.parts) * pubmedRecordsPerPart)
+	for pi := partIndex; pi < len(c.parts); pi++ {
+		file, err := os.Open(filepath.Join(c.path, "raw", c.parts[pi].Name))
+		if err != nil {
+			return err
+		}
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			_ = file.Close()
+			return err
+		}
+		current := 0
+		err = scanPubMedTitles(gz, func(article pubmedTitle) error {
+			if pi == partIndex && current < recordIndex {
+				current++
+				return nil
+			}
+			record := article.record(c.parts[pi].Name)
+			if record.ID == "" {
+				current++
+				return nil
+			}
+			documents++
+			current++
+			cursor := fmt.Sprintf("%d:%d:%d", pi, current, documents)
+			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: documents, Total: estimatedDocuments, Units: "documents", Boundary: true}); err != nil {
+				return err
+			}
+			return ctx.Err()
+		})
+		_ = gz.Close()
+		_ = file.Close()
+		if err != nil {
+			return err
+		}
+		recordIndex = 0
+	}
+	return nil
 }
 func (c *corpus) ScanBodies(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
 	return c.scan(ctx, after, true, sink)

@@ -62,6 +62,13 @@ func TestPubMedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = corpus.Close() }()
+	var titleRecord provider.Record
+	if err := corpus.ScanTitles(context.Background(), "", provider.ScanOptions{}, func(record provider.Record, _ provider.ScanPosition) error {
+		titleRecord = record
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var indexed provider.Record
 	var progress provider.ScanPosition
 	if err := corpus.ScanBodies(context.Background(), "", provider.ScanOptions{}, func(record provider.Record, position provider.ScanPosition) error {
@@ -72,6 +79,9 @@ func TestPubMedLifecycle(t *testing.T) {
 	}
 	if indexed.ID != "123" || !strings.Contains(indexed.Body, "Evidence text") || !strings.Contains(strings.Join(indexed.Keywords, " "), "Evidence-Based Medicine") {
 		t.Fatalf("record=%+v", indexed)
+	}
+	if titleRecord.ID != indexed.ID || titleRecord.Title != indexed.Title || strings.Join(titleRecord.Identifiers, "|") != strings.Join(indexed.Identifiers, "|") || strings.Join(titleRecord.Keywords, "|") != strings.Join(indexed.Keywords, "|") {
+		t.Fatalf("title record differs from body record\n title: %+v\n  body: %+v", titleRecord, indexed)
 	}
 	if progress.Completed != 1 || progress.Total != pubmedRecordsPerPart || progress.Units != "documents" {
 		t.Fatalf("progress=%+v", progress)
