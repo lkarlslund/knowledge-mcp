@@ -57,6 +57,7 @@ type release struct {
 type entry struct {
 	CELEX      string `json:"celex"`
 	Expression string `json:"expression"`
+	Format     string `json:"format"`
 	Title      string `json:"title"`
 	Date       string `json:"date,omitempty"`
 }
@@ -122,10 +123,12 @@ func (p *EURLEX) resolve(ctx context.Context, lang language) (*release, error) {
 		query := fmt.Sprintf(`PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
 PREFIX owl: <http://www.w3.org/2002/07/owl#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-SELECT DISTINCT ?celex ?expr ?title ?date WHERE {
+SELECT DISTINCT ?celex ?expr ?format ?title ?date WHERE {
  ?work cdm:resource_legal_in-force "true"^^xsd:boolean ; owl:sameAs ?celex .
  FILTER(STRSTARTS(STR(?celex), "http://publications.europa.eu/resource/celex/3"))%s
  ?expr cdm:expression_belongs_to_work ?work ; cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/%s> ; cdm:expression_title ?title .
+ ?manifestation cdm:manifestation_manifests_expression ?expr ; cdm:manifestation_type ?format .
+ FILTER(STR(?format) IN ("xhtml", "html"))
  OPTIONAL { ?work cdm:work_date_document ?date }
 } ORDER BY ?celex LIMIT %d`, cursorFilter, lang.Cellar, pageSize)
 		var result struct {
@@ -145,7 +148,7 @@ SELECT DISTINCT ?celex ?expr ?title ?date WHERE {
 				return nil, expressionErr
 			}
 			if celex != "" {
-				resolved.Entries = append(resolved.Entries, entry{CELEX: celex, Expression: expression, Title: binding["title"].Value, Date: binding["date"].Value})
+				resolved.Entries = append(resolved.Entries, entry{CELEX: celex, Expression: expression, Format: binding["format"].Value, Title: binding["title"].Value, Date: binding["date"].Value})
 			}
 		}
 		if len(result.Results.Bindings) < pageSize {
@@ -160,7 +163,16 @@ SELECT DISTINCT ?celex ?expr ?title ?date WHERE {
 	if len(resolved.Entries) == 0 {
 		return nil, errors.New("EUR-Lex catalog contained no in-force legal acts")
 	}
-	sort.Slice(resolved.Entries, func(i, j int) bool { return resolved.Entries[i].CELEX < resolved.Entries[j].CELEX })
+	sort.Slice(resolved.Entries, func(i, j int) bool {
+		left, right := resolved.Entries[i], resolved.Entries[j]
+		if left.CELEX != right.CELEX {
+			return left.CELEX < right.CELEX
+		}
+		if left.Format != right.Format {
+			return left.Format == "xhtml"
+		}
+		return left.Expression < right.Expression
+	})
 	unique := resolved.Entries[:0]
 	for _, item := range resolved.Entries {
 		if len(unique) > 0 && unique[len(unique)-1].CELEX == item.CELEX {
@@ -276,7 +288,7 @@ func (p *EURLEX) Acquire(ctx context.Context, collection, variant string, value 
 			for item := range tasks {
 				destination := filepath.Join(rawDir, item.CELEX+".xhtml")
 				previous, unchanged := old[item.CELEX]
-				if unchanged && previous.Expression == item.Expression && previous.Title == item.Title && previous.Date == item.Date {
+				if unchanged && previous.Expression == item.Expression && previous.Format == item.Format && previous.Title == item.Title && previous.Date == item.Date {
 					if err := linkOrCopy(filepath.Join(current, "raw", item.CELEX+".xhtml"), destination); err != nil && !errors.Is(err, os.ErrNotExist) {
 						select {
 						case errCh <- err:
@@ -345,7 +357,11 @@ func (p *EURLEX) download(ctx context.Context, item entry, destination string) e
 		offset = info.Size()
 	}
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.resourceURL+"/"+url.PathEscape(item.Expression), nil)
-	request.Header.Set("Accept", "text/html")
+	if item.Format == "xhtml" {
+		request.Header.Set("Accept", "application/xhtml+xml")
+	} else {
+		request.Header.Set("Accept", "text/html")
+	}
 	if offset > 0 {
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
