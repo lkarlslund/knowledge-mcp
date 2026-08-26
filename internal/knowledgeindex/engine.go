@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,14 +46,14 @@ type indexDocument struct {
 	Body            string   `json:"body,omitempty"`
 	URL             string   `json:"url,omitempty"`
 	Locator         string   `json:"locator,omitempty"`
-	Namespace       int      `json:"namespace"`
-	Primary         int      `json:"primary"`
+	Namespace       string   `json:"namespace"`
+	Primary         string   `json:"primary"`
 	Identifiers     []string `json:"identifiers,omitempty"`
 	IdentifierExact []string `json:"identifier_exact,omitempty"`
 	Aliases         []string `json:"aliases,omitempty"`
 	Keywords        []string `json:"keywords,omitempty"`
 	Status          string   `json:"status,omitempty"`
-	RankWeight      float64  `json:"rank_weight"`
+	RankWeight      string   `json:"rank_weight"`
 }
 
 type buildCheckpoint struct {
@@ -292,9 +293,9 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 }
 
 func toIndexDocument(record provider.Record, body bool) indexDocument {
-	primary := 0
+	primary := "0"
 	if record.Primary {
-		primary = 1
+		primary = "1"
 	}
 	rankWeight := record.RankWeight
 	if rankWeight <= 0 {
@@ -306,7 +307,7 @@ func toIndexDocument(record provider.Record, body bool) indexDocument {
 			identifiers = append(identifiers, normalized)
 		}
 	}
-	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Namespace: record.Namespace, Primary: primary, Identifiers: record.Identifiers, IdentifierExact: identifiers, Aliases: record.Aliases, Keywords: record.Keywords, Status: record.Status, RankWeight: rankWeight}
+	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Namespace: strconv.Itoa(record.Namespace), Primary: primary, Identifiers: record.Identifiers, IdentifierExact: identifiers, Aliases: record.Aliases, Keywords: record.Keywords, Status: record.Status, RankWeight: strconv.FormatFloat(rankWeight, 'g', -1, 64)}
 	if body {
 		document.Body = record.Body
 	}
@@ -399,7 +400,7 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 	}
 	searchQuery := rankedQuery(query, fullText)
 	if !options.IncludeSecondary {
-		primary := bleve.NewNumericRangeInclusiveQuery(floatPointer(1), floatPointer(1), boolPointer(true), boolPointer(true))
+		primary := bleve.NewTermQuery("1")
 		primary.SetField("primary")
 		searchQuery = bleve.NewConjunctionQuery(searchQuery, primary)
 	}
@@ -588,12 +589,14 @@ func indexMapping(body bool) mapping.IndexMapping {
 	status.Store, status.Index, status.IncludeTermVectors, status.IncludeInAll, status.DocValues = true, false, false, false, false
 	doc.AddFieldMappingsAt("status", status)
 	for _, fieldName := range []string{"namespace", "rank_weight"} {
-		field := bleve.NewNumericFieldMapping()
-		field.Store, field.Index, field.IncludeInAll, field.DocValues = true, false, false, false
+		field := bleve.NewTextFieldMapping()
+		field.Analyzer = "keyword"
+		field.Store, field.Index, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = true, false, false, false, false
 		doc.AddFieldMappingsAt(fieldName, field)
 	}
-	primary := bleve.NewNumericFieldMapping()
-	primary.Store, primary.Index, primary.IncludeInAll, primary.DocValues = true, true, false, false
+	primary := bleve.NewTextFieldMapping()
+	primary.Analyzer = "keyword"
+	primary.Store, primary.Index, primary.IncludeTermVectors, primary.IncludeInAll, primary.DocValues = true, true, false, false, false
 	doc.AddFieldMappingsAt("primary", primary)
 	if body {
 		field := bleve.NewTextFieldMapping()
@@ -690,9 +693,6 @@ func stringSliceField(value any) []string {
 		return nil
 	}
 }
-func boolPointer(value bool) *bool        { return &value }
-func floatPointer(value float64) *float64 { return &value }
-
 func numberField(value any) (float64, bool) {
 	switch number := value.(type) {
 	case float64:
@@ -701,6 +701,9 @@ func numberField(value any) (float64, bool) {
 		return float64(number), true
 	case uint64:
 		return float64(number), true
+	case string:
+		parsed, err := strconv.ParseFloat(number, 64)
+		return parsed, err == nil
 	default:
 		return 0, false
 	}
