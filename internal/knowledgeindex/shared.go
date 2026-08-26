@@ -178,7 +178,10 @@ func (s *SharedIndex) EstimatedBytes(dataset string) int64 {
 		return 0
 	}
 	diskBytes := s.diskBytes()
-	return diskBytes * entry.IndexedBytes / indexedTotal
+	// Divide before scaling so large corpora cannot overflow int64 while
+	// attributing shared physical storage proportionally to indexed input.
+	share := float64(entry.IndexedBytes) / float64(indexedTotal)
+	return int64(float64(diskBytes) * share)
 }
 
 func (s *SharedIndex) diskBytes() int64 {

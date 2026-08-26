@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
@@ -130,6 +131,22 @@ func TestSharedIndexSearchesWhileAnotherGenerationCommits(t *testing.T) {
 		default:
 			assertSharedHit(t, index, "alpha", "stable searchable", "alpha", "current")
 		}
+	}
+}
+
+func TestSharedIndexEstimatedBytesDoesNotOverflow(t *testing.T) {
+	index := &SharedIndex{
+		manifest: sharedManifest{Datasets: map[string]sharedDataset{
+			"large": {IndexedBytes: 37_000_000_000},
+			"small": {IndexedBytes: 18_000_000_000},
+		}},
+		storageAt:    time.Now(),
+		storageBytes: 54_000_000_000,
+	}
+	got := index.EstimatedBytes("large")
+	want := int64(36_327_272_727)
+	if got < want-1 || got > want+1 {
+		t.Fatalf("EstimatedBytes() = %d, want approximately %d", got, want)
 	}
 }
 
