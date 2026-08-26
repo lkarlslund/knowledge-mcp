@@ -16,10 +16,13 @@ func TestEURLexLifecycleAndMarkdownLinks(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/sparql" {
-			_ = json.NewEncoder(response).Encode(map[string]any{"results": map[string]any{"bindings": []any{map[string]any{"celex": map[string]string{"value": "http://publications.europa.eu/resource/celex/32016R0679"}, "title": map[string]string{"value": "Data protection regulation"}, "date": map[string]string{"value": "2016-04-27"}}}}})
+			_ = json.NewEncoder(response).Encode(map[string]any{"results": map[string]any{"bindings": []any{map[string]any{"celex": map[string]string{"value": "http://publications.europa.eu/resource/celex/32016R0679"}, "expr": map[string]string{"value": "http://publications.europa.eu/resource/cellar/expression.0001"}, "title": map[string]string{"value": "Data protection regulation"}, "date": map[string]string{"value": "2016-04-27"}}}}})
 			return
 		}
-		if request.URL.Path == "/celex/32016R0679" {
+		if request.URL.Path == "/celex/expression.0001" {
+			if accept := request.Header.Get("Accept"); accept != "text/html" {
+				t.Errorf("Accept=%q, want text/html", accept)
+			}
 			response.Header().Set("Content-Type", "application/xhtml+xml")
 			_, _ = response.Write([]byte(`<html><body><h1>Data protection regulation</h1><p>Protects personal data; see <a href="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32002L0058">Directive</a>.</p><table><tr><th>Article</th><th>Subject</th></tr><tr><td>1</td><td>Purpose</td></tr></table></body></html>`))
 			return
@@ -81,7 +84,7 @@ func TestEURLexRetriesTransientCatalogFailure(t *testing.T) {
 			http.Error(response, "temporary failure", http.StatusInternalServerError)
 			return
 		}
-		_ = json.NewEncoder(response).Encode(map[string]any{"results": map[string]any{"bindings": []any{map[string]any{"celex": map[string]string{"value": "http://publications.europa.eu/resource/celex/32016R0679"}, "title": map[string]string{"value": "Data protection regulation"}}}}})
+		_ = json.NewEncoder(response).Encode(map[string]any{"results": map[string]any{"bindings": []any{map[string]any{"celex": map[string]string{"value": "http://publications.europa.eu/resource/celex/32016R0679"}, "expr": map[string]string{"value": "http://publications.europa.eu/resource/cellar/expression.0001"}, "title": map[string]string{"value": "Data protection regulation"}}}}})
 	}))
 	defer server.Close()
 

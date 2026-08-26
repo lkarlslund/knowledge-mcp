@@ -32,7 +32,7 @@ const (
 	ProviderID      = "eurlex"
 	datasetID       = "eurlex-in-force"
 	defaultSPARQL   = "https://publications.europa.eu/webapi/rdf/sparql"
-	defaultResource = "https://publications.europa.eu/resource/celex"
+	defaultResource = "https://publications.europa.eu/resource/cellar"
 )
 
 type language struct{ Code, Name, Local, Cellar string }
@@ -55,9 +55,10 @@ type release struct {
 	Entries  []entry  `json:"entries"`
 }
 type entry struct {
-	CELEX string `json:"celex"`
-	Title string `json:"title"`
-	Date  string `json:"date,omitempty"`
+	CELEX      string `json:"celex"`
+	Expression string `json:"expression"`
+	Title      string `json:"title"`
+	Date       string `json:"date,omitempty"`
 }
 
 func New() *EURLEX { return NewWithURLs(defaultSPARQL, defaultResource) }
@@ -121,7 +122,7 @@ func (p *EURLEX) resolve(ctx context.Context, lang language) (*release, error) {
 		query := fmt.Sprintf(`PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
 PREFIX owl: <http://www.w3.org/2002/07/owl#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-SELECT DISTINCT ?celex ?title ?date WHERE {
+SELECT DISTINCT ?celex ?expr ?title ?date WHERE {
  ?work cdm:resource_legal_in-force "true"^^xsd:boolean ; owl:sameAs ?celex .
  FILTER(STRSTARTS(STR(?celex), "http://publications.europa.eu/resource/celex/3"))%s
  ?expr cdm:expression_belongs_to_work ?work ; cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/%s> ; cdm:expression_title ?title .
@@ -139,8 +140,12 @@ SELECT DISTINCT ?celex ?title ?date WHERE {
 		}
 		for _, binding := range result.Results.Bindings {
 			celex := strings.TrimPrefix(binding["celex"].Value, "http://publications.europa.eu/resource/celex/")
+			expression, expressionErr := cellarID(binding["expr"].Value)
+			if expressionErr != nil {
+				return nil, expressionErr
+			}
 			if celex != "" {
-				resolved.Entries = append(resolved.Entries, entry{CELEX: celex, Title: binding["title"].Value, Date: binding["date"].Value})
+				resolved.Entries = append(resolved.Entries, entry{CELEX: celex, Expression: expression, Title: binding["title"].Value, Date: binding["date"].Value})
 			}
 		}
 		if len(result.Results.Bindings) < pageSize {
@@ -165,6 +170,18 @@ SELECT DISTINCT ?celex ?title ?date WHERE {
 	}
 	resolved.Entries = unique
 	return resolved, nil
+}
+
+func cellarID(value string) (string, error) {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid EUR-Lex expression URI %q: %w", value, err)
+	}
+	id := strings.TrimPrefix(parsed.Path, "/resource/cellar/")
+	if id == "" || id == parsed.Path || strings.Contains(id, "/") {
+		return "", fmt.Errorf("invalid EUR-Lex expression URI %q", value)
+	}
+	return id, nil
 }
 
 func (p *EURLEX) querySPARQL(ctx context.Context, query string, target any) error {
@@ -259,7 +276,7 @@ func (p *EURLEX) Acquire(ctx context.Context, collection, variant string, value 
 			for item := range tasks {
 				destination := filepath.Join(rawDir, item.CELEX+".xhtml")
 				previous, unchanged := old[item.CELEX]
-				if unchanged && previous.Title == item.Title && previous.Date == item.Date {
+				if unchanged && previous.Expression == item.Expression && previous.Title == item.Title && previous.Date == item.Date {
 					if err := linkOrCopy(filepath.Join(current, "raw", item.CELEX+".xhtml"), destination); err != nil && !errors.Is(err, os.ErrNotExist) {
 						select {
 						case errCh <- err:
@@ -269,7 +286,7 @@ func (p *EURLEX) Acquire(ctx context.Context, collection, variant string, value 
 					}
 				}
 				if _, err := os.Stat(destination); errors.Is(err, os.ErrNotExist) {
-					if err := p.download(ctx, item.CELEX, resolved.Language.Code, destination); err != nil {
+					if err := p.download(ctx, item, destination); err != nil {
 						select {
 						case errCh <- err:
 						default:
@@ -321,15 +338,14 @@ send:
 	return model.Manifest{Provider: ProviderID, Variant: lang.Code, Dataset: collection, ReleaseDate: value.Date, Fingerprint: value.Fingerprint, PartCount: len(resolved.Entries), RawSize: bytes, ProviderMetadataSize: int64(len(metadata)), DocumentCount: uint64(len(resolved.Entries)), PublishedAt: time.Now().UTC(), Site: model.DatasetMetadata{Name: "EUR-Lex — EU law in force (" + lang.Name + ")", Description: "European Union regulations, directives, decisions, and other sector 3 legal acts currently marked in force by EUR-Lex, with official titles and full text.", Project: "EUR-Lex", ContentType: "European Union law", Profile: profile(), Language: model.Language{Code: lang.Code, Name: lang.Name, LocalName: lang.Local, Direction: "ltr"}, OnlineSourceURL: "https://eur-lex.europa.eu/", SourceDocuments: uint64(len(resolved.Entries)), MetadataUpdatedAt: time.Now().UTC()}}, nil
 }
 
-func (p *EURLEX) download(ctx context.Context, celex, lang, destination string) error {
+func (p *EURLEX) download(ctx context.Context, item entry, destination string) error {
 	partial := destination + ".part"
 	var offset int64
 	if info, err := os.Stat(partial); err == nil {
 		offset = info.Size()
 	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.resourceURL+"/"+url.PathEscape(celex), nil)
-	request.Header.Set("Accept", "application/xhtml+xml")
-	request.Header.Set("Accept-Language", lang)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.resourceURL+"/"+url.PathEscape(item.Expression), nil)
+	request.Header.Set("Accept", "text/html")
 	if offset > 0 {
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
@@ -344,7 +360,7 @@ func (p *EURLEX) download(ctx context.Context, celex, lang, destination string) 
 	} else if response.StatusCode == http.StatusOK {
 		flags |= os.O_TRUNC
 	} else {
-		return fmt.Errorf("download CELEX %s: %s", celex, response.Status)
+		return fmt.Errorf("download CELEX %s: %s", item.CELEX, response.Status)
 	}
 	file, err := os.OpenFile(partial, flags, 0o644)
 	if err != nil {
