@@ -45,9 +45,6 @@ type indexDocument struct {
 	Body            string   `json:"body,omitempty"`
 	URL             string   `json:"url,omitempty"`
 	Locator         string   `json:"locator,omitempty"`
-	Part            int      `json:"part"`
-	Offset          int64    `json:"offset"`
-	End             int64    `json:"end"`
 	Namespace       int      `json:"namespace"`
 	Primary         int      `json:"primary"`
 	Identifiers     []string `json:"identifiers,omitempty"`
@@ -309,7 +306,7 @@ func toIndexDocument(record provider.Record, body bool) indexDocument {
 			identifiers = append(identifiers, normalized)
 		}
 	}
-	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Part: record.Part, Offset: record.Offset, End: record.End, Namespace: record.Namespace, Primary: primary, Identifiers: record.Identifiers, IdentifierExact: identifiers, Aliases: record.Aliases, Keywords: record.Keywords, Status: record.Status, RankWeight: rankWeight}
+	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Namespace: record.Namespace, Primary: primary, Identifiers: record.Identifiers, IdentifierExact: identifiers, Aliases: record.Aliases, Keywords: record.Keywords, Status: record.Status, RankWeight: rankWeight}
 	if body {
 		document.Body = record.Body
 	}
@@ -590,7 +587,7 @@ func indexMapping(body bool) mapping.IndexMapping {
 	status := bleve.NewTextFieldMapping()
 	status.Store, status.Index, status.IncludeTermVectors, status.IncludeInAll, status.DocValues = true, false, false, false, false
 	doc.AddFieldMappingsAt("status", status)
-	for _, fieldName := range []string{"part", "offset", "end", "namespace", "rank_weight"} {
+	for _, fieldName := range []string{"namespace", "rank_weight"} {
 		field := bleve.NewNumericFieldMapping()
 		field.Store, field.Index, field.IncludeInAll, field.DocValues = true, false, false, false
 		doc.AddFieldMappingsAt(fieldName, field)

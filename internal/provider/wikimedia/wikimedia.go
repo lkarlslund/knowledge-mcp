@@ -40,7 +40,8 @@ func (c *wikimediaCorpus) ScanTitles(ctx context.Context, after string, _ provid
 	return wikiindex.ScanSourceTitles(ctx, wikiParts(c.path, c.manifest.PartCount), after, func(source wikiindex.SourceTitle, cursor string, completed, total int64, boundary bool) error {
 		return sink(provider.Record{
 			ID: strconv.FormatUint(source.ID, 10), Title: source.Title,
-			URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, source.Title), Part: source.Part, Offset: source.Offset, End: source.End,
+			URL:     wikiindex.URL(c.manifest.Site.OnlineSourceURL, source.Title),
+			Locator: fmt.Sprintf("%d:%d:%d", source.Part, source.Offset, source.End),
 			Primary: true,
 		}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total, Boundary: boundary})
 	})

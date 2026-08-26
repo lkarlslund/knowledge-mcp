@@ -27,9 +27,6 @@ type Record struct {
 	Body        string
 	URL         string
 	Locator     string
-	Part        int
-	Offset      int64
-	End         int64
 	Namespace   int
 	Primary     bool
 	Identifiers []string

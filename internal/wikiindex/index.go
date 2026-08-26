@@ -1872,7 +1872,7 @@ func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xml
 		limit = 20
 	}
 	req := bleve.NewSearchRequestOptions(q, limit, 0, false)
-	req.Fields = []string{"title", "offset", "end", "part"}
+	req.Fields = []string{"title", "locator", "offset", "end", "part"}
 	res, err := r.title.SearchInContext(ctx, req)
 	if err != nil {
 		return xmlPage{}, err
@@ -1890,9 +1890,10 @@ func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xml
 		}
 	}
 	wantedID, _ := strconv.ParseUint(hit.ID, 10, 64)
-	streamOffset := int64(hit.Fields["offset"].(float64))
-	streamEnd := int64(hit.Fields["end"].(float64))
-	partNumber := int(hit.Fields["part"].(float64))
+	partNumber, streamOffset, streamEnd, err := streamLocation(hit.Fields)
+	if err != nil {
+		return xmlPage{}, err
+	}
 	dump, err := os.Open(filepath.Join(r.generationPath, "parts", fmt.Sprintf("%03d.dump.bz2", partNumber)))
 	if err != nil {
 		return xmlPage{}, err
@@ -1906,6 +1907,37 @@ func (r *Reader) loadPage(ctx context.Context, title string, pageID uint64) (xml
 		return pages[0], nil
 	}
 	return xmlPage{}, errors.New("page was absent from its indexed stream")
+}
+
+func streamLocation(fields map[string]any) (int, int64, int64, error) {
+	if locator, ok := fields["locator"].(string); ok && locator != "" {
+		var part int
+		var offset, end int64
+		if count, err := fmt.Sscanf(locator, "%d:%d:%d", &part, &offset, &end); err != nil || count != 3 || part < 0 || offset < 0 || end <= offset {
+			return 0, 0, 0, fmt.Errorf("invalid Wikimedia stream locator %q", locator)
+		}
+		return part, offset, end, nil
+	}
+	offset, offsetOK := storedNumber(fields["offset"])
+	end, endOK := storedNumber(fields["end"])
+	part, partOK := storedNumber(fields["part"])
+	if !offsetOK || !endOK || !partOK {
+		return 0, 0, 0, errors.New("title index entry lacks a Wikimedia stream locator")
+	}
+	return int(part), int64(offset), int64(end), nil
+}
+
+func storedNumber(value any) (float64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case int:
+		return float64(number), true
+	case uint64:
+		return float64(number), true
+	default:
+		return 0, false
+	}
 }
 
 func redirectTarget(page xmlPage) string {
