@@ -330,12 +330,31 @@ func (p *NCBI) OpenCorpus(path string, _ model.Manifest) (provider.Corpus, error
 	if err := json.Unmarshal(data, &resolved); err != nil {
 		return nil, err
 	}
-	return &corpus{path: path, parts: resolved.Parts}, nil
+	var total int64
+	for index := range resolved.Parts {
+		if info, statErr := os.Stat(filepath.Join(path, "raw", resolved.Parts[index].Name)); statErr == nil {
+			resolved.Parts[index].Size = info.Size()
+		}
+		total += resolved.Parts[index].Size
+	}
+	return &corpus{path: path, parts: resolved.Parts, total: total}, nil
 }
 
 type corpus struct {
 	path  string
 	parts []part
+	total int64
+}
+
+type countingReader struct {
+	reader io.Reader
+	read   int64
+}
+
+func (r *countingReader) Read(buffer []byte) (int, error) {
+	read, err := r.reader.Read(buffer)
+	r.read += int64(read)
+	return read, err
 }
 
 func (c *corpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
@@ -346,16 +365,21 @@ func (c *corpus) ScanBodies(ctx context.Context, after string, _ provider.ScanOp
 }
 
 func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provider.RecordSink) error {
-	partIndex, recordIndex, completed, err := parseCursor(after)
+	partIndex, recordIndex, documents, err := parseCursor(after)
 	if err != nil {
 		return err
+	}
+	var compressedBefore int64
+	for index := 0; index < min(partIndex, len(c.parts)); index++ {
+		compressedBefore += c.parts[index].Size
 	}
 	for pi := partIndex; pi < len(c.parts); pi++ {
 		file, err := os.Open(filepath.Join(c.path, "raw", c.parts[pi].Name))
 		if err != nil {
 			return err
 		}
-		gz, err := gzip.NewReader(file)
+		compressed := &countingReader{reader: file}
+		gz, err := gzip.NewReader(compressed)
 		if err != nil {
 			_ = file.Close()
 			return err
@@ -391,9 +415,10 @@ func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provi
 				current++
 				continue
 			}
-			completed++
-			cursor := fmt.Sprintf("%d:%d:%d", pi, current+1, completed)
-			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: completed, Units: "documents", Boundary: true}); err != nil {
+			documents++
+			cursor := fmt.Sprintf("%d:%d:%d", pi, current+1, documents)
+			compressedDone := min(c.total, compressedBefore+compressed.read)
+			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: compressedDone, Total: c.total, Units: "bytes", Boundary: true}); err != nil {
 				_ = gz.Close()
 				_ = file.Close()
 				return err
@@ -407,6 +432,7 @@ func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provi
 		}
 		_ = gz.Close()
 		_ = file.Close()
+		compressedBefore += c.parts[pi].Size
 		recordIndex = 0
 	}
 	return nil

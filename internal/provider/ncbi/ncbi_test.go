@@ -63,11 +63,18 @@ func TestPubMedLifecycle(t *testing.T) {
 	}
 	defer func() { _ = corpus.Close() }()
 	var indexed provider.Record
-	if err := corpus.ScanBodies(context.Background(), "", provider.ScanOptions{}, func(record provider.Record, position provider.ScanPosition) error { indexed = record; return nil }); err != nil {
+	var progress provider.ScanPosition
+	if err := corpus.ScanBodies(context.Background(), "", provider.ScanOptions{}, func(record provider.Record, position provider.ScanPosition) error {
+		indexed, progress = record, position
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if indexed.ID != "123" || !strings.Contains(indexed.Body, "Evidence text") || !strings.Contains(strings.Join(indexed.Keywords, " "), "Evidence-Based Medicine") {
 		t.Fatalf("record=%+v", indexed)
+	}
+	if progress.Completed != int64(compressed.Len()) || progress.Total != int64(compressed.Len()) || progress.Units != "bytes" {
+		t.Fatalf("progress=%+v, compressed bytes=%d", progress, compressed.Len())
 	}
 	document, err := corpus.Read(context.Background(), indexed, model.ReadOptions{})
 	if err != nil {
