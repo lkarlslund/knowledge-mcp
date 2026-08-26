@@ -65,7 +65,7 @@
       <div><h1 class="h4 mb-0 fw-semibold">Knowledge Dataset MCP</h1><div class="small text-body-secondary">Local knowledge, compressed and agent-ready</div></div>
     </div>
     <div class="d-flex align-items-center gap-3 small text-body-secondary">
-      <span class="d-flex align-items-center gap-2" :class="connected ? 'text-success' : 'text-warning'"><span class="connection-dot rounded-circle bg-current"></span><span x-text="connected ? 'Live' : 'Reconnecting'"></span></span>
+      <span class="d-flex align-items-center gap-2" :class="connected ? 'text-success' : 'text-warning'"><span class="connection-dot rounded-circle bg-current"></span><span x-text="connected ? 'Live' : hydrated ? 'Reconnecting' : 'Connecting'"></span></span>
       <code>/mcp</code>
       <button class="btn btn-sm btn-outline-secondary btn-icon rounded-circle" data-bs-toggle="modal" data-bs-target="#settingsModal" @click="loadOperational()" title="Settings and provider health" aria-label="Settings and provider health"><i class="bi bi-gear"></i></button>
       <a class="text-body-secondary text-decoration-none d-inline-flex align-items-center gap-1" href="https://github.com/lkarlslund/wikipedia-multistream-mcp" target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View Knowledge Dataset MCP on GitHub"><i class="bi bi-github fs-5"></i><span class="d-none d-sm-inline">GitHub</span></a>
@@ -75,15 +75,15 @@
   <div class="alert alert-danger py-2" role="alert" x-show="error" x-transition><i class="bi bi-exclamation-triangle me-2"></i><span x-text="error"></span></div>
 
   <section class="row row-cols-2 row-cols-lg-4 g-2 mb-3">
-    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Local datasets</div><div class="metric-value fw-semibold" x-text="number(local.length)"></div></div></div>
-    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Active jobs</div><div class="metric-value fw-semibold" x-text="`${number(runningJobs.length)} / ${number(outstandingJobs.length)}`"></div><div class="small text-body-secondary">running / outstanding</div></div></div>
-    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Total documents</div><div class="metric-value fw-semibold" x-text="number(totalDocuments)"></div></div></div>
-    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Local storage</div><div class="metric-value fw-semibold" x-text="bytes(totalStorage)"></div></div></div>
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Local datasets</div><div class="metric-value fw-semibold"><span x-show="hydrated" x-text="number(local.length)"></span><span x-show="!hydrated" class="spinner-border spinner-border-sm text-primary" role="status"><span class="visually-hidden">Loading local datasets</span></span></div></div></div>
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Active jobs</div><div class="metric-value fw-semibold"><span x-show="hydrated" x-text="`${number(runningJobs.length)} / ${number(outstandingJobs.length)}`"></span><span x-show="!hydrated" class="spinner-border spinner-border-sm text-primary" role="status"><span class="visually-hidden">Loading jobs</span></span></div><div class="small text-body-secondary">running / outstanding</div></div></div>
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Total documents</div><div class="metric-value fw-semibold"><span x-show="hydrated" x-text="number(totalDocuments)"></span><span x-show="!hydrated" class="spinner-border spinner-border-sm text-primary" role="status"><span class="visually-hidden">Loading document count</span></span></div></div></div>
+    <div class="col"><div class="metric surface border rounded-4 p-3"><div class="small text-body-secondary mb-1">Local storage</div><div class="metric-value fw-semibold"><span x-show="hydrated" x-text="bytes(totalStorage)"></span><span x-show="!hydrated" class="spinner-border spinner-border-sm text-primary" role="status"><span class="visually-hidden">Loading storage usage</span></span></div></div></div>
   </section>
 
   <section class="surface border rounded-4 overflow-hidden mb-3">
     <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local datasets</h2><div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#onlineDatasetsModal" @click="openAvailable()"><i class="bi bi-cloud-arrow-down me-1"></i>Download</button></div></div>
-    <div class="table-responsive" x-show="local.length">
+    <div class="table-responsive" x-show="hydrated && local.length">
       <table class="table table-hover align-middle">
         <thead><tr><th>Dataset</th><th>Status</th><th>Documents</th><th>Search</th><th class="storage-column">Storage</th><th class="text-end">Actions</th></tr></thead>
         <tbody><template x-for="dataset in local" :key="dataset.dataset"><tr>
@@ -99,12 +99,13 @@
         </tr></template></tbody>
       </table>
     </div>
-    <div class="empty" x-show="!local.length"><span><i class="bi bi-inbox me-2"></i>No local datasets yet</span></div>
+    <div class="empty" x-show="!hydrated"><span><span class="spinner-border spinner-border-sm text-primary me-2" role="status" aria-hidden="true"></span>Loading local state…</span></div>
+    <div class="empty" x-show="hydrated && !local.length"><span><i class="bi bi-inbox me-2"></i>No local datasets yet</span></div>
   </section>
 
   <section class="surface border rounded-4 overflow-hidden mb-3">
     <div class="d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-bottom"><h2 class="h6 mb-0 me-auto"><i class="bi bi-activity section-icon me-2"></i>Jobs</h2><div class="btn-group btn-group-sm" role="group" aria-label="Filter jobs"><template x-for="option in jobFilterOptions" :key="option.value"><button type="button" class="btn" :class="jobFilter === option.value ? 'btn-primary' : 'btn-outline-secondary'" @click="jobFilter = option.value"><i :class="option.icon" class="me-1"></i><span x-text="option.label"></span><span class="badge rounded-pill ms-1" :class="jobFilter === option.value ? 'text-bg-light' : 'text-bg-secondary'" x-text="jobFilterCount(option.value)"></span></button></template></div></div>
-    <div class="table-responsive" x-show="filteredJobs.length">
+    <div class="table-responsive" x-show="hydrated && filteredJobs.length">
       <table class="table table-hover"><thead><tr><th>Dataset</th><th>Kind</th><th>Status</th><th style="min-width:16rem">Progress</th><th>Updated</th><th class="text-end">Controls</th></tr></thead>
         <tbody><template x-for="job in filteredJobs.slice(0, 30)" :key="job.id"><tr>
           <td class="fw-semibold" x-text="job.dataset"></td><td><span class="badge text-bg-secondary fw-normal" x-text="job.kind"></span></td>
@@ -115,7 +116,8 @@
         </tr></template></tbody>
       </table>
     </div>
-    <div class="empty" x-show="!filteredJobs.length"><span><i class="bi bi-funnel me-2"></i>No matching jobs</span></div>
+    <div class="empty" x-show="!hydrated"><span><span class="spinner-border spinner-border-sm text-primary me-2" role="status" aria-hidden="true"></span>Loading jobs…</span></div>
+    <div class="empty" x-show="hydrated && !filteredJobs.length"><span><i class="bi bi-funnel me-2"></i>No matching jobs</span></div>
   </section>
 
 <div class="modal fade" id="onlineDatasetsModal" tabindex="-1" aria-labelledby="onlineDatasetsTitle" aria-hidden="true">
@@ -158,10 +160,10 @@
 
 <script>
 document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
-  local: [], jobs: [], upgrades: [], upgradesLoaded: false, available: [], availableLanguages: [], availableSources: [], availableTotal: 0, availableNextOffset: 0, availableHasMore: true, availableLoading: false, availableRequest: 0, operational: {providers:[]}, settingsDraft: {download_workers:3,index_workers:1,indexing_parallelism:8,update_check_hours:24,automatically_update:false}, filter: '', sourceFilter: '', languageFilter: '', hideInstalled: false, jobFilter: 'running', connected: false, error: '', socket: null, reconnectDelay: 1000, catalogFilterStorageKey: 'knowledgeDatasetCatalogFilters.v1',
+  local: [], jobs: [], hydrated: false, upgrades: [], upgradesLoaded: false, upgradesLoading: false, available: [], availableLanguages: [], availableSources: [], availableTotal: 0, availableNextOffset: 0, availableHasMore: true, availableLoading: false, availableRequest: 0, operational: {providers:[]}, settingsDraft: {download_workers:3,index_workers:1,indexing_parallelism:8,update_check_hours:24,automatically_update:false}, filter: '', sourceFilter: '', languageFilter: '', hideInstalled: false, jobFilter: 'running', connected: false, error: '', socket: null, reconnectDelay: 1000, catalogFilterStorageKey: 'knowledgeDatasetCatalogFilters.v1',
   terminal: ['downloaded','ready','up_to_date','failed','canceled'],
 	jobFilterOptions: [{value:'all', label:'All', icon:'bi bi-grid'}, {value:'running', label:'Running', icon:'bi bi-play-circle'}, {value:'queued', label:'Queued', icon:'bi bi-hourglass'}, {value:'failed', label:'Failed', icon:'bi bi-exclamation-circle'}, {value:'completed', label:'Completed', icon:'bi bi-check-circle'}],
-  async init() { this.restoreCatalogFilters(); await this.loadUpgrades(); this.connect(); },
+  init() { this.restoreCatalogFilters(); this.connect(); this.loadUpgrades(); },
   get outstandingJobs() { return this.jobs.filter(job => !this.terminal.includes(job.state)); },
   get runningJobs() { return this.jobs.filter(job => ['discovering','downloading','verifying','title_indexing','body_indexing'].includes(job.state)); },
   get filteredJobs() { return this.jobs.filter(job => this.jobFilterMatches(job, this.jobFilter)); },
@@ -172,13 +174,13 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
     this.socket = new WebSocket(`${scheme}//${location.host}/api/dashboard/events`);
     this.socket.onopen = () => { this.connected = true; this.error = ''; this.reconnectDelay = 1000; };
-    this.socket.onmessage = event => { const state = JSON.parse(event.data); const previousLocal = this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|'); const currentJobs = new Map(this.jobs.map(job => [job.id, job])); this.local = state.local || []; this.jobs = (state.jobs || []).map(job => this.newerJob(currentJobs.get(job.id), job)); const localChanged = previousLocal !== this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|'); const maintenanceFinished = this.jobs.some(job => ['downloaded','ready','up_to_date'].includes(job.state) && ['download','update'].includes(job.kind) && currentJobs.has(job.id) && !this.terminal.includes(currentJobs.get(job.id).state)); if (localChanged) this.syncAvailableInstalled(); if (localChanged || maintenanceFinished) this.refreshCatalogSoon(); };
+    this.socket.onmessage = event => { const state = JSON.parse(event.data); const wasHydrated = this.hydrated; const previousLocal = this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|'); const currentJobs = new Map(this.jobs.map(job => [job.id, job])); this.local = state.local || []; this.jobs = (state.jobs || []).map(job => this.newerJob(currentJobs.get(job.id), job)); this.hydrated = true; const localChanged = previousLocal !== this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|'); const maintenanceFinished = this.jobs.some(job => ['downloaded','ready','up_to_date'].includes(job.state) && ['download','update'].includes(job.kind) && currentJobs.has(job.id) && !this.terminal.includes(currentJobs.get(job.id).state)); if (localChanged) this.syncAvailableInstalled(); if (wasHydrated && (localChanged || maintenanceFinished)) this.refreshCatalogSoon(); };
     this.socket.onerror = () => this.socket.close();
     this.socket.onclose = () => { this.connected = false; setTimeout(() => this.connect(), this.reconnectDelay); this.reconnectDelay = Math.min(this.reconnectDelay * 2, 15000); };
   },
   syncAvailableInstalled() { const installed = new Set(this.local.map(dataset => dataset.dataset)); const previousLength = this.available.length; this.available = this.available.map(dataset => ({...dataset, installed:installed.has(dataset.id)})).filter(dataset => !this.hideInstalled || !dataset.installed); this.availableTotal = Math.max(0, this.availableTotal - (previousLength - this.available.length)); },
   refreshCatalogSoon() { clearTimeout(this.catalogTimer); this.catalogTimer = setTimeout(() => this.loadUpgrades(), 750); },
-  async loadUpgrades() { try { this.upgrades = await this.api('/api/dashboard/upgrades'); } catch (error) { this.error = error.message; } finally { this.upgradesLoaded = true; } },
+  async loadUpgrades() { if (this.upgradesLoading) return; this.upgradesLoading = true; try { this.upgrades = await this.api('/api/dashboard/upgrades'); } catch (error) { this.error = error.message; } finally { this.upgradesLoaded = true; this.upgradesLoading = false; } },
   async loadOperational() { try { this.operational = await this.api('/api/dashboard/status'); this.settingsDraft = {...this.operational.settings}; } catch (error) { this.error = error.message; } },
   async saveSettings() { try { const settings = await this.api('/api/dashboard/settings', {method:'PUT', headers:{'Content-Type':'application/json','X-Knowledge-MCP':'1'}, body:JSON.stringify(this.settingsDraft)}); this.settingsDraft = {...settings}; await this.loadOperational(); } catch (error) { this.error = error.message; } },
   openAvailable() { if (!this.available.length && !this.availableLoading) this.resetAvailable(); },
