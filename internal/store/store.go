@@ -330,12 +330,16 @@ func (s *Store) ListAvailable(ctx context.Context, filter string, offset, limit 
 	return result, nil
 }
 
-func (s *Store) BrowseAvailable(ctx context.Context, filter, language string, hideInstalled bool, offset, limit int, refresh bool) (model.AvailableResult, error) {
+func (s *Store) BrowseAvailable(ctx context.Context, filter, language, source string, hideInstalled bool, offset, limit int, refresh bool) (model.AvailableResult, error) {
 	all, err := s.ListAvailable(ctx, filter, 0, -1, refresh)
 	if err != nil {
 		return model.AvailableResult{}, err
 	}
 	languages := make(map[string]model.Language)
+	sources := make(map[string]struct{})
+	for _, backend := range s.providers.Providers() {
+		sources[backend.ID()] = struct{}{}
+	}
 	filtered := make([]model.AvailableDataset, 0, len(all.Datasets))
 	for _, dataset := range all.Datasets {
 		for _, item := range datasetLanguages(dataset) {
@@ -344,7 +348,7 @@ func (s *Store) BrowseAvailable(ctx context.Context, filter, language string, hi
 				languages[item.Code] = item
 			}
 		}
-		if (language != "" && !datasetHasLanguage(dataset, language)) || (hideInstalled && dataset.Installed) {
+		if (language != "" && !datasetHasLanguage(dataset, language)) || (source != "" && dataset.Provider != source) || (hideInstalled && dataset.Installed) {
 			continue
 		}
 		filtered = append(filtered, dataset)
@@ -360,6 +364,11 @@ func (s *Store) BrowseAvailable(ctx context.Context, filter, language string, hi
 		}
 		return left < right
 	})
+	sourceList := make([]string, 0, len(sources))
+	for item := range sources {
+		sourceList = append(sourceList, item)
+	}
+	sort.Strings(sourceList)
 	if offset < 0 {
 		offset = 0
 	}
@@ -369,6 +378,7 @@ func (s *Store) BrowseAvailable(ctx context.Context, filter, language string, hi
 	result := model.AvailableResult{Offset: offset, Total: len(filtered)}
 	if offset == 0 {
 		result.Languages = languageList
+		result.Sources = sourceList
 	}
 	if offset >= len(filtered) {
 		return result, nil

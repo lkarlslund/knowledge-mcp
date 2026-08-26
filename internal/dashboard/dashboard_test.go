@@ -20,6 +20,7 @@ type fakeService struct {
 	listCalls       atomic.Int64
 	browseFilter    string
 	browseLanguage  string
+	browseSource    string
 	browseInstalled bool
 	browseOffset    int
 	browseLimit     int
@@ -28,15 +29,17 @@ type fakeService struct {
 func (f *fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
 	return model.AvailableResult{Datasets: []model.AvailableDataset{{ID: "testwiki", Available: true}}}, nil
 }
-func (f *fakeService) BrowseAvailable(_ context.Context, filter, language string, hideInstalled bool, offset, limit int, _ bool) (model.AvailableResult, error) {
+func (f *fakeService) BrowseAvailable(_ context.Context, filter, language, source string, hideInstalled bool, offset, limit int, _ bool) (model.AvailableResult, error) {
 	f.browseFilter = filter
 	f.browseLanguage = language
+	f.browseSource = source
 	f.browseInstalled = hideInstalled
 	f.browseOffset = offset
 	f.browseLimit = limit
 	return model.AvailableResult{
 		Datasets:  []model.AvailableDataset{{ID: "testwiki", Available: true}},
 		Languages: []model.Language{{Code: "en", Name: "English"}},
+		Sources:   []string{"wikimedia"},
 		Offset:    offset,
 		Total:     1,
 	}, nil
@@ -128,14 +131,17 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 	if !strings.Contains(page.Body.String(), "this.mergeJob(job)") || !strings.Contains(page.Body.String(), "Boolean(this.upgrades.find(item => item.id === dataset.id)?.update_available)") {
 		t.Fatal("catalog actions must update in place and prefer authoritative upgrade state")
 	}
+	if !strings.Contains(page.Body.String(), "All Sources") || !strings.Contains(page.Body.String(), "catalogFilterStorageKey") || !strings.Contains(page.Body.String(), "localStorage.setItem") {
+		t.Fatal("catalog source filter and persistent filter state are missing")
+	}
 
 	available := httptest.NewRecorder()
-	handler.ServeHTTP(available, httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/dashboard/available?filter=docs&language=en&hide_installed=true&offset=40&limit=40", nil))
-	if available.Code != http.StatusOK || !strings.Contains(available.Body.String(), `"languages":[{"code":"en"`) {
+	handler.ServeHTTP(available, httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/dashboard/available?filter=docs&language=en&source=wikimedia&hide_installed=true&offset=40&limit=40", nil))
+	if available.Code != http.StatusOK || !strings.Contains(available.Body.String(), `"languages":[{"code":"en"`) || !strings.Contains(available.Body.String(), `"sources":["wikimedia"]`) {
 		t.Fatalf("available response = %d %q", available.Code, available.Body.String())
 	}
-	if service.browseFilter != "docs" || service.browseLanguage != "en" || !service.browseInstalled || service.browseOffset != 40 || service.browseLimit != 40 {
-		t.Fatalf("available query = filter %q, language %q, hide %t, offset %d, limit %d", service.browseFilter, service.browseLanguage, service.browseInstalled, service.browseOffset, service.browseLimit)
+	if service.browseFilter != "docs" || service.browseLanguage != "en" || service.browseSource != "wikimedia" || !service.browseInstalled || service.browseOffset != 40 || service.browseLimit != 40 {
+		t.Fatalf("available query = filter %q, language %q, source %q, hide %t, offset %d, limit %d", service.browseFilter, service.browseLanguage, service.browseSource, service.browseInstalled, service.browseOffset, service.browseLimit)
 	}
 
 	forbidden := httptest.NewRecorder()
