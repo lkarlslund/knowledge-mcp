@@ -20,36 +20,76 @@ const (
 	titleFieldPublicationType
 	titleFieldDescriptor
 	titleFieldQualifier
+	titleFieldJournal
+	titleFieldLanguage
+	titleFieldAbstract
+	titleFieldAuthorLast
+	titleFieldAuthorFore
+	titleFieldAuthorCollective
 )
 
 type pubmedTitle struct {
 	id          string
 	title       string
+	journal     string
 	identifiers []string
 	keywords    []string
+	mesh        []string
+	languages   []string
+	authors     []string
+	abstracts   []abstractText
 }
 
-func (article pubmedTitle) record(locator string) provider.Record {
+func (article pubmedTitle) record(locator string, body bool) provider.Record {
 	identifiers := make([]string, 0, len(article.identifiers)+1)
 	identifiers = append(identifiers, "PMID "+article.id)
 	identifiers = append(identifiers, article.identifiers...)
-	return provider.Record{
+	record := provider.Record{
 		ID: article.id, Title: article.title,
 		URL: "https://pubmed.ncbi.nlm.nih.gov/" + article.id + "/", Locator: locator,
 		Primary: true, Identifiers: identifiers, Keywords: article.keywords, RankWeight: 1,
+		Metadata: map[string]string{"journal": article.journal, "language": strings.Join(article.languages, " ")},
 	}
+	if body {
+		record.Body = article.markdown()
+	}
+	return record
 }
 
-func scanPubMedTitles(source io.Reader, emit func(pubmedTitle) error) error {
+func (article pubmedTitle) markdown() string {
+	var out strings.Builder
+	out.WriteString("# " + article.title + "\n\n")
+	if len(article.authors) > 0 {
+		out.WriteString("**Authors:** " + strings.Join(article.authors, ", ") + "\n\n")
+	}
+	if article.journal != "" {
+		out.WriteString("**Journal:** " + article.journal + "\n\n")
+	}
+	for _, abstract := range article.abstracts {
+		if abstract.Label != "" {
+			out.WriteString("## " + abstract.Label + "\n\n")
+		}
+		out.WriteString(strings.TrimSpace(string(abstract.Text)) + "\n\n")
+	}
+	if len(article.mesh) > 0 {
+		out.WriteString("**MeSH terms:** " + strings.Join(article.mesh, "; ") + "\n")
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func scanPubMedArticles(source io.Reader, bodies bool, emit func(pubmedTitle) error) error {
 	reader := gosax.NewReaderSize(source, 64<<10)
 	reader.EmitSelfClosingTag = true
 	var article pubmedTitle
 	var field titleField
 	var fieldDepth int
 	var articleIDType string
+	var abstractLabel string
+	var authorLast, authorFore, authorCollective string
 	var value strings.Builder
 	depth := 0
 	inArticle := false
+	journalDepth, abstractDepth, authorDepth := 0, 0, 0
 
 	for {
 		event, err := reader.Event()
@@ -70,12 +110,23 @@ func scanPubMedTitles(source io.Reader, emit func(pubmedTitle) error) error {
 				continue
 			}
 			depth++
-			if bytes.Equal(name, []byte("Abstract")) || bytes.Equal(name, []byte("AuthorList")) {
+			if !bodies && (bytes.Equal(name, []byte("Abstract")) || bytes.Equal(name, []byte("AuthorList"))) {
 				if err := gosax.Skip(reader); err != nil {
 					return fmt.Errorf("skip PubMed body field: %w", err)
 				}
 				depth--
 				continue
+			}
+			if bodies {
+				switch {
+				case bytes.Equal(name, []byte("Journal")):
+					journalDepth = depth
+				case bytes.Equal(name, []byte("Abstract")):
+					abstractDepth = depth
+				case bytes.Equal(name, []byte("Author")):
+					authorDepth = depth
+					authorLast, authorFore, authorCollective = "", "", ""
+				}
 			}
 			switch {
 			case article.id == "" && bytes.Equal(name, []byte("PMID")):
@@ -94,6 +145,22 @@ func scanPubMedTitles(source io.Reader, emit func(pubmedTitle) error) error {
 				field = titleFieldDescriptor
 			case bytes.Equal(name, []byte("QualifierName")):
 				field = titleFieldQualifier
+			case bodies && journalDepth > 0 && bytes.Equal(name, []byte("Title")):
+				field = titleFieldJournal
+			case bodies && bytes.Equal(name, []byte("Language")):
+				field = titleFieldLanguage
+			case bodies && abstractDepth > 0 && bytes.Equal(name, []byte("AbstractText")):
+				field = titleFieldAbstract
+				abstractLabel, err = pubmedAttribute(event.Bytes, "Label")
+				if err != nil {
+					return err
+				}
+			case bodies && authorDepth > 0 && bytes.Equal(name, []byte("LastName")):
+				field = titleFieldAuthorLast
+			case bodies && authorDepth > 0 && bytes.Equal(name, []byte("ForeName")):
+				field = titleFieldAuthorFore
+			case bodies && authorDepth > 0 && bytes.Equal(name, []byte("CollectiveName")):
+				field = titleFieldAuthorCollective
 			default:
 				continue
 			}
@@ -117,9 +184,25 @@ func scanPubMedTitles(source io.Reader, emit func(pubmedTitle) error) error {
 				continue
 			}
 			if field != titleFieldNone && depth == fieldDepth {
-				assignPubMedTitleField(&article, field, articleIDType, value.String())
-				field, fieldDepth, articleIDType = titleFieldNone, 0, ""
+				assignPubMedTitleField(&article, field, articleIDType, abstractLabel, value.String(), &authorLast, &authorFore, &authorCollective)
+				field, fieldDepth, articleIDType, abstractLabel = titleFieldNone, 0, "", ""
 				value.Reset()
+			}
+			if bodies && depth == authorDepth {
+				name := strings.TrimSpace(authorFore + " " + authorLast)
+				if name == "" {
+					name = authorCollective
+				}
+				if name != "" {
+					article.authors = append(article.authors, name)
+				}
+				authorDepth = 0
+			}
+			if depth == abstractDepth {
+				abstractDepth = 0
+			}
+			if depth == journalDepth {
+				journalDepth = 0
 			}
 			if depth == 1 {
 				if err := emit(article); err != nil {
@@ -134,7 +217,7 @@ func scanPubMedTitles(source io.Reader, emit func(pubmedTitle) error) error {
 	}
 }
 
-func assignPubMedTitleField(article *pubmedTitle, field titleField, idType, raw string) {
+func assignPubMedTitleField(article *pubmedTitle, field titleField, idType, abstractLabel, raw string, authorLast, authorFore, authorCollective *string) {
 	value := strings.Join(strings.Fields(raw), " ")
 	if value == "" {
 		return
@@ -146,8 +229,23 @@ func assignPubMedTitleField(article *pubmedTitle, field titleField, idType, raw 
 		article.title = value
 	case titleFieldArticleID:
 		article.identifiers = append(article.identifiers, strings.ToUpper(idType)+" "+value)
-	case titleFieldPublicationType, titleFieldDescriptor, titleFieldQualifier:
+	case titleFieldPublicationType, titleFieldQualifier:
 		article.keywords = append(article.keywords, value)
+	case titleFieldDescriptor:
+		article.keywords = append(article.keywords, value)
+		article.mesh = append(article.mesh, value)
+	case titleFieldJournal:
+		article.journal = value
+	case titleFieldLanguage:
+		article.languages = append(article.languages, value)
+	case titleFieldAbstract:
+		article.abstracts = append(article.abstracts, abstractText{Label: abstractLabel, Text: richText(value)})
+	case titleFieldAuthorLast:
+		*authorLast = value
+	case titleFieldAuthorFore:
+		*authorFore = value
+	case titleFieldAuthorCollective:
+		*authorCollective = value
 	case titleFieldNone:
 	}
 }

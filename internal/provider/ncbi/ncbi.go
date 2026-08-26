@@ -340,6 +340,13 @@ type corpus struct {
 }
 
 func (c *corpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
+	return c.scanSAX(ctx, after, false, sink)
+}
+func (c *corpus) ScanBodies(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
+	return c.scanSAX(ctx, after, true, sink)
+}
+
+func (c *corpus) scanSAX(ctx context.Context, after string, bodies bool, sink provider.RecordSink) error {
 	partIndex, recordIndex, documents, err := parseCursor(after)
 	if err != nil {
 		return err
@@ -356,12 +363,12 @@ func (c *corpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOp
 			return err
 		}
 		current := 0
-		err = scanPubMedTitles(gz, func(article pubmedTitle) error {
+		err = pipelinePubMedArticles(ctx, gz, bodies, func(article pubmedTitle) error {
 			if pi == partIndex && current < recordIndex {
 				current++
 				return nil
 			}
-			record := article.record(c.parts[pi].Name)
+			record := article.record(c.parts[pi].Name, bodies)
 			if record.ID == "" {
 				current++
 				return nil
@@ -372,7 +379,7 @@ func (c *corpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOp
 			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: documents, Total: estimatedDocuments, Units: "documents", Boundary: true}); err != nil {
 				return err
 			}
-			return ctx.Err()
+			return nil
 		})
 		_ = gz.Close()
 		_ = file.Close()
@@ -383,76 +390,31 @@ func (c *corpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOp
 	}
 	return nil
 }
-func (c *corpus) ScanBodies(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
-	return c.scan(ctx, after, true, sink)
-}
 
-func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provider.RecordSink) error {
-	partIndex, recordIndex, documents, err := parseCursor(after)
-	if err != nil {
-		return err
-	}
-	estimatedDocuments := int64(len(c.parts) * pubmedRecordsPerPart)
-	for pi := partIndex; pi < len(c.parts); pi++ {
-		file, err := os.Open(filepath.Join(c.path, "raw", c.parts[pi].Name))
-		if err != nil {
+func pipelinePubMedArticles(ctx context.Context, source io.Reader, bodies bool, consume func(pubmedTitle) error) error {
+	parseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	articles := make(chan pubmedTitle, 1024)
+	parsed := make(chan error, 1)
+	go func() {
+		defer close(articles)
+		parsed <- scanPubMedArticles(source, bodies, func(article pubmedTitle) error {
+			select {
+			case articles <- article:
+				return nil
+			case <-parseCtx.Done():
+				return parseCtx.Err()
+			}
+		})
+	}()
+	for article := range articles {
+		if err := consume(article); err != nil {
+			cancel()
+			<-parsed
 			return err
 		}
-		gz, err := gzip.NewReader(file)
-		if err != nil {
-			_ = file.Close()
-			return err
-		}
-		decoder := xml.NewDecoder(gz)
-		current := 0
-		for {
-			token, tokenErr := decoder.Token()
-			if errors.Is(tokenErr, io.EOF) {
-				break
-			}
-			if tokenErr != nil {
-				_ = gz.Close()
-				_ = file.Close()
-				return tokenErr
-			}
-			start, ok := token.(xml.StartElement)
-			if !ok || start.Name.Local != "PubmedArticle" {
-				continue
-			}
-			var article pubmedArticle
-			if err := decoder.DecodeElement(&article, &start); err != nil {
-				_ = gz.Close()
-				_ = file.Close()
-				return err
-			}
-			if pi == partIndex && current < recordIndex {
-				current++
-				continue
-			}
-			record := article.record(c.parts[pi].Name, bodies)
-			if record.ID == "" {
-				current++
-				continue
-			}
-			documents++
-			cursor := fmt.Sprintf("%d:%d:%d", pi, current+1, documents)
-			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: documents, Total: estimatedDocuments, Units: "documents", Boundary: true}); err != nil {
-				_ = gz.Close()
-				_ = file.Close()
-				return err
-			}
-			current++
-			if err := ctx.Err(); err != nil {
-				_ = gz.Close()
-				_ = file.Close()
-				return err
-			}
-		}
-		_ = gz.Close()
-		_ = file.Close()
-		recordIndex = 0
 	}
-	return nil
+	return <-parsed
 }
 
 func parseCursor(value string) (int, int, int64, error) {
@@ -543,30 +505,6 @@ func (value *richText) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 	}
 	*value = richText(strings.Join(strings.Fields(text.String()), " "))
 	return nil
-}
-
-func (a pubmedArticle) record(locator string, body bool) provider.Record {
-	id, title := strings.TrimSpace(a.Citation.PMID), strings.TrimSpace(string(a.Citation.Article.Title))
-	identifiers := []string{"PMID " + id}
-	metadata := map[string]string{"journal": a.Citation.Article.Journal.Title, "language": strings.Join(a.Citation.Article.Language, " ")}
-	for _, item := range a.Data.IDs {
-		if item.Value != "" {
-			identifiers = append(identifiers, strings.ToUpper(item.Type)+" "+item.Value)
-			if item.Type == "doi" {
-				metadata["doi"] = item.Value
-			}
-		}
-	}
-	keywords := append([]string(nil), a.Citation.Article.Types...)
-	for _, mesh := range a.Citation.Mesh {
-		keywords = append(keywords, mesh.Descriptor)
-		keywords = append(keywords, mesh.Qualifiers...)
-	}
-	record := provider.Record{ID: id, Title: title, URL: "https://pubmed.ncbi.nlm.nih.gov/" + id + "/", Locator: locator, Primary: true, Identifiers: identifiers, Keywords: keywords, RankWeight: 1, Metadata: metadata}
-	if body {
-		record.Body = a.markdown()
-	}
-	return record
 }
 
 func (a pubmedArticle) markdown() string {

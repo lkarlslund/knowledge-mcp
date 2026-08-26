@@ -93,6 +93,9 @@ func TestPubMedLifecycle(t *testing.T) {
 	if document.Format != "markdown" || !strings.Contains(document.Content, "# Useful medicine") {
 		t.Fatalf("document=%+v", document)
 	}
+	if indexed.Body != document.Content {
+		t.Fatalf("SAX body differs from document decoder\n SAX: %q\n full: %q", indexed.Body, document.Content)
+	}
 	if _, err := os.Stat(filepath.Join(stage, "raw", "pubmed26n0001.xml.gz")); err != nil {
 		t.Fatal(err)
 	}
