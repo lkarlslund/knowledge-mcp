@@ -19,6 +19,7 @@ import (
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	documentrefs "github.com/lkarlslund/wikipedia-multistream-mcp/internal/references"
 )
 
 type Store struct {
@@ -42,6 +43,7 @@ type Store struct {
 	indexSettings    chan struct{}
 	scheduleSettings chan struct{}
 	lastUpdateCheck  time.Time
+	references       *documentrefs.Store
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
 }
@@ -90,11 +92,16 @@ func Open(root string, registry *provider.Registry, options ...Options) (*Store,
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*knowledgeindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time), settings: settings, providerState: make(map[string]model.ProviderStatus), downloadSettings: make(chan struct{}, 1), indexSettings: make(chan struct{}, 1), scheduleSettings: make(chan struct{}, 1)}
+	referenceStore, err := documentrefs.Open(filepath.Join(root, "references.db"))
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{root: root, providers: registry, jobs: make(map[string]*model.Job), active: make(map[string]string), downloadQueue: make(chan string, 256), indexQueue: make(chan string, 256), running: make(map[string]context.CancelFunc), watchers: make(map[chan struct{}]struct{}), readers: make(map[string]*knowledgeindex.Reader), storage: make(map[string]storageSnapshot), lastProgress: make(map[string]time.Time), settings: settings, providerState: make(map[string]model.ProviderStatus), downloadSettings: make(chan struct{}, 1), indexSettings: make(chan struct{}, 1), scheduleSettings: make(chan struct{}, 1), references: referenceStore}
 	for _, backend := range registry.Providers() {
 		s.providerState[backend.ID()] = model.ProviderStatus{Provider: backend.ID(), State: "unknown", CatalogState: "not_checked"}
 	}
 	if err := s.loadJobs(); err != nil {
+		_ = referenceStore.Close()
 		return nil, err
 	}
 	metadataCtx, metadataCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -282,7 +289,7 @@ func (s *Store) CloseContext(ctx context.Context) error {
 	select {
 	case <-done:
 		s.closeReaders("")
-		return nil
+		return s.references.Close()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -751,16 +758,30 @@ func isTerminal(state string) bool {
 }
 
 func (s *Store) Search(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, error) {
+	if strings.TrimSpace(dataset) == "" {
+		return s.searchAll(ctx, query, options)
+	}
+	result, providerID, err := s.searchDataset(ctx, dataset, query, options)
+	if err != nil {
+		return result, err
+	}
+	if err := s.decorateSearchResult(&result, providerID, dataset); err != nil {
+		return model.SearchResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Store) searchDataset(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, string, error) {
 	owner, ownerErr := s.providers.ForCollection(dataset)
 	if ownerErr != nil {
-		return model.SearchResult{}, ownerErr
+		return model.SearchResult{}, "", ownerErr
 	}
 	path := s.datasetPath(owner.ID(), dataset)
 	s.mu.RLock()
 	manifest, err := readManifest(filepath.Join(path, "manifest.json"))
 	if err != nil || !manifest.TitleReady {
 		s.mu.RUnlock()
-		return model.SearchResult{}, fmt.Errorf("dataset %s is not title-ready", dataset)
+		return model.SearchResult{}, "", fmt.Errorf("dataset %s is not title-ready", dataset)
 	}
 	_, fullText := knowledgeindex.Current(manifest)
 	switch options.Mode {
@@ -770,29 +791,29 @@ func (s *Store) Search(ctx context.Context, dataset, query string, options model
 	case "full_text":
 		if !fullText {
 			s.mu.RUnlock()
-			return model.SearchResult{}, fmt.Errorf("dataset %s is not full-text ready", dataset)
+			return model.SearchResult{}, "", fmt.Errorf("dataset %s is not full-text ready", dataset)
 		}
 	default:
 		s.mu.RUnlock()
-		return model.SearchResult{}, errors.New("search mode must be auto, title, or full_text")
+		return model.SearchResult{}, "", errors.New("search mode must be auto, title, or full_text")
 	}
 	reader, err := s.reader(owner, path, manifest, fullText)
 	if err != nil {
 		s.mu.RUnlock()
-		return model.SearchResult{}, err
+		return model.SearchResult{}, "", err
 	}
 	release, err := reader.Retain()
 	s.mu.RUnlock()
 	if err != nil {
-		return model.SearchResult{}, err
+		return model.SearchResult{}, "", err
 	}
 	defer release()
 	result, err := reader.Search(ctx, query, options, fullText)
 	if err != nil {
-		return result, err
+		return result, owner.ID(), err
 	}
 	result.Dataset = dataset
-	return result, nil
+	return result, owner.ID(), nil
 }
 
 func (s *Store) Read(ctx context.Context, dataset, title, id string, options model.ReadOptions) (model.Document, error) {
@@ -831,6 +852,11 @@ func (s *Store) Read(ctx context.Context, dataset, title, id string, options mod
 			return page, fmt.Errorf("document %q not found in %s; call knowledge_search and retry knowledge_read with its id; candidates: %s", title, dataset, strings.Join(candidates, ", "))
 		}
 		return page, fmt.Errorf("document %q not found in %s; call knowledge_search and retry knowledge_read with its id", title, dataset)
+	}
+	if err == nil {
+		if decorateErr := s.decorateDocument(&page, owner.ID(), dataset); decorateErr != nil {
+			return model.Document{}, decorateErr
+		}
 	}
 	return page, err
 }

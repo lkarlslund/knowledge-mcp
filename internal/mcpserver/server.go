@@ -27,6 +27,7 @@ type Service interface {
 	JobAction(string, string) (model.Job, error)
 	Search(context.Context, string, string, model.SearchOptions) (model.SearchResult, error)
 	Read(context.Context, string, string, string, model.ReadOptions) (model.Document, error)
+	ReadReference(context.Context, string, model.ReadOptions) (model.Document, error)
 }
 
 type DashboardService interface {
@@ -59,7 +60,7 @@ type jobInput struct {
 }
 
 type searchInput struct {
-	Dataset          string `json:"dataset" jsonschema:"installed dataset ID"`
+	Dataset          string `json:"dataset,omitempty" jsonschema:"optional installed dataset ID; omit to search all installed search-ready datasets"`
 	Query            string `json:"query" jsonschema:"plain text search query"`
 	Mode             string `json:"mode,omitempty" jsonschema:"auto (default), title, or full_text"`
 	Offset           int    `json:"offset,omitempty" jsonschema:"zero-based result offset"`
@@ -69,7 +70,8 @@ type searchInput struct {
 }
 
 type readInput struct {
-	Dataset         string `json:"dataset" jsonschema:"installed dataset ID"`
+	Ref             string `json:"ref,omitempty" jsonschema:"opaque temporary document reference returned by knowledge_search or an embedded knowledge link"`
+	Dataset         string `json:"dataset,omitempty" jsonschema:"installed dataset ID"`
 	ID              string `json:"id,omitempty" jsonschema:"opaque document identifier returned by knowledge_search; mutually exclusive with title"`
 	Title           string `json:"title,omitempty" jsonschema:"exact document title; mutually exclusive with id"`
 	Format          string `json:"format,omitempty" jsonschema:"markdown (default), text, or provider-native source"`
@@ -94,7 +96,7 @@ func New(service Service) *mcp.Server {
 	setIntegerBounds(searchSchema, "offset", 0, nil)
 	setIntegerBounds(searchSchema, "limit", 1, intPointer(50))
 	readSchema := mustSchemaFor[readInput]()
-	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"title"}}, {Required: []string{"id"}}}
+	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"ref"}}, {Required: []string{"dataset", "title"}}, {Required: []string{"dataset", "id"}}}
 	readSchema.Properties["format"].Enum = []any{"markdown", "text", "source"}
 	setIntegerBounds(readSchema, "offset", 0, nil)
 	setIntegerBounds(readSchema, "max_chars", 1, intPointer(500_000))
@@ -134,18 +136,15 @@ func New(service Service) *mcp.Server {
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_search", Description: "Search an installed dataset using local indexes. Exact provider identifiers such as RFC 9110 receive strong ranking; results may include identifiers and lifecycle status. Use mode=title for name lookup or full_text for body retrieval. Follow a result with knowledge_read using dataset and id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
-		if strings.TrimSpace(in.Dataset) == "" || strings.TrimSpace(in.Query) == "" {
-			return nil, model.SearchResult{}, errors.New("provide dataset and a non-empty query")
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_search", Description: "Search local indexes. Omit dataset to search all installed search-ready datasets concurrently, or provide it for exact scope. Exact identifiers such as RFC 9110 receive strong ranking. Follow results with knowledge_read using only ref.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+		if strings.TrimSpace(in.Query) == "" {
+			return nil, model.SearchResult{}, errors.New("provide a non-empty query")
 		}
 		snippets := in.Snippets == nil || *in.Snippets
 		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Mode: in.Mode, Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets})
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a document by its opaque stable id from knowledge_search or by exact title. Markdown is the default; provider-generated knowledge-read links and structured relationships identify related documents. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
-		if (strings.TrimSpace(in.Title) == "") == (strings.TrimSpace(in.ID) == "") {
-			return nil, model.Document{}, errors.New("provide exactly one of title or id")
-		}
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a document using the opaque temporary ref returned by knowledge_search or an embedded link. Legacy dataset plus id/title arguments remain supported. Markdown is the default; continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
 		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
 		maxChars := in.MaxChars
 		if maxChars <= 0 {
@@ -154,7 +153,20 @@ func New(service Service) *mcp.Server {
 			maxChars = 500_000
 		}
 		includeOutline := in.IncludeOutline != nil && *in.IncludeOutline || in.IncludeOutline == nil && in.Offset == 0 && in.Section == ""
-		out, err := service.Read(ctx, in.Dataset, in.Title, in.ID, model.ReadOptions{Format: in.Format, Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000})
+		options := model.ReadOptions{Format: in.Format, Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000}
+		var out model.Document
+		var err error
+		if in.Ref != "" {
+			if in.Dataset != "" || in.Title != "" || in.ID != "" {
+				return nil, model.Document{}, errors.New("provide ref alone, or dataset with exactly one of title or id")
+			}
+			out, err = service.ReadReference(ctx, in.Ref, options)
+		} else {
+			if in.Dataset == "" || (in.Title == "") == (in.ID == "") {
+				return nil, model.Document{}, errors.New("provide ref alone, or dataset with exactly one of title or id")
+			}
+			out, err = service.Read(ctx, in.Dataset, in.Title, in.ID, options)
+		}
 		return nil, out, err
 	})
 	return server

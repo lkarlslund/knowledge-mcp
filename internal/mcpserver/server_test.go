@@ -17,11 +17,16 @@ type fakeService struct{}
 type recordingService struct {
 	fakeService
 	readOptions model.ReadOptions
+	readRef     string
 }
 
 func (service *recordingService) Read(_ context.Context, dataset, title, id string, options model.ReadOptions) (model.Document, error) {
 	service.readOptions = options
 	return model.Document{Dataset: dataset, Title: title, ID: id}, nil
+}
+func (service *recordingService) ReadReference(_ context.Context, ref string, options model.ReadOptions) (model.Document, error) {
+	service.readRef, service.readOptions = ref, options
+	return model.Document{Ref: ref}, nil
 }
 
 func (fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
@@ -57,6 +62,9 @@ func (fakeService) Search(_ context.Context, wiki, query string, options model.S
 }
 func (fakeService) Read(_ context.Context, dataset, title, id string, options model.ReadOptions) (model.Document, error) {
 	return model.Document{Dataset: dataset, Title: title, ID: id}, nil
+}
+func (fakeService) ReadReference(_ context.Context, ref string, _ model.ReadOptions) (model.Document, error) {
+	return model.Document{Ref: ref}, nil
 }
 
 func TestToolsAndStructuredCall(t *testing.T) {
@@ -114,8 +122,8 @@ func TestToolsAndStructuredCall(t *testing.T) {
 			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":500000`) {
 				t.Errorf("knowledge_read schema lacks conditional/bound constraints: %s, %v", schemaJSON, marshalErr)
 			}
-			if !strings.Contains(tool.Description, "opaque stable id") || !strings.Contains(tool.Description, " id") {
-				t.Errorf("knowledge_read description lacks search-derived page ID guidance: %q", tool.Description)
+			if !strings.Contains(tool.Description, "temporary ref") || !strings.Contains(tool.Description, "Legacy") {
+				t.Errorf("knowledge_read description lacks reference guidance: %q", tool.Description)
 			}
 		}
 		if tool.Annotations.ReadOnlyHint != expectation.readOnly {
@@ -188,6 +196,11 @@ func TestWikiReadAppliesAgentSizedDefaults(t *testing.T) {
 	}
 	if service.readOptions.MaxChars != 50_000 || !service.readOptions.AlignBoundaries || service.readOptions.ReferenceBudgetChars != 10_000 || service.readOptions.ReferenceMaxChars != 4_000 || !service.readOptions.IncludeOutline {
 		t.Fatalf("read options = %#v", service.readOptions)
+	}
+	result, err = session.CallTool(context.Background(), &mcp.CallToolParams{Name: "knowledge_read", Arguments: map[string]any{"ref": "r_123456"}})
+	if err != nil || result.IsError || service.readRef != "r_123456" {
+		payload, _ := json.Marshal(result)
+		t.Fatalf("knowledge_read by ref = %s, %v; ref %q", payload, err, service.readRef)
 	}
 }
 

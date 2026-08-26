@@ -12,10 +12,11 @@ Included providers:
 - `kiwix`: the complete Kiwix OPDS catalog, grouped into datasets and archive flavours.
 
 Provider URLs and local paths are not part of the agent contract. Search returns
-a short, stable, opaque document `id`; `knowledge_read` accepts that ID together
-with the dataset ID. Markdown is the default read format, including sparse links
-such as `knowledge-read://read?dataset=rfc&id=9110` that tell an agent how to
-follow related documents.
+a temporary opaque `ref`; agents pass only that value to `knowledge_read`, without
+retaining provider or dataset routing details. References use ordinary fast random
+identifiers, persist across service restarts, and expire after seven inactive days.
+Markdown is the default read format, with embedded links carrying another opaque
+reference that an agent can follow with `knowledge_read`.
 
 ![Knowledge Dataset MCP dashboard in dark mode](docs/dashboard-dark.png)
 
@@ -101,8 +102,8 @@ endpoint. The legacy `WIKIPEDIA_MULTISTREAM_MCP_SERVER` name remains accepted.
 | `knowledge_update` | Submit an atomic background update or finish indexing. |
 | `knowledge_job_status` | Poll one job by `job_id` or `dataset`. |
 | `knowledge_job` | `pause`, `resume`, `cancel`, or `retry` a job. |
-| `knowledge_search` | Search a local dataset and return stable opaque document IDs. |
-| `knowledge_read` | Read by `dataset` plus `id`, or by exact title. |
+| `knowledge_search` | Search one local dataset, or omit `dataset` to search all ready datasets concurrently; returns opaque references. |
+| `knowledge_read` | Read by opaque `ref`; `dataset` plus `id` or exact title remains supported for compatibility. |
 
 `knowledge_read` returns Markdown by default. `format: "text"` requests a lossy
 plain-text representation; `format: "source"` returns the provider-native raw

@@ -201,12 +201,16 @@ func newSearchCommand(opts *options) *cobra.Command {
 	var mode string
 	var includeSecondary, noSnippets bool
 	command := &cobra.Command{
-		Use:   "search DATASET QUERY",
-		Short: "Search titles or full text in a local dataset",
-		Args:  cobra.ExactArgs(2),
+		Use:   "search [DATASET] QUERY",
+		Short: "Search one dataset or all local datasets",
+		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			dataset, query := "", args[0]
+			if len(args) == 2 {
+				dataset, query = args[0], args[1]
+			}
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Search(cmd.Context(), args[0], args[1], model.SearchOptions{Mode: mode, Offset: offset, Limit: limit, IncludeSecondary: includeSecondary, Snippets: !noSnippets})
+				result, err := client.Search(cmd.Context(), dataset, query, model.SearchOptions{Mode: mode, Offset: offset, Limit: limit, IncludeSecondary: includeSecondary, Snippets: !noSnippets})
 				return printResult(result, err)
 			})
 		},
@@ -220,17 +224,29 @@ func newSearchCommand(opts *options) *cobra.Command {
 }
 
 func newReadCommand(opts *options) *cobra.Command {
-	var id string
+	var id, ref string
 	var format, section string
 	var offset, maxChars int
 	var followRedirects, outline bool
 	command := &cobra.Command{
-		Use:   "read DATASET [TITLE]",
+		Use:   "read [DATASET] [TITLE]",
 		Short: "Read a document from a local dataset",
-		Args:  cobra.RangeArgs(1, 2),
+		Args:  cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if maxChars < 1 || maxChars > 500_000 {
 				return errors.New("max-chars must be between 1 and 500000 for MCP reads")
+			}
+			if ref != "" {
+				if len(args) != 0 || id != "" {
+					return errors.New("provide --ref alone")
+				}
+				return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
+					result, err := client.ReadReference(cmd.Context(), ref, model.ReadOptions{Format: format, Section: section, Offset: offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: outline})
+					return printResult(result, err)
+				})
+			}
+			if len(args) == 0 {
+				return errors.New("provide --ref, or DATASET with TITLE or --id")
 			}
 			title := ""
 			if len(args) == 2 {
@@ -245,6 +261,7 @@ func newReadCommand(opts *options) *cobra.Command {
 			})
 		},
 	}
+	command.Flags().StringVar(&ref, "ref", "", "temporary opaque reference returned by search or an embedded link")
 	command.Flags().StringVar(&id, "id", "", "opaque document ID returned by search")
 	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or provider-native source")
 	command.Flags().StringVar(&section, "section", "", "read one article section by heading or anchor")

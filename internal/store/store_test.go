@@ -120,12 +120,29 @@ func TestBackgroundDownloadPublishesTitleThenBody(t *testing.T) {
 	if result.SearchMode != "full_text" || len(result.Hits) != 1 {
 		t.Fatalf("unexpected search result: %#v", result)
 	}
+	if len(result.Hits[0].Ref) != 8 || result.Hits[0].Dataset != "testwiki" || result.Hits[0].Provider != "wikimedia" {
+		t.Fatalf("search result has no routable reference: %#v", result.Hits[0])
+	}
+	federated, err := backend.Search(context.Background(), "", "capybara", model.SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if federated.SearchMode != "federated" || len(federated.Hits) != 1 || federated.Hits[0].Ref != result.Hits[0].Ref {
+		t.Fatalf("unexpected federated search result: %#v", federated)
+	}
 	page, err := backend.Read(context.Background(), "testwiki", "Test Article", "", model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if page.NumericID != 7 || page.Content != "A remarkable capybara appears here." {
 		t.Fatalf("unexpected page: %#v", page)
+	}
+	pageByReference, err := backend.ReadReference(context.Background(), result.Hits[0].Ref, model.ReadOptions{Format: "text", MaxChars: 1000, FollowRedirects: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pageByReference.NumericID != 7 || pageByReference.Ref != result.Hits[0].Ref {
+		t.Fatalf("unexpected referenced page: %#v", pageByReference)
 	}
 }
 

@@ -216,6 +216,9 @@ type OperationalStatus struct {
 }
 
 type SearchHit struct {
+	Ref          string   `json:"ref,omitempty"`
+	Dataset      string   `json:"dataset,omitempty"`
+	Provider     string   `json:"provider,omitempty"`
 	ID           string   `json:"id"`
 	NumericID    uint64   `json:"-"`
 	Title        string   `json:"title"`
@@ -240,6 +243,9 @@ type SearchResult struct {
 	SnippetsAvailable    bool        `json:"snippets_available"`
 	SnippetsComplete     bool        `json:"snippets_complete"`
 	SnippetErrors        int         `json:"snippet_errors,omitempty"`
+	SearchedDatasets     []string    `json:"searched_datasets,omitempty"`
+	SkippedDatasets      []string    `json:"skipped_datasets,omitempty"`
+	PartialErrors        []string    `json:"partial_errors,omitempty"`
 	Hits                 []SearchHit `json:"hits"`
 }
 
@@ -252,6 +258,7 @@ type SearchOptions struct {
 }
 
 type Document struct {
+	Ref                 string                 `json:"ref,omitempty"`
 	ID                  string                 `json:"id"`
 	Dataset             string                 `json:"dataset"`
 	NumericID           uint64                 `json:"-"`
@@ -282,12 +289,14 @@ type Document struct {
 
 type DocumentRelationship struct {
 	Type  string `json:"type"`
+	Ref   string `json:"ref,omitempty"`
 	ID    string `json:"id,omitempty"`
 	Label string `json:"label"`
 	URL   string `json:"url,omitempty"`
 }
 
 type RedirectHop struct {
+	Ref           string `json:"ref,omitempty"`
 	FromTitle     string `json:"from_title"`
 	FromID        string `json:"from_id,omitempty"`
 	FromNumericID uint64 `json:"-"`

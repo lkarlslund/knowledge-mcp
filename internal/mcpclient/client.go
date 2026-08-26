@@ -111,3 +111,10 @@ func (c *Client) Read(ctx context.Context, dataset, title, id string, options mo
 	err := c.Call(ctx, "knowledge_read", arguments, &out)
 	return out, err
 }
+
+func (c *Client) ReadReference(ctx context.Context, ref string, options model.ReadOptions) (model.Document, error) {
+	var out model.Document
+	arguments := map[string]any{"ref": ref, "format": options.Format, "section": options.Section, "offset": options.Offset, "max_chars": options.MaxChars, "follow_redirects": options.FollowRedirects, "include_outline": options.IncludeOutline}
+	err := c.Call(ctx, "knowledge_read", arguments, &out)
+	return out, err
+}
