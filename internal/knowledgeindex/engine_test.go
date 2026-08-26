@@ -116,7 +116,7 @@ func TestGenericEngineIndexesProviderRecords(t *testing.T) {
 	t.Parallel()
 	path := t.TempDir()
 	corpus := &testCorpus{records: []provider.Record{
-		{ID: "http", Title: "HTTP Semantics", Body: "methods status codes fields", URL: "https://example/http", Locator: "raw:1", Primary: true},
+		{ID: "http", Title: "HTTP Semantics", Body: "methods status codes fields", URL: "https://example/http", Locator: "raw:1", Primary: true, Identifiers: []string{"RFC 9110"}},
 		{ID: "mail", Title: "Mail Status", Body: "email delivery status codes", URL: "https://example/mail", Locator: "raw:2", Primary: true},
 		{ID: "talk", Title: "Talk: HTTP", Body: "discussion of semantics", Locator: "raw:3", Namespace: 1},
 	}}
@@ -141,6 +141,13 @@ func TestGenericEngineIndexesProviderRecords(t *testing.T) {
 	result, err := reader.Search(context.Background(), "HTTP semantics", model.SearchOptions{Limit: 10}, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	identifierResult, err := reader.Search(context.Background(), "RFC 9110", model.SearchOptions{Limit: 10}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identifierResult.Hits) != 1 || identifierResult.Hits[0].ID != "http" {
+		t.Fatalf("identifier search = %#v", identifierResult)
 	}
 	if len(result.Hits) == 0 || result.Hits[0].ID != "http" {
 		t.Fatalf("search = %#v", result)

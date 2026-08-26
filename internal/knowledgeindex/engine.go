@@ -472,10 +472,6 @@ func (r *Reader) lookup(ctx context.Context, title, id string) (provider.Record,
 
 func rankedQuery(text string, fullText bool) blevequery.Query {
 	queries := make([]blevequery.Query, 0, 7)
-	title := bleve.NewMatchQuery(text)
-	title.SetField("title")
-	title.SetBoost(6)
-	queries = append(queries, title)
 	exact := bleve.NewTermQuery(normalize(text))
 	exact.SetField("title_exact")
 	exact.SetBoost(20)
@@ -486,10 +482,17 @@ func rankedQuery(text string, fullText bool) blevequery.Query {
 		identifier.SetBoost(30)
 		queries = append(queries, identifier)
 	}
+	if looksLikeIdentifier(text) {
+		return bleve.NewDisjunctionQuery(queries...)
+	}
 	aliases := bleve.NewMatchQuery(text)
 	aliases.SetField("aliases")
 	aliases.SetBoost(5)
 	queries = append(queries, aliases)
+	title := bleve.NewMatchQuery(text)
+	title.SetField("title")
+	title.SetBoost(6)
+	queries = append(queries, title)
 	keywords := bleve.NewMatchQuery(text)
 	keywords.SetField("keywords")
 	keywords.SetBoost(2.5)
@@ -512,6 +515,26 @@ func rankedQuery(text string, fullText bool) blevequery.Query {
 		}
 	}
 	return bleve.NewDisjunctionQuery(queries...)
+}
+
+func looksLikeIdentifier(value string) bool {
+	compact := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(value), " ", ""), "-", "")
+	letters, digits, digitSeen := 0, 0, false
+	for _, character := range compact {
+		switch {
+		case character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z':
+			if digitSeen {
+				return false
+			}
+			letters++
+		case character >= '0' && character <= '9':
+			digitSeen = true
+			digits++
+		default:
+			return false
+		}
+	}
+	return letters >= 2 && letters <= 12 && digits >= 1 && digits <= 12
 }
 
 func indexMapping(body bool) mapping.IndexMapping {
