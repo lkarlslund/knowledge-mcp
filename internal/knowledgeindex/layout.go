@@ -10,7 +10,7 @@ const (
 	BodyDirectory         = "bodies.bleve"
 	TitleVersion          = 11
 	BodyVersion           = 15
-	SharedVersion         = 2
+	SharedVersion         = 3
 	DefaultReadCharacters = 100_000
 )
 
