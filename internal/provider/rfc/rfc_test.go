@@ -110,6 +110,27 @@ func TestRFCProviderLifecycleAndOpaqueIDs(t *testing.T) {
 	if document.ID != "1" || !strings.Contains(document.Content, "knowledge-read://read?dataset=rfc&id=9110") || !strings.Contains(document.Content, "# RFC 1: Host Software") || !strings.Contains(document.Content, "**Lifecycle:** obsoleted") || len(document.Relationships) != 1 || document.Relationships[0].ID != "9110" {
 		t.Fatalf("document = %#v", document)
 	}
+	var reconstructed strings.Builder
+	for offset := 0; ; {
+		chunk, chunkErr := reader.Read(ctx, "", "1", model.ReadOptions{Format: "markdown", Offset: offset, MaxChars: 200, AlignBoundaries: true})
+		if chunkErr != nil {
+			t.Fatal(chunkErr)
+		}
+		reconstructed.WriteString(chunk.Content)
+		if chunk.Truncated && !strings.HasSuffix(chunk.Content, "\n") {
+			t.Fatalf("aligned RFC chunk splits a Markdown line: %q", chunk.Content)
+		}
+		if !chunk.Truncated {
+			break
+		}
+		if chunk.NextOffset <= offset {
+			t.Fatalf("RFC pagination did not progress: %#v", chunk)
+		}
+		offset = chunk.NextOffset
+	}
+	if reconstructed.String() != document.Content {
+		t.Fatal("paginated RFC Markdown did not reconstruct the document")
+	}
 }
 
 func TestRFCUpdateReusesExistingRawDocuments(t *testing.T) {

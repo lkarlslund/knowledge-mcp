@@ -109,6 +109,11 @@ func (s *Store) rewriteKnowledgeLink(match string) (string, error) {
 	}
 	query := parsed.Query()
 	dataset, id, title := query.Get("dataset"), query.Get("id"), query.Get("title")
+	// A provider may paginate immediately after the URI prefix or partway through
+	// its query. Leave that incomplete tail untouched; the next chunk resumes it.
+	if dataset == "" || id == "" && title == "" {
+		return match, nil
+	}
 	owner, err := s.providers.ForCollection(dataset)
 	if err != nil {
 		return "", fmt.Errorf("resolve embedded knowledge link dataset %q: %w", dataset, err)

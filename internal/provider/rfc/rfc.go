@@ -183,9 +183,13 @@ func (c *rfcCorpus) Read(_ context.Context, record provider.Record, options mode
 	if maximum <= 0 {
 		maximum = knowledgeindex.DefaultReadCharacters
 	}
-	start := min(max(options.Offset, 0), len(content))
-	end := min(start+maximum, len(content))
-	document := model.Document{ID: record.ID, Title: entry.Title, URL: record.URL, Format: format, Content: content[start:end], Offset: start, ReturnedChars: end - start, TotalChars: len(content), Truncated: end < len(content)}
+	runes := []rune(content)
+	start := min(max(options.Offset, 0), len(runes))
+	end := min(start+maximum, len(runes))
+	if options.AlignBoundaries && end < len(runes) {
+		end = rfcReadableChunkEnd(runes, start, end)
+	}
+	document := model.Document{ID: record.ID, Title: entry.Title, URL: record.URL, Format: format, Content: string(runes[start:end]), Offset: start, ReturnedChars: end - start, TotalChars: len(runes), Truncated: end < len(runes)}
 	document.Relationships = rfcRelationships(entry, c.baseURL)
 	if document.Title == "" {
 		document.Title = record.Title
@@ -194,6 +198,16 @@ func (c *rfcCorpus) Read(_ context.Context, record provider.Record, options mode
 		document.NextOffset = end
 	}
 	return document, nil
+}
+
+func rfcReadableChunkEnd(content []rune, start, hardEnd int) int {
+	minimum := start + (hardEnd-start)/2
+	for index := hardEnd; index > minimum; index-- {
+		if content[index-1] == '\n' {
+			return index
+		}
+	}
+	return hardEnd
 }
 
 func (*rfcCorpus) Close() error { return nil }

@@ -28,6 +28,11 @@ func TestRewriteKnowledgeLinksHidesRouting(t *testing.T) {
 	if strings.Contains(rewritten, "dataset=") || strings.Contains(rewritten, "id=42") || !strings.Contains(rewritten, "knowledge-read://document/r_") || !strings.Contains(rewritten, "knowledge_read with ref=r_") {
 		t.Fatalf("unexpected rewritten link: %s", rewritten)
 	}
+	incomplete := `tail knowledge-read://read?d`
+	unchanged, err := backend.rewriteKnowledgeLinks(incomplete)
+	if err != nil || unchanged != incomplete {
+		t.Fatalf("incomplete chunk-edge link = %q, %v", unchanged, err)
+	}
 	page := model.Document{ID: "1", Title: "Source", Format: "markdown", Content: `[Body](knowledge-read://read?dataset=enwiki&id=2)`, References: []model.DocumentReference{{Content: `[Citation](knowledge-read://read?dataset=enwiki&id=3)`}}}
 	if err := backend.decorateDocument(&page, "wikimedia", "enwiki"); err != nil {
 		t.Fatal(err)
