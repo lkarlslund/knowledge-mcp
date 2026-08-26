@@ -44,6 +44,28 @@ func TestNativeZIMCorpusAndMarkdownLinks(t *testing.T) {
 	}
 }
 
+func TestLanguageMetadataIsCanonicalAndCompact(t *testing.T) {
+	t.Parallel()
+	languages := languageMetadataList("eng,en,fra,deu,fr")
+	want := []model.Language{
+		{Code: "en", Name: "English", LocalName: "English"},
+		{Code: "fr", Name: "French", LocalName: "French"},
+		{Code: "de", Name: "German", LocalName: "German"},
+	}
+	if len(languages) != len(want) {
+		t.Fatalf("languages = %#v, want %#v", languages, want)
+	}
+	for index := range want {
+		if languages[index] != want[index] {
+			t.Fatalf("languages[%d] = %#v, want %#v", index, languages[index], want[index])
+		}
+	}
+	summary := languageSummary(languages)
+	if summary.Code != "mul" || summary.Name != "Multilingual (3 languages)" {
+		t.Fatalf("summary = %#v", summary)
+	}
+}
+
 func TestOfficialSmallKiwixArchive(t *testing.T) {
 	if os.Getenv("KIWIX_INTEGRATION") == "" {
 		t.Skip("set KIWIX_INTEGRATION=1 to exercise the official catalog and a small archive")

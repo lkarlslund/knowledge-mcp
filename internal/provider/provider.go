@@ -38,9 +38,12 @@ type Record struct {
 }
 
 type ScanPosition struct {
+	// Cursor is an opaque provider-owned durable checkpoint. Callers must only
+	// persist it and pass it back to the same corpus; they must not interpret it.
 	Cursor    string
 	Completed int64
 	Total     int64
+	Units     string
 	Boundary  bool
 }
 

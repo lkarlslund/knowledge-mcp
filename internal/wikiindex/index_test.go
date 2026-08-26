@@ -505,6 +505,51 @@ func TestBodyIndexResumesFromStreamCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSourceBodyCursorTracksOutOfOrderCompletion(t *testing.T) {
+	t.Parallel()
+	checkpoint, err := parseSourceBodyCursor("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.complete(3)
+	checkpoint.complete(1)
+	if got := checkpoint.checkpoint(); got != "v1:0:1,3" {
+		t.Fatalf("sparse checkpoint = %q, want %q", got, "v1:0:1,3")
+	}
+
+	resumed, err := parseSourceBodyCursor(checkpoint.checkpoint(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumed.completed(1) || !resumed.completed(3) || resumed.completed(0) || resumed.done() != 2 {
+		t.Fatalf("resumed sparse checkpoint = %#v", resumed)
+	}
+	resumed.complete(0)
+	if got := resumed.checkpoint(); got != "v1:2:3" {
+		t.Fatalf("advanced checkpoint = %q, want %q", got, "v1:2:3")
+	}
+	resumed.complete(2)
+	if got := resumed.checkpoint(); got != "4" || resumed.done() != 4 {
+		t.Fatalf("collapsed checkpoint = %q, done %d; want 4, 4", got, resumed.done())
+	}
+}
+
+func TestSourceBodyCursorMigratesLinearCheckpoint(t *testing.T) {
+	t.Parallel()
+	checkpoint, err := parseSourceBodyCursor("7", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.done() != 7 || !checkpoint.completed(6) || checkpoint.completed(7) {
+		t.Fatalf("linear checkpoint = %#v", checkpoint)
+	}
+	for _, value := range []string{"-1", "11", "v1:4:3", "v1:x:4"} {
+		if _, err := parseSourceBodyCursor(value, 10); err == nil {
+			t.Fatalf("invalid checkpoint %q was accepted", value)
+		}
+	}
+}
+
 func TestTitleIndexResumesFromLineCheckpoint(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

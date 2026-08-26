@@ -338,13 +338,13 @@ func (s *Store) BrowseAvailable(ctx context.Context, filter, language string, hi
 	languages := make(map[string]model.Language)
 	filtered := make([]model.AvailableDataset, 0, len(all.Datasets))
 	for _, dataset := range all.Datasets {
-		for _, item := range datasetLanguages(dataset.Language) {
+		for _, item := range datasetLanguages(dataset) {
 			current, exists := languages[item.Code]
 			if !exists || current.Name == current.Code && item.Name != item.Code {
 				languages[item.Code] = item
 			}
 		}
-		if (language != "" && !datasetHasLanguage(dataset.Language, language)) || (hideInstalled && dataset.Installed) {
+		if (language != "" && !datasetHasLanguage(dataset, language)) || (hideInstalled && dataset.Installed) {
 			continue
 		}
 		filtered = append(filtered, dataset)
@@ -381,30 +381,18 @@ func (s *Store) BrowseAvailable(ctx context.Context, filter, language string, hi
 	return result, nil
 }
 
-func datasetLanguages(language model.Language) []model.Language {
-	codes := strings.Split(language.Code, ",")
-	result := make([]model.Language, 0, len(codes))
-	seen := make(map[string]struct{}, len(codes))
-	for _, code := range codes {
-		code = strings.TrimSpace(code)
-		if code == "" {
-			continue
-		}
-		if _, exists := seen[code]; exists {
-			continue
-		}
-		seen[code] = struct{}{}
-		item := model.Language{Code: code, Name: code, LocalName: code}
-		if len(codes) == 1 {
-			item = language
-		}
-		result = append(result, item)
+func datasetLanguages(dataset model.AvailableDataset) []model.Language {
+	if len(dataset.Languages) > 0 {
+		return dataset.Languages
 	}
-	return result
+	if dataset.Language.Code == "" {
+		return []model.Language{}
+	}
+	return []model.Language{dataset.Language}
 }
 
-func datasetHasLanguage(language model.Language, code string) bool {
-	for _, item := range datasetLanguages(language) {
+func datasetHasLanguage(dataset model.AvailableDataset, code string) bool {
+	for _, item := range datasetLanguages(dataset) {
 		if item.Code == code {
 			return true
 		}
@@ -1136,8 +1124,12 @@ func (s *Store) buildBody(ctx context.Context, id, dataset string, manifest mode
 	}
 	temporary := filepath.Join(path, knowledgeindex.BodyDirectory+".building")
 	s.setJob(id, model.StateBodyIndexing, "body_indexing", 0, 0, "streams", 0, "title search and page reads are available; building full-text index", "")
-	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}, func(done, total int64) {
-		s.setJob(id, model.StateBodyIndexing, "body_indexing", done, total, "documents", 0, "title search and document reads are available; building full-text index", "")
+	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, provider.ScanOptions{Parallelism: s.Settings().IndexingParallelism}, func(documents uint64, completed, total int64, units string) {
+		message := "title search and document reads are available; building full-text index"
+		if units != "" && total > 0 {
+			message = fmt.Sprintf("%s; source progress %d / %d %s", message, completed, total, units)
+		}
+		s.setJob(id, model.StateBodyIndexing, "body_indexing", int64(documents), int64(manifest.DocumentCount), "documents", 0, message, "")
 	}); err != nil {
 		s.failJob(id, err)
 		return

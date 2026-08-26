@@ -10,27 +10,27 @@ import (
 func TestDatasetLanguages(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		language model.Language
-		want     []model.Language
+		name    string
+		dataset model.AvailableDataset
+		want    []model.Language
 	}{
 		{
-			name:     "named language",
-			language: model.Language{Code: "en", Name: "English", LocalName: "English", Direction: "ltr"},
-			want:     []model.Language{{Code: "en", Name: "English", LocalName: "English", Direction: "ltr"}},
+			name:    "named language",
+			dataset: model.AvailableDataset{Language: model.Language{Code: "en", Name: "English", LocalName: "English", Direction: "ltr"}},
+			want:    []model.Language{{Code: "en", Name: "English", LocalName: "English", Direction: "ltr"}},
 		},
 		{
-			name:     "multilingual and duplicate",
-			language: model.Language{Code: "eng, fra,eng", Name: "eng, fra,eng"},
-			want:     []model.Language{{Code: "eng", Name: "eng", LocalName: "eng"}, {Code: "fra", Name: "fra", LocalName: "fra"}},
+			name:    "provider languages",
+			dataset: model.AvailableDataset{Language: model.Language{Code: "mul"}, Languages: []model.Language{{Code: "en", Name: "English"}, {Code: "fr", Name: "French"}}},
+			want:    []model.Language{{Code: "en", Name: "English"}, {Code: "fr", Name: "French"}},
 		},
 		{name: "empty", want: []model.Language{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if got := datasetLanguages(test.language); !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("datasetLanguages(%#v) = %#v, want %#v", test.language, got, test.want)
+			if got := datasetLanguages(test.dataset); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("datasetLanguages(%#v) = %#v, want %#v", test.dataset, got, test.want)
 			}
 		})
 	}
@@ -38,11 +38,11 @@ func TestDatasetLanguages(t *testing.T) {
 
 func TestDatasetHasLanguage(t *testing.T) {
 	t.Parallel()
-	language := model.Language{Code: "eng,fra,deu"}
-	if !datasetHasLanguage(language, "fra") {
+	dataset := model.AvailableDataset{Languages: []model.Language{{Code: "en"}, {Code: "fr"}, {Code: "de"}}}
+	if !datasetHasLanguage(dataset, "fr") {
 		t.Fatal("multilingual dataset should match a component language")
 	}
-	if datasetHasLanguage(language, "en") {
+	if datasetHasLanguage(dataset, "eng") {
 		t.Fatal("language matching should use exact catalog codes")
 	}
 }

@@ -27,11 +27,11 @@ import (
 const (
 	bodyShards     = 8
 	titleBatchSize = 20_000
-	bodyBatchSize  = 8 << 20
+	bodyBatchSize  = bodyShards * (16 << 20)
 )
 
 type TitleProgress func(documents uint64, completed, total int64)
-type BodyProgress func(completed, total int64)
+type BodyProgress func(documents uint64, completed, total int64, units string)
 
 type indexDocument struct {
 	Title           string   `json:"title"`
@@ -158,6 +158,10 @@ func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.C
 }
 
 func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, progress BodyProgress) error {
+	return buildBody(ctx, path, fingerprint, corpus, scanOptions, bodyBatchSize, progress)
+}
+
+func buildBody(ctx context.Context, path, fingerprint string, corpus provider.Corpus, scanOptions provider.ScanOptions, batchSize int, progress BodyProgress) error {
 	destination := filepath.Join(path, BodyDirectory+".building")
 	checkpointPath := destination + ".checkpoint.json"
 	checkpoint, resume := loadCheckpoint(checkpointPath, destination, "body", BodyVersion, fingerprint)
@@ -211,33 +215,37 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 	for shard := range batches {
 		batches[shard].batch = indexes[shard].NewBatch()
 	}
-	flush := func(shard int) error {
-		state := &batches[shard]
-		if state.batch.Size() == 0 {
-			return nil
-		}
+	documentCount := checkpoint.Documents
+	flushAll := func(position provider.ScanPosition) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := indexes[shard].Batch(state.batch); err != nil {
-			return err
-		}
-		state.batch, state.bytes = indexes[shard].NewBatch(), 0
-		return nil
-	}
-	documentCount := checkpoint.Documents
-	flushAll := func(position provider.ScanPosition) error {
+		errorsByShard := make([]error, len(indexes))
+		var commits sync.WaitGroup
 		for shard := range indexes {
-			if err := flush(shard); err != nil {
-				return err
+			state := &batches[shard]
+			if state.batch.Size() == 0 {
+				continue
 			}
+			commits.Add(1)
+			go func(shard int, batch *bleve.Batch) {
+				defer commits.Done()
+				errorsByShard[shard] = indexes[shard].Batch(batch)
+			}(shard, state.batch)
+		}
+		commits.Wait()
+		for shard, err := range errorsByShard {
+			if err != nil {
+				return fmt.Errorf("commit body shard %d: %w", shard, err)
+			}
+			batches[shard].batch, batches[shard].bytes = indexes[shard].NewBatch(), 0
 		}
 		checkpoint.Cursor, checkpoint.Documents = position.Cursor, documentCount
 		checkpoint.Completed, checkpoint.Total, checkpoint.UpdatedAt = position.Completed, position.Total, time.Now().UTC()
 		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
 			return err
 		}
-		progress(position.Completed, position.Total)
+		progress(documentCount, position.Completed, position.Total, position.Units)
 		return nil
 	}
 	pendingBytes := 0
@@ -246,13 +254,15 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 	err := corpus.ScanBodies(ctx, checkpoint.Cursor, scanOptions, func(record provider.Record, position provider.ScanPosition) error {
 		lastPosition, lastBoundary = position, position.Boundary
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
-			if pendingBytes >= bodyBatchSize && position.Boundary {
+			if pendingBytes >= batchSize && position.Boundary {
 				if err := flushAll(position); err != nil {
 					return err
 				}
 				pendingBytes = 0
 			}
-			progress(position.Completed, position.Total)
+			if position.Boundary {
+				progress(documentCount, position.Completed, position.Total, position.Units)
+			}
 			return nil
 		}
 		shard := recordShard(record.ID)
@@ -262,13 +272,15 @@ func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Co
 		batches[shard].bytes += len(record.Title) + len(record.Body) + len(record.URL) + len(record.Locator)
 		pendingBytes += len(record.Title) + len(record.Body) + len(record.URL) + len(record.Locator)
 		documentCount++
-		if pendingBytes >= bodyBatchSize && position.Boundary {
+		if pendingBytes >= batchSize && position.Boundary {
 			if err := flushAll(position); err != nil {
 				return err
 			}
 			pendingBytes = 0
 		}
-		progress(position.Completed, position.Total)
+		if position.Boundary {
+			progress(documentCount, position.Completed, position.Total, position.Units)
+		}
 		return nil
 	})
 	if err != nil {
@@ -621,7 +633,7 @@ func openWritableIndex(path string) (bleve.Index, error) {
 
 func scorchConfig() map[string]any {
 	return map[string]any{
-		"scorchPersisterOptions": map[string]any{"NumPersisterWorkers": 2, "MaxSizeInMemoryMergePerWorker": 64 << 20},
+		"scorchPersisterOptions": map[string]any{"NumPersisterWorkers": 2, "MaxSizeInMemoryMergePerWorker": 64 << 20, "PersisterNapUnderNumFiles": 0},
 		"scorchMergePlanOptions": map[string]any{"FloorSegmentFileSize": 10 << 20},
 	}
 }

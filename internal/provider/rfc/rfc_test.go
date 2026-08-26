@@ -78,7 +78,7 @@ func TestRFCProviderLifecycleAndOpaqueIDs(t *testing.T) {
 	if err := os.Rename(filepath.Join(path, knowledgeindex.TitleDirectory+".building"), filepath.Join(path, knowledgeindex.TitleDirectory)); err != nil {
 		t.Fatal(err)
 	}
-	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, sourceprovider.ScanOptions{}, func(int64, int64) {}); err != nil {
+	if err := knowledgeindex.BuildBody(ctx, path, manifest.Fingerprint, corpus, sourceprovider.ScanOptions{}, func(uint64, int64, int64, string) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(path, knowledgeindex.BodyDirectory+".building"), filepath.Join(path, knowledgeindex.BodyDirectory)); err != nil {

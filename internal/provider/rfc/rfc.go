@@ -154,7 +154,7 @@ func (c *rfcCorpus) scan(ctx context.Context, after string, body bool, sink prov
 			}
 			record.Body = string(data)
 		}
-		if err := sink(record, provider.ScanPosition{Cursor: strconv.Itoa(index + 1), Completed: int64(index + 1), Total: int64(len(c.entries)), Boundary: true}); err != nil {
+		if err := sink(record, provider.ScanPosition{Cursor: strconv.Itoa(index + 1), Completed: int64(index + 1), Total: int64(len(c.entries)), Units: "documents", Boundary: true}); err != nil {
 			return err
 		}
 	}

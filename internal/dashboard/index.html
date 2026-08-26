@@ -33,11 +33,28 @@
     .bg-current { background-color: currentColor; }
     .empty { min-height: 5rem; display: grid; place-items: center; color: var(--bs-secondary-color); }
     .section-icon { color: var(--accent); }
-	.profile-chip { font-size: .65rem; font-weight: 400; }
-    .catalog-modal { max-width: 52rem; }
-    .catalog-content { min-width: 0; }
-    .catalog-variant { width: 10rem; }
+    .profile-chip { font-size: .65rem; font-weight: 400; }
+    .catalog-modal { max-width: 48rem; }
+    .catalog-modal .modal-body { overflow-x: clip; }
+    .catalog-table { width: 100%; table-layout: fixed; }
+    .catalog-table td { min-width: 0; overflow: hidden; }
+    .catalog-dataset { width: 31%; }
+    .catalog-content { width: auto; overflow-wrap: anywhere; }
+    .catalog-variant { width: 8rem; }
+    .catalog-action { width: 3.5rem; }
+    .catalog-meta { display: flex; align-items: center; min-width: 0; gap: .3rem; }
+    .catalog-meta code, .catalog-language { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .catalog-variant .form-select { width: 100%; }
     @media (max-width: 767px) { .table > :not(caption) > * > * { padding: .45rem .6rem; } }
+    @media (max-width: 575.98px) {
+      .catalog-modal { margin: .5rem; }
+      .catalog-table thead { display: none; }
+      .catalog-table, .catalog-table tbody, .catalog-table tr, .catalog-table td { display: block; width: 100%; }
+      .catalog-table tr { position: relative; padding: .45rem 3rem .45rem .6rem; border-bottom: 1px solid rgba(255,255,255,.07); }
+      .catalog-table td { padding: .12rem 0; border: 0; }
+      .catalog-table .catalog-action { position: absolute; top: .5rem; right: .6rem; width: 2rem; }
+      .catalog-table .catalog-variant { width: min(100%, 12rem); margin-top: .25rem; }
+    }
   </style>
 </head>
 <body>
@@ -106,11 +123,11 @@
     <div class="modal-header py-2"><div><h2 class="modal-title h6 mb-0" id="onlineDatasetsTitle"><i class="bi bi-cloud-arrow-down section-icon me-2"></i>Download a dataset</h2><div class="small text-body-secondary" x-text="`${number(available.length)} of ${number(availableTotal)} matching datasets`"></div></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body p-0" @scroll.passive="if (availableHasMore && $el.scrollTop + $el.clientHeight >= $el.scrollHeight - 240) loadAvailable()">
       <div class="d-flex flex-wrap align-items-center gap-2 p-2 border-bottom sticky-top bg-body"><div class="input-group input-group-sm flex-grow-1"><span class="input-group-text"><i class="bi bi-search"></i></span><input class="form-control" type="search" placeholder="Search by name, language, project or purpose" x-model="filter" @input.debounce.300ms="resetAvailable()" aria-label="Search online datasets" /></div><select class="form-select form-select-sm w-auto" x-model="languageFilter" @change="resetAvailable()" aria-label="Filter by language"><option value="">All Languages</option><template x-for="language in availableLanguages" :key="language.code"><option :value="language.code" x-text="`${language.name || language.local_name || language.code} (${language.code})`"></option></template></select><div class="form-check form-switch mb-0 text-nowrap"><input class="form-check-input" type="checkbox" role="switch" id="hideInstalledDatasets" x-model="hideInstalled" @change="resetAvailable()" /><label class="form-check-label small" for="hideInstalledDatasets">Hide installed</label></div><button class="btn btn-sm btn-outline-secondary text-nowrap" title="Refresh the one-day catalog cache" @click="resetAvailable(true)"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
-      <div class="table-responsive" x-show="available.length"><table class="table table-hover table-sm"><thead><tr><th>Dataset</th><th>Content</th><th>Variant</th><th class="text-end">Action</th></tr></thead><tbody><template x-for="dataset in available" :key="dataset.provider + ':' + dataset.id"><tr>
-        <td><div class="fw-semibold" x-text="dataset.display_name || dataset.id"></div><div class="small text-body-secondary"><code x-text="dataset.id"></code><span class="mx-1">·</span><span x-text="dataset.language?.name || dataset.language?.local_name || dataset.language?.code || 'Multilingual'"></span><span x-show="dataset.closed" class="badge text-bg-secondary fw-normal ms-2">read-only</span></div></td>
+      <div x-show="available.length"><table class="table table-hover table-sm catalog-table"><thead><tr><th class="catalog-dataset">Dataset</th><th>Content</th><th class="catalog-variant">Variant</th><th class="catalog-action"><span class="visually-hidden">Action</span></th></tr></thead><tbody><template x-for="dataset in available" :key="dataset.provider + ':' + dataset.id"><tr>
+        <td class="catalog-dataset"><div class="fw-semibold text-truncate" x-text="dataset.display_name || dataset.id" :title="dataset.display_name || dataset.id"></div><div class="catalog-meta small text-body-secondary"><code x-text="dataset.id" :title="dataset.id"></code><span>·</span><span class="catalog-language" x-text="dataset.language?.name || dataset.language?.local_name || dataset.language?.code || 'Multilingual'" :title="dataset.language?.name || dataset.language?.local_name || dataset.language?.code || 'Multilingual'"></span><span x-show="dataset.closed" class="badge text-bg-secondary fw-normal">read-only</span></div></td>
         <td class="catalog-content"><span class="badge text-bg-secondary fw-normal me-2" x-text="dataset.provider"></span><span class="small text-body-secondary" x-text="dataset.content_type || 'knowledge dataset'"></span><div class="small text-body-secondary mt-1 text-truncate" x-text="dataset.description" :title="dataset.description"></div><div class="small text-body-secondary mt-1" x-text="[dataset.release_date, ...(dataset.profile?.topics || []).slice(0, 3)].filter(Boolean).join(' · ')"></div></td>
         <td class="catalog-variant"><select class="form-select form-select-sm" x-model="dataset.variant"><template x-for="variant in dataset.variants" :key="variant.id"><option :value="variant.id" x-text="variant.name" :title="variant.description"></option></template></select></td>
-        <td class="text-end"><button class="btn btn-sm btn-outline-primary btn-icon rounded-circle" :disabled="busy(dataset.id) || dataset.installed && !onlineUpgrade(dataset)" :title="onlineAction(dataset).label" :aria-label="onlineAction(dataset).label" @click="maintain(dataset.id, onlineAction(dataset).action, dataset.variant)"><i :class="onlineAction(dataset).icon"></i></button></td>
+        <td class="catalog-action text-end"><button class="btn btn-sm btn-outline-primary btn-icon rounded-circle" :disabled="busy(dataset.id) || dataset.installed && !onlineUpgrade(dataset)" :title="onlineAction(dataset).label" :aria-label="onlineAction(dataset).label" @click="maintain(dataset.id, onlineAction(dataset).action, dataset.variant)"><i :class="onlineAction(dataset).icon"></i></button></td>
       </tr></template></tbody></table></div>
       <div class="text-center p-3" x-show="availableLoading"><span class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></span><span class="small text-body-secondary ms-2">Loading datasets…</span></div>
       <div class="text-center p-3" x-show="availableHasMore && !availableLoading"><button class="btn btn-sm btn-outline-secondary" @click="loadAvailable()">Load more</button></div>

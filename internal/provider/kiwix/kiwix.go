@@ -23,6 +23,8 @@ import (
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/knowledgeindex"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	"golang.org/x/text/language"
+	"golang.org/x/text/language/display"
 )
 
 const (
@@ -133,7 +135,8 @@ func (p *Kiwix) Discover(ctx context.Context, filter string, refresh bool) ([]mo
 	for id, variants := range groups {
 		sort.Slice(variants, func(i, j int) bool { return variantID(variants[i]) < variantID(variants[j]) })
 		primary := variants[0]
-		item := model.AvailableDataset{Provider: ProviderID, ID: id, DisplayName: primary.Title, Description: firstNonempty(primary.Summary, primary.Title+" offline archive from Kiwix"), Project: firstNonempty(primary.Author, primary.Publisher, "Kiwix"), ContentType: firstNonempty(primary.Category, "Offline web archive"), Profile: kiwixProfile(primary), Language: languageMetadata(primary.Language), OnlineSourceURL: firstNonempty(primary.BrowseURL, "https://library.kiwix.org"), ReleaseDate: releaseDate(primary), Available: true, RawSize: primary.Size, PartCount: 1, Fingerprint: entryFingerprint(primary), Variant: variantID(primary)}
+		languages := languageMetadataList(primary.Language)
+		item := model.AvailableDataset{Provider: ProviderID, ID: id, DisplayName: primary.Title, Description: firstNonempty(primary.Summary, primary.Title+" offline archive from Kiwix"), Project: firstNonempty(primary.Author, primary.Publisher, "Kiwix"), ContentType: firstNonempty(primary.Category, "Offline web archive"), Profile: kiwixProfile(primary, languages), Language: languageSummary(languages), Languages: languages, OnlineSourceURL: firstNonempty(primary.BrowseURL, "https://library.kiwix.org"), ReleaseDate: releaseDate(primary), Available: true, RawSize: primary.Size, PartCount: 1, Fingerprint: entryFingerprint(primary), Variant: variantID(primary)}
 		for _, entry := range variants {
 			item.Variants = append(item.Variants, model.Variant{ID: variantID(entry), Name: variantName(entry), Description: variantDescription(entry), Format: "application/x-zim"})
 		}
@@ -204,7 +207,8 @@ func (p *Kiwix) Acquire(ctx context.Context, collection, variant string, release
 	if err := os.WriteFile(filepath.Join(stage, "catalog-entry.json"), append(metadata, '\n'), 0o644); err != nil {
 		return model.Manifest{}, err
 	}
-	return model.Manifest{Provider: ProviderID, Variant: firstNonempty(variant, variantID(resolved.Entry)), Dataset: collection, ReleaseDate: release.Date, Fingerprint: release.Fingerprint, PartCount: 1, RawSize: resolved.Entry.Size, PublishedAt: time.Now().UTC(), Site: model.DatasetMetadata{Name: resolved.Entry.Title, Description: resolved.Entry.Summary, Project: firstNonempty(resolved.Entry.Author, resolved.Entry.Publisher, "Kiwix"), ContentType: firstNonempty(resolved.Entry.Category, "Offline web archive"), Profile: kiwixProfile(resolved.Entry), Language: languageMetadata(resolved.Entry.Language), OnlineSourceURL: firstNonempty(resolved.Entry.BrowseURL, "https://library.kiwix.org"), SourceDocuments: uint64(documents), MetadataUpdatedAt: time.Now().UTC()}}, nil
+	languages := languageMetadataList(resolved.Entry.Language)
+	return model.Manifest{Provider: ProviderID, Variant: firstNonempty(variant, variantID(resolved.Entry)), Dataset: collection, ReleaseDate: release.Date, Fingerprint: release.Fingerprint, PartCount: 1, RawSize: resolved.Entry.Size, PublishedAt: time.Now().UTC(), Site: model.DatasetMetadata{Name: resolved.Entry.Title, Description: resolved.Entry.Summary, Project: firstNonempty(resolved.Entry.Author, resolved.Entry.Publisher, "Kiwix"), ContentType: firstNonempty(resolved.Entry.Category, "Offline web archive"), Profile: kiwixProfile(resolved.Entry, languages), Language: languageSummary(languages), OnlineSourceURL: firstNonempty(resolved.Entry.BrowseURL, "https://library.kiwix.org"), SourceDocuments: uint64(documents), MetadataUpdatedAt: time.Now().UTC()}}, nil
 }
 
 func (p *Kiwix) OpenCorpus(path string, manifest model.Manifest) (provider.Corpus, error) {
@@ -258,7 +262,7 @@ func (c *zimCorpus) scan(ctx context.Context, after string, body bool, sink prov
 				record.Body = string(raw)
 			}
 		}
-		position := provider.ScanPosition{Cursor: strconv.FormatUint(uint64(index+1), 10), Completed: int64(index + 1), Total: int64(c.archive.header.EntryCount), Boundary: true}
+		position := provider.ScanPosition{Cursor: strconv.FormatUint(uint64(index+1), 10), Completed: int64(index + 1), Total: int64(c.archive.header.EntryCount), Units: "entries", Boundary: true}
 		if err := sink(record, position); err != nil {
 			return err
 		}
@@ -580,11 +584,48 @@ func firstNonempty(values ...string) string {
 	}
 	return ""
 }
-func languageMetadata(code string) model.Language {
-	return model.Language{Code: code, Name: code, LocalName: code}
+func languageMetadataList(value string) []model.Language {
+	seen := make(map[string]struct{})
+	result := make([]model.Language, 0, strings.Count(value, ",")+1)
+	for _, raw := range strings.Split(value, ",") {
+		code := strings.ToLower(strings.TrimSpace(raw))
+		if code == "" {
+			continue
+		}
+		name := code
+		if base, err := language.ParseBase(code); err == nil {
+			code = base.String()
+			name = display.English.Languages().Name(base)
+			if name == "" {
+				name = code
+			}
+		}
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		result = append(result, model.Language{Code: code, Name: name, LocalName: name})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name != result[j].Name {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].Code < result[j].Code
+	})
+	return result
 }
 
-func kiwixProfile(entry catalogEntry) model.DatasetProfile {
+func languageSummary(languages []model.Language) model.Language {
+	if len(languages) == 0 {
+		return model.Language{}
+	}
+	if len(languages) == 1 {
+		return languages[0]
+	}
+	return model.Language{Code: "mul", Name: fmt.Sprintf("Multilingual (%d languages)", len(languages)), LocalName: "Multilingual"}
+}
+
+func kiwixProfile(entry catalogEntry, languages []model.Language) model.DatasetProfile {
 	seen := make(map[string]struct{})
 	var topics []string
 	for _, value := range append([]string{entry.Category, entry.Author}, strings.Split(entry.Tags, ";")...) {
@@ -600,7 +641,11 @@ func kiwixProfile(entry catalogEntry) model.DatasetProfile {
 		topics = append(topics, value)
 	}
 	timeCoverage := "Source-defined coverage; archive snapshot " + releaseDate(entry)
-	return model.DatasetProfile{Topics: topics, GeographicScope: []string{"source-defined", entry.Language + "-language audience"}, TimeCoverage: timeCoverage, DocumentTypes: []string{"offline web pages", "articles"}, UpdateCadence: "Varies by Kiwix content producer", CoverageNotes: "Scope and completeness follow the selected Kiwix archive and flavour.", SourceFeatures: []string{"HTML to Markdown conversion", "tables", "internal links", "redirect resolution", "offline source assets"}}
+	audience := "multilingual audience"
+	if len(languages) == 1 {
+		audience = languages[0].Name + "-language audience"
+	}
+	return model.DatasetProfile{Topics: topics, GeographicScope: []string{"source-defined", audience}, TimeCoverage: timeCoverage, DocumentTypes: []string{"offline web pages", "articles"}, UpdateCadence: "Varies by Kiwix content producer", CoverageNotes: "Scope and completeness follow the selected Kiwix archive and flavour.", SourceFeatures: []string{"HTML to Markdown conversion", "tables", "internal links", "redirect resolution", "offline source assets"}}
 }
 func humanBytes(value int64) string {
 	const unit = 1024

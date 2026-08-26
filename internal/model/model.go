@@ -29,6 +29,7 @@ type AvailableDataset struct {
 	ContentType          string         `json:"content_type,omitempty"`
 	Profile              DatasetProfile `json:"profile,omitempty"`
 	Language             Language       `json:"language,omitempty"`
+	Languages            []Language     `json:"languages,omitempty"`
 	OnlineSourceURL      string         `json:"online_source_url,omitempty"`
 	ReleaseDate          string         `json:"release_date"`
 	Closed               bool           `json:"closed"`

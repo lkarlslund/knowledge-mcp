@@ -98,11 +98,11 @@ func TestBodyBuildResumesAtCommittedProviderBoundary(t *testing.T) {
 	}
 	interrupted := errors.New("source interrupted")
 	corpus := &testCorpus{records: records, failAfter: 9, failure: interrupted}
-	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64) {}); !errors.Is(err, interrupted) {
+	if err := buildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, 8<<20, func(uint64, int64, int64, string) {}); !errors.Is(err, interrupted) {
 		t.Fatalf("first BuildBody error = %v", err)
 	}
 	corpus.failure = nil
-	if err := BuildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, func(int64, int64) {}); err != nil {
+	if err := buildBody(context.Background(), path, "release-a", corpus, provider.ScanOptions{}, 8<<20, func(uint64, int64, int64, string) {}); err != nil {
 		t.Fatal(err)
 	}
 	if got := corpus.observedAfter[len(corpus.observedAfter)-1]; got != "doc-07" {
@@ -129,7 +129,7 @@ func TestGenericEngineIndexesProviderRecords(t *testing.T) {
 	if err := os.Rename(filepath.Join(path, TitleDirectory+".building"), filepath.Join(path, TitleDirectory)); err != nil {
 		t.Fatal(err)
 	}
-	if err := BuildBody(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(int64, int64) {}); err != nil {
+	if err := BuildBody(context.Background(), path, "test-source", corpus, provider.ScanOptions{}, func(uint64, int64, int64, string) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(path, BodyDirectory+".building"), filepath.Join(path, BodyDirectory)); err != nil {
