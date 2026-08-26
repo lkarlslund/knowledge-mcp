@@ -70,6 +70,12 @@ func TestEURLexRetriesTransientCatalogFailure(t *testing.T) {
 		if request.Method != http.MethodPost {
 			t.Errorf("method=%s, want POST", request.Method)
 		}
+		if err := request.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if query := request.Form.Get("query"); strings.Contains(query, "OFFSET") {
+			t.Errorf("query uses offset pagination: %s", query)
+		}
 		if attempts == 1 {
 			response.Header().Set("Retry-After", "0")
 			http.Error(response, "temporary failure", http.StatusInternalServerError)

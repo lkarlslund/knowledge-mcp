@@ -112,16 +112,21 @@ func findLanguage(code string) (language, bool) {
 func (p *EURLEX) resolve(ctx context.Context, lang language) (*release, error) {
 	resolved := &release{Language: lang}
 	const pageSize = 5000
-	for offset := 0; ; offset += pageSize {
+	lastCELEX := ""
+	for {
+		cursorFilter := ""
+		if lastCELEX != "" {
+			cursorFilter = fmt.Sprintf("\n FILTER(STR(?celex) > %q)", lastCELEX)
+		}
 		query := fmt.Sprintf(`PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
 PREFIX owl: <http://www.w3.org/2002/07/owl#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 SELECT DISTINCT ?celex ?title ?date WHERE {
  ?work cdm:resource_legal_in-force "true"^^xsd:boolean ; owl:sameAs ?celex .
- FILTER(STRSTARTS(STR(?celex), "http://publications.europa.eu/resource/celex/3"))
+ FILTER(STRSTARTS(STR(?celex), "http://publications.europa.eu/resource/celex/3"))%s
  ?expr cdm:expression_belongs_to_work ?work ; cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/%s> ; cdm:expression_title ?title .
  OPTIONAL { ?work cdm:work_date_document ?date }
-} ORDER BY ?celex LIMIT %d OFFSET %d`, lang.Cellar, pageSize, offset)
+} ORDER BY ?celex LIMIT %d`, cursorFilter, lang.Cellar, pageSize)
 		var result struct {
 			Results struct {
 				Bindings []map[string]struct {
@@ -141,6 +146,11 @@ SELECT DISTINCT ?celex ?title ?date WHERE {
 		if len(result.Results.Bindings) < pageSize {
 			break
 		}
+		nextCELEX := result.Results.Bindings[len(result.Results.Bindings)-1]["celex"].Value
+		if nextCELEX <= lastCELEX {
+			return nil, errors.New("EUR-Lex catalog pagination did not advance")
+		}
+		lastCELEX = nextCELEX
 	}
 	if len(resolved.Entries) == 0 {
 		return nil, errors.New("EUR-Lex catalog contained no in-force legal acts")
