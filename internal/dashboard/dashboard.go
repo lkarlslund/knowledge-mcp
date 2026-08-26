@@ -21,6 +21,7 @@ var dashboardFiles embed.FS
 
 type Service interface {
 	ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error)
+	BrowseAvailable(context.Context, string, string, bool, int, int, bool) (model.AvailableResult, error)
 	ListLocal() ([]model.LocalDataset, error)
 	ListUpgrades(context.Context) ([]model.AvailableDataset, error)
 	ListJobs() []model.Job
@@ -125,7 +126,7 @@ func Handler(service Service) http.Handler {
 		query := r.URL.Query()
 		offset, _ := strconv.Atoi(query.Get("offset"))
 		limit, _ := strconv.Atoi(query.Get("limit"))
-		result, err := service.ListAvailable(r.Context(), query.Get("filter"), offset, limit, query.Get("refresh") == "true")
+		result, err := service.BrowseAvailable(r.Context(), query.Get("filter"), query.Get("language"), query.Get("hide_installed") == "true", offset, limit, query.Get("refresh") == "true")
 		writeJSON(w, result, err)
 	})
 	mux.HandleFunc("POST /api/dashboard/dataset/", func(w http.ResponseWriter, r *http.Request) {

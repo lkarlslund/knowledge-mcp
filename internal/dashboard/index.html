@@ -34,6 +34,9 @@
     .empty { min-height: 5rem; display: grid; place-items: center; color: var(--bs-secondary-color); }
     .section-icon { color: var(--accent); }
 	.profile-chip { font-size: .65rem; font-weight: 400; }
+    .catalog-modal { max-width: 52rem; }
+    .catalog-content { min-width: 0; }
+    .catalog-variant { width: 10rem; }
     @media (max-width: 767px) { .table > :not(caption) > * > * { padding: .45rem .6rem; } }
   </style>
 </head>
@@ -62,7 +65,7 @@
   </section>
 
   <section class="surface border rounded-4 overflow-hidden mb-3">
-    <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local datasets</h2><div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#onlineDatasetsModal" @click="loadAvailable()"><i class="bi bi-cloud-arrow-down me-1"></i>Download</button></div></div>
+    <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom"><h2 class="h6 mb-0"><i class="bi bi-database-check section-icon me-2"></i>Local datasets</h2><div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary fw-normal" x-text="`${local.length} installed`"></span><button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#onlineDatasetsModal" @click="openAvailable()"><i class="bi bi-cloud-arrow-down me-1"></i>Download</button></div></div>
     <div class="table-responsive" x-show="local.length">
       <table class="table table-hover align-middle">
         <thead><tr><th>Dataset</th><th>Status</th><th>Documents</th><th>Search</th><th class="storage-column">Storage</th><th class="text-end">Actions</th></tr></thead>
@@ -99,16 +102,19 @@
   </section>
 
 <div class="modal fade" id="onlineDatasetsModal" tabindex="-1" aria-labelledby="onlineDatasetsTitle" aria-hidden="true">
-  <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content surface border rounded-4">
-    <div class="modal-header py-2"><div><h2 class="modal-title h6 mb-0" id="onlineDatasetsTitle"><i class="bi bi-cloud-arrow-down section-icon me-2"></i>Download a dataset</h2><div class="small text-body-secondary" x-text="`${filteredAvailable.length} of ${available.length} projects from the cached provider catalogs`"></div></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
-    <div class="modal-body p-0">
-      <div class="d-flex flex-wrap align-items-center gap-2 p-3 border-bottom sticky-top bg-body"><div class="input-group input-group-sm flex-grow-1"><span class="input-group-text"><i class="bi bi-search"></i></span><input class="form-control" type="search" placeholder="Search by name, language, project or purpose" x-model="filter" aria-label="Search online datasets" /></div><select class="form-select form-select-sm w-auto" x-model="languageFilter" aria-label="Filter by language"><option value="">All Languages</option><template x-for="language in languages" :key="language.code"><option :value="language.code" x-text="`${language.name} (${language.code})`"></option></template></select><div class="form-check form-switch mb-0 text-nowrap"><input class="form-check-input" type="checkbox" role="switch" id="hideInstalledDatasets" x-model="hideInstalled"><label class="form-check-label small" for="hideInstalledDatasets">Hide installed</label></div><button class="btn btn-sm btn-outline-secondary text-nowrap" title="Refresh the one-day catalog cache" @click="loadAvailable(true)"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
-      <div class="table-responsive" x-show="filteredAvailable.length"><table class="table table-hover"><thead><tr><th>Dataset</th><th>Language</th><th>Content</th><th>Variant</th><th>Release</th><th>Local</th><th class="text-end">Action</th></tr></thead><tbody><template x-for="dataset in filteredAvailable" :key="dataset.provider + ':' + dataset.id"><tr>
-        <td><div class="fw-semibold" x-text="dataset.display_name || dataset.id"></div><div class="small text-body-secondary"><code x-text="dataset.id"></code><span x-show="dataset.closed" class="badge text-bg-secondary fw-normal ms-2">read-only</span></div></td>
-        <td><div x-text="dataset.language?.name || dataset.language?.local_name || dataset.language?.code || 'Multilingual'"></div><div class="small text-body-secondary" x-show="dataset.language?.local_name && dataset.language.local_name !== dataset.language.name" x-text="dataset.language.local_name"></div></td>
-        <td><span class="badge text-bg-secondary fw-normal me-2" x-text="dataset.provider"></span><span class="small text-body-secondary" x-text="dataset.content_type || 'knowledge dataset'"></span><div class="small text-body-secondary mt-1" x-text="dataset.description"></div><div class="mt-1" x-show="dataset.profile?.topics?.length"><template x-for="topic in dataset.profile.topics.slice(0, 5)" :key="topic"><span class="badge text-bg-secondary profile-chip me-1" x-text="topic"></span></template></div><div class="small text-body-secondary mt-1" x-show="dataset.profile?.time_coverage || dataset.profile?.update_cadence" x-text="[dataset.profile?.time_coverage, dataset.profile?.update_cadence].filter(Boolean).join(' · ')"></div></td><td><select class="form-select form-select-sm" x-model="dataset.variant"><template x-for="variant in dataset.variants" :key="variant.id"><option :value="variant.id" x-text="variant.name" :title="variant.description"></option></template></select></td><td class="text-nowrap" x-text="dataset.release_date"></td><td><i class="bi" :class="dataset.installed ? 'bi-check-circle-fill text-success' : 'bi-circle text-body-tertiary'"></i></td>
+  <div class="modal-dialog modal-lg catalog-modal modal-dialog-scrollable"><div class="modal-content surface border rounded-4">
+    <div class="modal-header py-2"><div><h2 class="modal-title h6 mb-0" id="onlineDatasetsTitle"><i class="bi bi-cloud-arrow-down section-icon me-2"></i>Download a dataset</h2><div class="small text-body-secondary" x-text="`${number(available.length)} of ${number(availableTotal)} matching datasets`"></div></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body p-0" @scroll.passive="if (availableHasMore && $el.scrollTop + $el.clientHeight >= $el.scrollHeight - 240) loadAvailable()">
+      <div class="d-flex flex-wrap align-items-center gap-2 p-2 border-bottom sticky-top bg-body"><div class="input-group input-group-sm flex-grow-1"><span class="input-group-text"><i class="bi bi-search"></i></span><input class="form-control" type="search" placeholder="Search by name, language, project or purpose" x-model="filter" @input.debounce.300ms="resetAvailable()" aria-label="Search online datasets" /></div><select class="form-select form-select-sm w-auto" x-model="languageFilter" @change="resetAvailable()" aria-label="Filter by language"><option value="">All Languages</option><template x-for="language in availableLanguages" :key="language.code"><option :value="language.code" x-text="`${language.name || language.local_name || language.code} (${language.code})`"></option></template></select><div class="form-check form-switch mb-0 text-nowrap"><input class="form-check-input" type="checkbox" role="switch" id="hideInstalledDatasets" x-model="hideInstalled" @change="resetAvailable()" /><label class="form-check-label small" for="hideInstalledDatasets">Hide installed</label></div><button class="btn btn-sm btn-outline-secondary text-nowrap" title="Refresh the one-day catalog cache" @click="resetAvailable(true)"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
+      <div class="table-responsive" x-show="available.length"><table class="table table-hover table-sm"><thead><tr><th>Dataset</th><th>Content</th><th>Variant</th><th class="text-end">Action</th></tr></thead><tbody><template x-for="dataset in available" :key="dataset.provider + ':' + dataset.id"><tr>
+        <td><div class="fw-semibold" x-text="dataset.display_name || dataset.id"></div><div class="small text-body-secondary"><code x-text="dataset.id"></code><span class="mx-1">·</span><span x-text="dataset.language?.name || dataset.language?.local_name || dataset.language?.code || 'Multilingual'"></span><span x-show="dataset.closed" class="badge text-bg-secondary fw-normal ms-2">read-only</span></div></td>
+        <td class="catalog-content"><span class="badge text-bg-secondary fw-normal me-2" x-text="dataset.provider"></span><span class="small text-body-secondary" x-text="dataset.content_type || 'knowledge dataset'"></span><div class="small text-body-secondary mt-1 text-truncate" x-text="dataset.description" :title="dataset.description"></div><div class="small text-body-secondary mt-1" x-text="[dataset.release_date, ...(dataset.profile?.topics || []).slice(0, 3)].filter(Boolean).join(' · ')"></div></td>
+        <td class="catalog-variant"><select class="form-select form-select-sm" x-model="dataset.variant"><template x-for="variant in dataset.variants" :key="variant.id"><option :value="variant.id" x-text="variant.name" :title="variant.description"></option></template></select></td>
         <td class="text-end"><button class="btn btn-sm btn-outline-primary btn-icon rounded-circle" :disabled="busy(dataset.id) || dataset.installed && !onlineUpgrade(dataset)" :title="onlineAction(dataset).label" :aria-label="onlineAction(dataset).label" @click="maintain(dataset.id, onlineAction(dataset).action, dataset.variant)"><i :class="onlineAction(dataset).icon"></i></button></td>
-      </tr></template></tbody></table></div><div class="empty" x-show="!filteredAvailable.length"><span><i class="bi bi-search me-2"></i>No matching datasets</span></div>
+      </tr></template></tbody></table></div>
+      <div class="text-center p-3" x-show="availableLoading"><span class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></span><span class="small text-body-secondary ms-2">Loading datasets…</span></div>
+      <div class="text-center p-3" x-show="availableHasMore && !availableLoading"><button class="btn btn-sm btn-outline-secondary" @click="loadAvailable()">Load more</button></div>
+      <div class="empty" x-show="!available.length && !availableLoading"><span><i class="bi bi-search me-2"></i>No matching datasets</span></div>
     </div>
   </div></div>
 </div>
@@ -135,15 +141,13 @@
 
 <script>
 document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
-  local: [], jobs: [], upgrades: [], available: [], operational: {providers:[]}, settingsDraft: {download_workers:3,index_workers:1,indexing_parallelism:8,update_check_hours:24,automatically_update:false}, filter: '', languageFilter: '', hideInstalled: false, jobFilter: 'running', connected: false, error: '', socket: null, reconnectDelay: 1000,
+  local: [], jobs: [], upgrades: [], available: [], availableLanguages: [], availableTotal: 0, availableNextOffset: 0, availableHasMore: true, availableLoading: false, availableRequest: 0, operational: {providers:[]}, settingsDraft: {download_workers:3,index_workers:1,indexing_parallelism:8,update_check_hours:24,automatically_update:false}, filter: '', languageFilter: '', hideInstalled: false, jobFilter: 'running', connected: false, error: '', socket: null, reconnectDelay: 1000,
   terminal: ['downloaded','ready','up_to_date','failed','canceled'],
 	jobFilterOptions: [{value:'all', label:'All', icon:'bi bi-grid'}, {value:'running', label:'Running', icon:'bi bi-play-circle'}, {value:'queued', label:'Queued', icon:'bi bi-hourglass'}, {value:'failed', label:'Failed', icon:'bi bi-exclamation-circle'}, {value:'completed', label:'Completed', icon:'bi bi-check-circle'}],
   async init() { await this.loadUpgrades(); this.connect(); },
   get outstandingJobs() { return this.jobs.filter(job => !this.terminal.includes(job.state)); },
   get runningJobs() { return this.jobs.filter(job => ['discovering','downloading','verifying','title_indexing','body_indexing'].includes(job.state)); },
   get filteredJobs() { return this.jobs.filter(job => this.jobFilterMatches(job, this.jobFilter)); },
-  get languages() { const values = new Map(); for (const dataset of this.available) { const code = dataset.language?.code || ''; if (!code || values.has(code)) continue; values.set(code, {code, name: dataset.language?.name || dataset.language?.local_name || code}); } return [...values.values()].sort((left, right) => left.name.localeCompare(right.name)); },
-  get filteredAvailable() { const query = this.filter.trim().toLocaleLowerCase(); return this.available.filter(dataset => { if (this.hideInstalled && dataset.installed) return false; if (this.languageFilter && dataset.language?.code !== this.languageFilter) return false; if (!query) return true; return [dataset.id, dataset.display_name, dataset.description, dataset.project, dataset.content_type, dataset.language?.code, dataset.language?.name, dataset.language?.local_name, ...(dataset.profile?.topics || []), ...(dataset.profile?.geographic_scope || []), ...(dataset.profile?.document_types || []), dataset.profile?.time_coverage].some(value => String(value || '').toLocaleLowerCase().includes(query)); }); },
   get totalStorage() { return this.local.reduce((total, dataset) => total + Number(dataset.disk_bytes || 0), 0); },
   get totalDocuments() { return this.local.reduce((total, dataset) => total + Number(dataset.document_count || 0), 0); },
   async api(path, options) { const response = await fetch(path, options); const data = await response.json(); if (!response.ok) throw new Error(data.error || response.statusText); return data; },
@@ -151,17 +155,40 @@ document.addEventListener('alpine:init', () => Alpine.data('dashboard', () => ({
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
     this.socket = new WebSocket(`${scheme}//${location.host}/api/dashboard/events`);
     this.socket.onopen = () => { this.connected = true; this.error = ''; this.reconnectDelay = 1000; };
-    this.socket.onmessage = event => { const state = JSON.parse(event.data); const previous = this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|'); this.local = state.local || []; const currentJobs = new Map(this.jobs.map(job => [job.id, job])); this.jobs = (state.jobs || []).map(job => this.newerJob(currentJobs.get(job.id), job)); if (previous !== this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|')) this.refreshCatalogSoon(); };
+    this.socket.onmessage = event => { const state = JSON.parse(event.data); const previous = this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|'); this.local = state.local || []; const currentJobs = new Map(this.jobs.map(job => [job.id, job])); this.jobs = (state.jobs || []).map(job => this.newerJob(currentJobs.get(job.id), job)); if (previous !== this.local.map(dataset => `${dataset.dataset}:${dataset.state}`).join('|')) { this.syncAvailableInstalled(); this.refreshCatalogSoon(); } };
     this.socket.onerror = () => this.socket.close();
     this.socket.onclose = () => { this.connected = false; setTimeout(() => this.connect(), this.reconnectDelay); this.reconnectDelay = Math.min(this.reconnectDelay * 2, 15000); };
   },
-  refreshCatalogSoon() { clearTimeout(this.catalogTimer); this.catalogTimer = setTimeout(() => Promise.all([this.loadUpgrades(), this.available.length ? this.loadAvailable(false, true) : Promise.resolve()]), 750); },
+  syncAvailableInstalled() { const installed = new Set(this.local.map(dataset => dataset.dataset)); this.available = this.available.map(dataset => ({...dataset, installed:installed.has(dataset.id)})); },
+  refreshCatalogSoon() { clearTimeout(this.catalogTimer); this.catalogTimer = setTimeout(() => this.loadUpgrades(), 750); },
   async loadUpgrades() { try { this.upgrades = await this.api('/api/dashboard/upgrades'); } catch (error) { this.error = error.message; } },
   async loadOperational() { try { this.operational = await this.api('/api/dashboard/status'); this.settingsDraft = {...this.operational.settings}; } catch (error) { this.error = error.message; } },
   async saveSettings() { try { const settings = await this.api('/api/dashboard/settings', {method:'PUT', headers:{'Content-Type':'application/json','X-Knowledge-MCP':'1'}, body:JSON.stringify(this.settingsDraft)}); this.settingsDraft = {...settings}; await this.loadOperational(); } catch (error) { this.error = error.message; } },
-  async loadAvailable(refresh = false, force = false) { if (this.available.length && !refresh && !force) return; try { const data = await this.api(`/api/dashboard/available?filter=&offset=0&limit=-1&refresh=${refresh}`); this.available = data.datasets || []; this.error = ''; } catch (error) { this.error = error.message; } },
-  async maintain(dataset, action, variant = '') { try { await this.api(`/api/dashboard/dataset/${encodeURIComponent(dataset)}/${action}?variant=${encodeURIComponent(variant || '')}`, {method:'POST', headers:{'X-Knowledge-MCP':'1'}}); if (this.available.length) await this.loadAvailable(false, true); } catch (error) { this.error = error.message; } },
-  async deleteDataset(dataset) { if (!window.confirm(`Delete ${dataset.dataset} and permanently remove ${this.bytes(dataset.disk_bytes)} of local data?`)) return; try { await this.api(`/api/dashboard/dataset/${encodeURIComponent(dataset.dataset)}/delete`, {method:'POST', headers:{'X-Knowledge-MCP':'1'}}); this.local = this.local.filter(item => item.dataset !== dataset.dataset); await Promise.all([this.loadUpgrades(), this.available.length ? this.loadAvailable(false, true) : Promise.resolve()]); } catch (error) { this.error = error.message; } },
+  openAvailable() { if (!this.available.length && !this.availableLoading) this.resetAvailable(); },
+  resetAvailable(refresh = false) { this.available = []; this.availableTotal = 0; this.availableNextOffset = 0; this.availableHasMore = true; return this.loadAvailable(refresh, true); },
+  async loadAvailable(refresh = false, reset = false) {
+    if (this.availableLoading && !reset || !reset && !this.availableHasMore) return;
+    const request = ++this.availableRequest, offset = reset ? 0 : this.availableNextOffset;
+    this.availableLoading = true;
+    const query = new URLSearchParams({filter:this.filter.trim(), language:this.languageFilter, hide_installed:String(this.hideInstalled), offset:String(offset), limit:'40', refresh:String(refresh)});
+    try {
+      const data = await this.api(`/api/dashboard/available?${query}`);
+      if (request !== this.availableRequest) return;
+      const rows = data.datasets || [];
+      this.available = reset ? rows : [...this.available, ...rows];
+      this.availableTotal = Number(data.total || 0);
+      this.availableNextOffset = Number(data.next_offset || this.available.length);
+      this.availableHasMore = Boolean(data.next_offset) && this.availableNextOffset < this.availableTotal;
+      if (data.languages) this.availableLanguages = data.languages;
+      this.error = '';
+    } catch (error) {
+      if (request === this.availableRequest) this.error = error.message;
+    } finally {
+      if (request === this.availableRequest) this.availableLoading = false;
+    }
+  },
+  async maintain(dataset, action, variant = '') { try { await this.api(`/api/dashboard/dataset/${encodeURIComponent(dataset)}/${action}?variant=${encodeURIComponent(variant || '')}`, {method:'POST', headers:{'X-Knowledge-MCP':'1'}}); if (this.available.length) await this.resetAvailable(); } catch (error) { this.error = error.message; } },
+  async deleteDataset(dataset) { if (!window.confirm(`Delete ${dataset.dataset} and permanently remove ${this.bytes(dataset.disk_bytes)} of local data?`)) return; try { await this.api(`/api/dashboard/dataset/${encodeURIComponent(dataset.dataset)}/delete`, {method:'POST', headers:{'X-Knowledge-MCP':'1'}}); this.local = this.local.filter(item => item.dataset !== dataset.dataset); await Promise.all([this.loadUpgrades(), this.available.length ? this.resetAvailable() : Promise.resolve()]); } catch (error) { this.error = error.message; } },
   async controlJob(id, action) { try { await this.api(`/api/dashboard/job/${encodeURIComponent(id)}/${action}`, {method:'POST', headers:{'X-Knowledge-MCP':'1'}}); } catch (error) { this.error = error.message; } },
   busy(dataset) { return this.outstandingJobs.some(job => job.dataset === dataset); }, upgradeFor(dataset) { return this.upgrades.find(item => item.id === dataset.dataset); },
 	jobFilterMatches(job, filter) { if (filter === 'all') return true; if (filter === 'queued') return job.state === 'queued'; if (filter === 'failed') return job.state === 'failed'; if (filter === 'completed') return ['downloaded','ready','up_to_date'].includes(job.state); return ['discovering','downloading','verifying','title_indexing','body_indexing'].includes(job.state); },

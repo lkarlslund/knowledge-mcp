@@ -15,13 +15,31 @@ import (
 )
 
 type fakeService struct {
-	submitted string
-	updates   <-chan struct{}
-	listCalls atomic.Int64
+	submitted       string
+	updates         <-chan struct{}
+	listCalls       atomic.Int64
+	browseFilter    string
+	browseLanguage  string
+	browseInstalled bool
+	browseOffset    int
+	browseLimit     int
 }
 
 func (f *fakeService) ListAvailable(context.Context, string, int, int, bool) (model.AvailableResult, error) {
 	return model.AvailableResult{Datasets: []model.AvailableDataset{{ID: "testwiki", Available: true}}}, nil
+}
+func (f *fakeService) BrowseAvailable(_ context.Context, filter, language string, hideInstalled bool, offset, limit int, _ bool) (model.AvailableResult, error) {
+	f.browseFilter = filter
+	f.browseLanguage = language
+	f.browseInstalled = hideInstalled
+	f.browseOffset = offset
+	f.browseLimit = limit
+	return model.AvailableResult{
+		Datasets:  []model.AvailableDataset{{ID: "testwiki", Available: true}},
+		Languages: []model.Language{{Code: "en", Name: "English"}},
+		Offset:    offset,
+		Total:     1,
+	}, nil
 }
 func (f *fakeService) ListLocal() ([]model.LocalDataset, error) {
 	f.listCalls.Add(1)
@@ -104,8 +122,17 @@ func TestDashboardAndMaintenanceAPI(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Knowledge Dataset MCP") || !strings.Contains(page.Body.String(), `href="https://github.com/lkarlslund/wikipedia-multistream-mcp"`) || !strings.Contains(page.Body.String(), `aria-label="View Knowledge Dataset MCP on GitHub"`) || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || !strings.Contains(page.Body.String(), "Total documents") || !strings.Contains(page.Body.String(), "bi-trash3") || !strings.Contains(page.Body.String(), `id="onlineDatasetsModal"`) || !strings.Contains(page.Body.String(), `id="settingsModal"`) || !strings.Contains(page.Body.String(), "indexing_parallelism") || !strings.Contains(page.Body.String(), "Provider catalogs") || !strings.Contains(page.Body.String(), "limit=-1") || !strings.Contains(page.Body.String(), "All Languages") || !strings.Contains(page.Body.String(), "hideInstalled") || !strings.Contains(page.Body.String(), "filteredAvailable") || !strings.Contains(page.Body.String(), "provider metadata") || !strings.Contains(page.Body.String(), "storage-column") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Knowledge Dataset MCP") || !strings.Contains(page.Body.String(), `href="https://github.com/lkarlslund/wikipedia-multistream-mcp"`) || !strings.Contains(page.Body.String(), `aria-label="View Knowledge Dataset MCP on GitHub"`) || strings.Contains(page.Body.String(), "<th>Upgrade</th>") || !strings.Contains(page.Body.String(), "Total documents") || !strings.Contains(page.Body.String(), "bi-trash3") || !strings.Contains(page.Body.String(), `id="onlineDatasetsModal"`) || !strings.Contains(page.Body.String(), `id="settingsModal"`) || !strings.Contains(page.Body.String(), "indexing_parallelism") || !strings.Contains(page.Body.String(), "Provider catalogs") || strings.Contains(page.Body.String(), "limit=-1") || !strings.Contains(page.Body.String(), "limit:'40'") || !strings.Contains(page.Body.String(), "availableHasMore") || !strings.Contains(page.Body.String(), "catalog-modal") || strings.Contains(page.Body.String(), "modal-xl") || !strings.Contains(page.Body.String(), "All Languages") || !strings.Contains(page.Body.String(), "hideInstalled") || !strings.Contains(page.Body.String(), "provider metadata") || !strings.Contains(page.Body.String(), "storage-column") {
 		t.Fatalf("unexpected dashboard response: %d %q", page.Code, page.Body.String())
+	}
+
+	available := httptest.NewRecorder()
+	handler.ServeHTTP(available, httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/dashboard/available?filter=docs&language=en&hide_installed=true&offset=40&limit=40", nil))
+	if available.Code != http.StatusOK || !strings.Contains(available.Body.String(), `"languages":[{"code":"en"`) {
+		t.Fatalf("available response = %d %q", available.Code, available.Body.String())
+	}
+	if service.browseFilter != "docs" || service.browseLanguage != "en" || !service.browseInstalled || service.browseOffset != 40 || service.browseLimit != 40 {
+		t.Fatalf("available query = filter %q, language %q, hide %t, offset %d, limit %d", service.browseFilter, service.browseLanguage, service.browseInstalled, service.browseOffset, service.browseLimit)
 	}
 
 	forbidden := httptest.NewRecorder()

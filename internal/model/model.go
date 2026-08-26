@@ -55,6 +55,7 @@ type Variant struct {
 
 type AvailableResult struct {
 	Datasets   []AvailableDataset `json:"datasets"`
+	Languages  []Language         `json:"languages,omitempty"`
 	Offset     int                `json:"offset"`
 	NextOffset int                `json:"next_offset,omitempty"`
 	Total      int                `json:"total"`

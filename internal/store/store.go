@@ -330,6 +330,97 @@ func (s *Store) ListAvailable(ctx context.Context, filter string, offset, limit 
 	return result, nil
 }
 
+func (s *Store) BrowseAvailable(ctx context.Context, filter, language string, hideInstalled bool, offset, limit int, refresh bool) (model.AvailableResult, error) {
+	all, err := s.ListAvailable(ctx, filter, 0, -1, refresh)
+	if err != nil {
+		return model.AvailableResult{}, err
+	}
+	languages := make(map[string]model.Language)
+	filtered := make([]model.AvailableDataset, 0, len(all.Datasets))
+	for _, dataset := range all.Datasets {
+		for _, item := range datasetLanguages(dataset.Language) {
+			current, exists := languages[item.Code]
+			if !exists || current.Name == current.Code && item.Name != item.Code {
+				languages[item.Code] = item
+			}
+		}
+		if (language != "" && !datasetHasLanguage(dataset.Language, language)) || (hideInstalled && dataset.Installed) {
+			continue
+		}
+		filtered = append(filtered, dataset)
+	}
+	languageList := make([]model.Language, 0, len(languages))
+	for _, item := range languages {
+		languageList = append(languageList, item)
+	}
+	sort.Slice(languageList, func(i, j int) bool {
+		left, right := languageSortName(languageList[i]), languageSortName(languageList[j])
+		if left == right {
+			return languageList[i].Code < languageList[j].Code
+		}
+		return left < right
+	})
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 1 || limit > 100 {
+		limit = 40
+	}
+	result := model.AvailableResult{Offset: offset, Total: len(filtered)}
+	if offset == 0 {
+		result.Languages = languageList
+	}
+	if offset >= len(filtered) {
+		return result, nil
+	}
+	end := min(offset+limit, len(filtered))
+	result.Datasets = append([]model.AvailableDataset(nil), filtered[offset:end]...)
+	if end < len(filtered) {
+		result.NextOffset = end
+	}
+	return result, nil
+}
+
+func datasetLanguages(language model.Language) []model.Language {
+	codes := strings.Split(language.Code, ",")
+	result := make([]model.Language, 0, len(codes))
+	seen := make(map[string]struct{}, len(codes))
+	for _, code := range codes {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		item := model.Language{Code: code, Name: code, LocalName: code}
+		if len(codes) == 1 {
+			item = language
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func datasetHasLanguage(language model.Language, code string) bool {
+	for _, item := range datasetLanguages(language) {
+		if item.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func languageSortName(language model.Language) string {
+	for _, value := range []string{language.Name, language.LocalName, language.Code} {
+		if value != "" {
+			return strings.ToLower(value)
+		}
+	}
+	return ""
+}
+
 func (s *Store) ListLocal() ([]model.LocalDataset, error) {
 	s.mu.RLock()
 	active := make(map[string]string, len(s.active))
