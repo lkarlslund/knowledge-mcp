@@ -2,15 +2,23 @@ package knowledgeindex
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
 )
 
-type testCorpus struct{ records []provider.Record }
+type testCorpus struct {
+	records       []provider.Record
+	failAfter     int
+	failure       error
+	observedAfter []string
+}
 
 func (c *testCorpus) ScanTitles(ctx context.Context, after string, sink provider.RecordSink) error {
 	return c.scan(ctx, after, false, sink)
@@ -18,15 +26,29 @@ func (c *testCorpus) ScanTitles(ctx context.Context, after string, sink provider
 func (c *testCorpus) ScanBodies(ctx context.Context, after string, sink provider.RecordSink) error {
 	return c.scan(ctx, after, true, sink)
 }
-func (c *testCorpus) scan(ctx context.Context, _ string, body bool, sink provider.RecordSink) error {
-	for index, record := range c.records {
+func (c *testCorpus) scan(ctx context.Context, after string, body bool, sink provider.RecordSink) error {
+	c.observedAfter = append(c.observedAfter, after)
+	start := 0
+	if after != "" {
+		for index := range c.records {
+			if c.records[index].ID == after {
+				start = index + 1
+				break
+			}
+		}
+	}
+	for index := start; index < len(c.records); index++ {
+		record := c.records[index]
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if c.failure != nil && index == c.failAfter {
+			return c.failure
 		}
 		if !body {
 			record.Body = ""
 		}
-		if err := sink(record, provider.ScanPosition{Cursor: record.ID, Completed: int64(index + 1), Total: int64(len(c.records))}); err != nil {
+		if err := sink(record, provider.ScanPosition{Cursor: record.ID, Completed: int64(index + 1), Total: int64(len(c.records)), Boundary: true}); err != nil {
 			return err
 		}
 	}
@@ -37,6 +59,59 @@ func (*testCorpus) Read(_ context.Context, record provider.Record, options model
 	return model.Document{ID: record.ID, Title: record.Title, URL: record.URL, Format: options.Format, Content: "rendered " + record.Locator}, nil
 }
 
+func TestTitleBuildResumesAtCommittedProviderBoundary(t *testing.T) {
+	t.Parallel()
+	path := t.TempDir()
+	records := make([]provider.Record, 1_200)
+	for index := range records {
+		records[index] = provider.Record{ID: fmt.Sprintf("doc-%04d", index), Title: fmt.Sprintf("Document %d", index), Primary: true}
+	}
+	interrupted := errors.New("source interrupted")
+	corpus := &testCorpus{records: records, failAfter: 1_050, failure: interrupted}
+	if _, err := BuildTitle(context.Background(), path, "release-a", corpus, func(uint64, int64, int64) {}); !errors.Is(err, interrupted) {
+		t.Fatalf("first BuildTitle error = %v", err)
+	}
+	corpus.failure = nil
+	count, err := BuildTitle(context.Background(), path, "release-a", corpus, func(uint64, int64, int64) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != uint64(len(records)) {
+		t.Fatalf("resumed count = %d, want %d", count, len(records))
+	}
+	if got := corpus.observedAfter[len(corpus.observedAfter)-1]; got != "doc-0999" {
+		t.Fatalf("resume cursor = %q, want doc-0999", got)
+	}
+	if _, err := os.Stat(filepath.Join(path, TitleDirectory+".building.checkpoint.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checkpoint still exists: %v", err)
+	}
+}
+
+func TestBodyBuildResumesAtCommittedProviderBoundary(t *testing.T) {
+	t.Parallel()
+	path := t.TempDir()
+	records := make([]provider.Record, 10)
+	body := strings.Repeat("x", 1<<20)
+	for index := range records {
+		records[index] = provider.Record{ID: fmt.Sprintf("doc-%02d", index), Title: fmt.Sprintf("Document %d", index), Body: body, Primary: true}
+	}
+	interrupted := errors.New("source interrupted")
+	corpus := &testCorpus{records: records, failAfter: 9, failure: interrupted}
+	if err := BuildBody(context.Background(), path, "release-a", corpus, func(int64, int64) {}); !errors.Is(err, interrupted) {
+		t.Fatalf("first BuildBody error = %v", err)
+	}
+	corpus.failure = nil
+	if err := BuildBody(context.Background(), path, "release-a", corpus, func(int64, int64) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := corpus.observedAfter[len(corpus.observedAfter)-1]; got != "doc-07" {
+		t.Fatalf("resume cursor = %q, want doc-07", got)
+	}
+	if _, err := os.Stat(filepath.Join(path, BodyDirectory+".building.checkpoint.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checkpoint still exists: %v", err)
+	}
+}
+
 func TestGenericEngineIndexesProviderRecords(t *testing.T) {
 	t.Parallel()
 	path := t.TempDir()
@@ -45,14 +120,14 @@ func TestGenericEngineIndexesProviderRecords(t *testing.T) {
 		{ID: "mail", Title: "Mail Status", Body: "email delivery status codes", URL: "https://example/mail", Locator: "raw:2", Primary: true},
 		{ID: "talk", Title: "Talk: HTTP", Body: "discussion of semantics", Locator: "raw:3", Namespace: 1},
 	}}
-	count, err := BuildTitle(context.Background(), path, corpus, func(uint64, int64, int64) {})
+	count, err := BuildTitle(context.Background(), path, "test-source", corpus, func(uint64, int64, int64) {})
 	if err != nil || count != 3 {
 		t.Fatalf("BuildTitle = %d, %v", count, err)
 	}
 	if err := os.Rename(filepath.Join(path, TitleDirectory+".building"), filepath.Join(path, TitleDirectory)); err != nil {
 		t.Fatal(err)
 	}
-	if err := BuildBody(context.Background(), path, corpus, func(int64, int64) {}); err != nil {
+	if err := BuildBody(context.Background(), path, "test-source", corpus, func(int64, int64) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(path, BodyDirectory+".building"), filepath.Join(path, BodyDirectory)); err != nil {

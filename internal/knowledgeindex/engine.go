@@ -2,6 +2,7 @@ package knowledgeindex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
@@ -43,17 +45,38 @@ type indexDocument struct {
 	Primary    int    `json:"primary"`
 }
 
+type buildCheckpoint struct {
+	Kind        string    `json:"kind"`
+	Version     int       `json:"version"`
+	Fingerprint string    `json:"fingerprint"`
+	Cursor      string    `json:"cursor"`
+	Documents   uint64    `json:"documents"`
+	Completed   int64     `json:"completed"`
+	Total       int64     `json:"total"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 func Current(manifest model.Manifest) (title, body bool) {
 	return manifest.TitleReady && manifest.TitleIndexVersion == TitleVersion,
 		manifest.BodyReady && manifest.BodyIndexVersion == BodyVersion
 }
 
-func BuildTitle(ctx context.Context, path string, corpus provider.Corpus, progress TitleProgress) (uint64, error) {
+func BuildTitle(ctx context.Context, path, fingerprint string, corpus provider.Corpus, progress TitleProgress) (uint64, error) {
 	destination := filepath.Join(path, TitleDirectory+".building")
-	if err := os.RemoveAll(destination); err != nil {
-		return 0, err
+	checkpointPath := destination + ".checkpoint.json"
+	checkpoint, resume := loadCheckpoint(checkpointPath, destination, "title", TitleVersion, fingerprint)
+	var idx bleve.Index
+	var err error
+	if resume {
+		idx, err = openWritableIndex(destination)
+	} else {
+		if err := os.RemoveAll(destination); err != nil {
+			return 0, err
+		}
+		_ = os.Remove(checkpointPath)
+		checkpoint = buildCheckpoint{Kind: "title", Version: TitleVersion, Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
+		idx, err = newIndex(destination, indexMapping(false))
 	}
-	idx, err := newIndex(destination, indexMapping(false))
 	if err != nil {
 		return 0, err
 	}
@@ -63,9 +86,31 @@ func BuildTitle(ctx context.Context, path string, corpus provider.Corpus, progre
 			_ = idx.Close()
 		}
 	}()
+	if !resume {
+		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
+			return 0, err
+		}
+	}
 	batch := idx.NewBatch()
-	var count uint64
-	err = corpus.ScanTitles(ctx, "", func(record provider.Record, position provider.ScanPosition) error {
+	count := checkpoint.Documents
+	lastBoundary := true
+	commit := func(position provider.ScanPosition) error {
+		if batch.Size() > 0 {
+			if err := idx.Batch(batch); err != nil {
+				return err
+			}
+			batch = idx.NewBatch()
+		}
+		checkpoint.Cursor, checkpoint.Documents = position.Cursor, count
+		checkpoint.Completed, checkpoint.Total, checkpoint.UpdatedAt = position.Completed, position.Total, time.Now().UTC()
+		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
+			return err
+		}
+		progress(count, position.Completed, position.Total)
+		return nil
+	}
+	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
+	err = corpus.ScanTitles(ctx, checkpoint.Cursor, func(record provider.Record, position provider.ScanPosition) error {
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
 			return errors.New("provider emitted title record without ID or title")
 		}
@@ -73,11 +118,9 @@ func BuildTitle(ctx context.Context, path string, corpus provider.Corpus, progre
 			return err
 		}
 		count++
-		if batch.Size() >= titleBatchSize {
-			if err := idx.Batch(batch); err != nil {
-				return err
-			}
-			batch = idx.NewBatch()
+		lastPosition, lastBoundary = position, position.Boundary
+		if batch.Size() >= titleBatchSize && position.Boundary {
+			return commit(position)
 		}
 		progress(count, position.Completed, position.Total)
 		return nil
@@ -85,8 +128,11 @@ func BuildTitle(ctx context.Context, path string, corpus provider.Corpus, progre
 	if err != nil {
 		return 0, err
 	}
+	if !lastBoundary {
+		return 0, errors.New("provider title scan ended outside a safe checkpoint boundary")
+	}
 	if batch.Size() > 0 {
-		if err := idx.Batch(batch); err != nil {
+		if err := commit(lastPosition); err != nil {
 			return 0, err
 		}
 	}
@@ -94,20 +140,35 @@ func BuildTitle(ctx context.Context, path string, corpus provider.Corpus, progre
 		return 0, err
 	}
 	closed = true
+	if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
 	return count, nil
 }
 
-func BuildBody(ctx context.Context, path string, corpus provider.Corpus, progress BodyProgress) error {
+func BuildBody(ctx context.Context, path, fingerprint string, corpus provider.Corpus, progress BodyProgress) error {
 	destination := filepath.Join(path, BodyDirectory+".building")
-	if err := os.RemoveAll(destination); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(destination, 0o755); err != nil {
-		return err
+	checkpointPath := destination + ".checkpoint.json"
+	checkpoint, resume := loadCheckpoint(checkpointPath, destination, "body", BodyVersion, fingerprint)
+	if !resume {
+		if err := os.RemoveAll(destination); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(destination, 0o755); err != nil {
+			return err
+		}
+		_ = os.Remove(checkpointPath)
+		checkpoint = buildCheckpoint{Kind: "body", Version: BodyVersion, Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
 	}
 	indexes := make([]bleve.Index, bodyShards)
 	for shard := range indexes {
-		idx, err := newIndex(bodyShardPath(destination, shard), indexMapping(true))
+		var idx bleve.Index
+		var err error
+		if resume {
+			idx, err = openWritableIndex(bodyShardPath(destination, shard))
+		} else {
+			idx, err = newIndex(bodyShardPath(destination, shard), indexMapping(true))
+		}
 		if err != nil {
 			for _, opened := range indexes {
 				if opened != nil {
@@ -117,6 +178,11 @@ func BuildBody(ctx context.Context, path string, corpus provider.Corpus, progres
 			return err
 		}
 		indexes[shard] = idx
+	}
+	if !resume {
+		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
+			return err
+		}
 	}
 	closed := false
 	defer func() {
@@ -145,7 +211,25 @@ func BuildBody(ctx context.Context, path string, corpus provider.Corpus, progres
 		state.batch, state.bytes = indexes[shard].NewBatch(), 0
 		return nil
 	}
-	err := corpus.ScanBodies(ctx, "", func(record provider.Record, position provider.ScanPosition) error {
+	documentCount := checkpoint.Documents
+	flushAll := func(position provider.ScanPosition) error {
+		for shard := range indexes {
+			if err := flush(shard); err != nil {
+				return err
+			}
+		}
+		checkpoint.Cursor, checkpoint.Documents = position.Cursor, documentCount
+		checkpoint.Completed, checkpoint.Total, checkpoint.UpdatedAt = position.Completed, position.Total, time.Now().UTC()
+		if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
+			return err
+		}
+		progress(position.Completed, position.Total)
+		return nil
+	}
+	pendingBytes := 0
+	lastBoundary := true
+	lastPosition := provider.ScanPosition{Cursor: checkpoint.Cursor, Completed: checkpoint.Completed, Total: checkpoint.Total, Boundary: true}
+	err := corpus.ScanBodies(ctx, checkpoint.Cursor, func(record provider.Record, position provider.ScanPosition) error {
 		if record.ID == "" || strings.TrimSpace(record.Title) == "" {
 			return errors.New("provider emitted body record without ID or title")
 		}
@@ -154,10 +238,14 @@ func BuildBody(ctx context.Context, path string, corpus provider.Corpus, progres
 			return err
 		}
 		batches[shard].bytes += len(record.Title) + len(record.Body) + len(record.URL) + len(record.Locator)
-		if batches[shard].bytes >= bodyBatchSize {
-			if err := flush(shard); err != nil {
+		pendingBytes += len(record.Title) + len(record.Body) + len(record.URL) + len(record.Locator)
+		documentCount++
+		lastPosition, lastBoundary = position, position.Boundary
+		if pendingBytes >= bodyBatchSize && position.Boundary {
+			if err := flushAll(position); err != nil {
 				return err
 			}
+			pendingBytes = 0
 		}
 		progress(position.Completed, position.Total)
 		return nil
@@ -165,15 +253,23 @@ func BuildBody(ctx context.Context, path string, corpus provider.Corpus, progres
 	if err != nil {
 		return err
 	}
-	for shard := range indexes {
-		if err := flush(shard); err != nil {
+	if !lastBoundary {
+		return errors.New("provider body scan ended outside a safe checkpoint boundary")
+	}
+	if pendingBytes > 0 {
+		if err := flushAll(lastPosition); err != nil {
 			return err
 		}
+	}
+	for shard := range indexes {
 		if err := indexes[shard].Close(); err != nil {
 			return err
 		}
 	}
 	closed = true
+	if err := os.Remove(checkpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 
@@ -417,10 +513,45 @@ func indexMapping(body bool) mapping.IndexMapping {
 }
 
 func newIndex(path string, indexMapping mapping.IndexMapping) (bleve.Index, error) {
-	return bleve.NewUsing(path, indexMapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultMemKVStore, map[string]any{
+	return bleve.NewUsing(path, indexMapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultMemKVStore, scorchConfig())
+}
+
+func openWritableIndex(path string) (bleve.Index, error) {
+	return bleve.OpenUsing(path, scorchConfig())
+}
+
+func scorchConfig() map[string]any {
+	return map[string]any{
 		"scorchPersisterOptions": map[string]any{"NumPersisterWorkers": 2, "MaxSizeInMemoryMergePerWorker": 64 << 20},
 		"scorchMergePlanOptions": map[string]any{"FloorSegmentFileSize": 10 << 20},
-	})
+	}
+}
+
+func loadCheckpoint(path, destination, kind string, version int, fingerprint string) (buildCheckpoint, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return buildCheckpoint{}, false
+	}
+	var checkpoint buildCheckpoint
+	if json.Unmarshal(data, &checkpoint) != nil || checkpoint.Kind != kind || checkpoint.Version != version || checkpoint.Fingerprint != fingerprint {
+		return buildCheckpoint{}, false
+	}
+	if info, err := os.Stat(destination); err != nil || !info.IsDir() {
+		return buildCheckpoint{}, false
+	}
+	return checkpoint, true
+}
+
+func saveCheckpoint(path string, checkpoint buildCheckpoint) error {
+	data, err := json.MarshalIndent(checkpoint, "", "  ")
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
 }
 
 func bodyShardPath(path string, shard int) string {

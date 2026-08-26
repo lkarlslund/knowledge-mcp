@@ -39,6 +39,7 @@ type ScanPosition struct {
 	Cursor    string
 	Completed int64
 	Total     int64
+	Boundary  bool
 }
 
 type RecordSink func(Record, ScanPosition) error

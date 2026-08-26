@@ -148,7 +148,13 @@ type SourceBody struct {
 	Redirect  bool
 }
 
-func ScanSourceTitles(ctx context.Context, parts []Part, emit func(SourceTitle, string, int64, int64) error) error {
+func ScanSourceTitles(ctx context.Context, parts []Part, after string, emit func(SourceTitle, string, int64, int64, bool) error) error {
+	resumePart, resumeLine := -1, int64(0)
+	if after != "" {
+		if _, err := fmt.Sscanf(after, "%d:%d", &resumePart, &resumeLine); err != nil || resumePart < 0 || resumePart >= len(parts) || resumeLine < 0 {
+			return fmt.Errorf("invalid Wikimedia title cursor %q", after)
+		}
+	}
 	var compressedTotal int64
 	for _, part := range parts {
 		size, err := fileSize(part.IndexPath)
@@ -173,10 +179,10 @@ func ScanSourceTitles(ctx context.Context, parts []Part, emit func(SourceTitle, 
 		var group []entry
 		groupOffset := int64(-1)
 		line := int64(0)
-		flush := func(end int64) error {
-			for _, item := range group {
+		flush := func(end, cursorLine int64) error {
+			for index, item := range group {
 				position := compressedBefore + compressed.bytes.Load()
-				if err := emit(SourceTitle{ID: item.id, Title: item.title, Part: part.Number, Offset: groupOffset, End: end}, fmt.Sprintf("%d:%d", partIndex, line), position, compressedTotal); err != nil {
+				if err := emit(SourceTitle{ID: item.id, Title: item.title, Part: part.Number, Offset: groupOffset, End: end}, fmt.Sprintf("%d:%d", partIndex, cursorLine), position, compressedTotal, index == len(group)-1); err != nil {
 					return err
 				}
 			}
@@ -189,13 +195,16 @@ func ScanSourceTitles(ctx context.Context, parts []Part, emit func(SourceTitle, 
 				return err
 			}
 			line++
+			if partIndex < resumePart || partIndex == resumePart && line <= resumeLine {
+				continue
+			}
 			offset, pageID, title, parseErr := parseIndexLine(scanner.Text())
 			if parseErr != nil {
 				_ = file.Close()
 				return parseErr
 			}
 			if groupOffset >= 0 && offset != groupOffset {
-				if err := flush(offset); err != nil {
+				if err := flush(offset, line-1); err != nil {
 					_ = file.Close()
 					return err
 				}
@@ -212,7 +221,7 @@ func ScanSourceTitles(ctx context.Context, parts []Part, emit func(SourceTitle, 
 			_ = file.Close()
 			return err
 		}
-		if err := flush(dumpSize); err != nil {
+		if err := flush(dumpSize, line); err != nil {
 			_ = file.Close()
 			return err
 		}
@@ -228,7 +237,7 @@ func ScanSourceTitles(ctx context.Context, parts []Part, emit func(SourceTitle, 
 	return nil
 }
 
-func ScanSourceBodies(ctx context.Context, parts []Part, emit func([]SourceBody, string, int64, int64) error) error {
+func ScanSourceBodies(ctx context.Context, parts []Part, after string, emit func([]SourceBody, string, int64, int64) error) error {
 	var streams []stream
 	for _, part := range parts {
 		partStreams, err := readStreams(ctx, part)
@@ -236,6 +245,14 @@ func ScanSourceBodies(ctx context.Context, parts []Part, emit func([]SourceBody,
 			return err
 		}
 		streams = append(streams, partStreams...)
+	}
+	start := 0
+	if after != "" {
+		parsed, err := strconv.Atoi(after)
+		if err != nil || parsed < 0 || parsed > len(streams) {
+			return fmt.Errorf("invalid Wikimedia body cursor %q", after)
+		}
+		start = parsed
 	}
 	type result struct {
 		index int
@@ -255,18 +272,25 @@ func ScanSourceBodies(ctx context.Context, parts []Part, emit func([]SourceBody,
 				item := streams[index]
 				file, err := os.Open(item.Path)
 				if err != nil {
-					results <- result{index: index, err: err}
+					select {
+					case results <- result{index: index, err: err}:
+					case <-workerCtx.Done():
+					}
 					continue
 				}
 				pages, decodeErr := decodeStream(workerCtx, io.NewSectionReader(file, item.Offset, item.End-item.Offset))
 				closeErr := file.Close()
-				results <- result{index: index, pages: pages, err: errors.Join(decodeErr, closeErr)}
+				select {
+				case results <- result{index: index, pages: pages, err: errors.Join(decodeErr, closeErr)}:
+				case <-workerCtx.Done():
+					return
+				}
 			}
 		}()
 	}
 	go func() {
 		defer close(jobs)
-		for index := range streams {
+		for index := start; index < len(streams); index++ {
 			select {
 			case jobs <- index:
 			case <-workerCtx.Done():
@@ -278,20 +302,31 @@ func ScanSourceBodies(ctx context.Context, parts []Part, emit func([]SourceBody,
 		workers.Wait()
 		close(results)
 	}()
-	completed := int64(0)
+	completed := int64(start)
+	next := start
+	pending := make(map[int]result, cap(results))
 	for decoded := range results {
 		if decoded.err != nil {
 			cancel()
 			return decoded.err
 		}
-		documents := make([]SourceBody, 0, len(decoded.pages))
-		for _, page := range decoded.pages {
-			documents = append(documents, SourceBody{ID: page.ID, Title: page.Title, Namespace: page.Namespace, Wikitext: page.Revision.Text, Redirect: redirectTarget(page) != ""})
-		}
-		completed++
-		if err := emit(documents, strconv.Itoa(decoded.index+1), completed, int64(len(streams))); err != nil {
-			cancel()
-			return err
+		pending[decoded.index] = decoded
+		for {
+			ordered, ok := pending[next]
+			if !ok {
+				break
+			}
+			delete(pending, next)
+			documents := make([]SourceBody, 0, len(ordered.pages))
+			for _, page := range ordered.pages {
+				documents = append(documents, SourceBody{ID: page.ID, Title: page.Title, Namespace: page.Namespace, Wikitext: page.Revision.Text, Redirect: redirectTarget(page) != ""})
+			}
+			completed++
+			next++
+			if err := emit(documents, strconv.Itoa(next), completed, int64(len(streams))); err != nil {
+				cancel()
+				return err
+			}
 		}
 	}
 	return ctx.Err()

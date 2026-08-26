@@ -36,19 +36,19 @@ type wikimediaCorpus struct {
 	reader   *wikiindex.Reader
 }
 
-func (c *wikimediaCorpus) ScanTitles(ctx context.Context, _ string, sink provider.RecordSink) error {
-	return wikiindex.ScanSourceTitles(ctx, wikiParts(c.path, c.manifest.PartCount), func(source wikiindex.SourceTitle, cursor string, completed, total int64) error {
+func (c *wikimediaCorpus) ScanTitles(ctx context.Context, after string, sink provider.RecordSink) error {
+	return wikiindex.ScanSourceTitles(ctx, wikiParts(c.path, c.manifest.PartCount), after, func(source wikiindex.SourceTitle, cursor string, completed, total int64, boundary bool) error {
 		return sink(provider.Record{
 			ID: strconv.FormatUint(source.ID, 10), Title: source.Title,
 			URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, source.Title), Part: source.Part, Offset: source.Offset, End: source.End,
 			Primary: true,
-		}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total})
+		}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total, Boundary: boundary})
 	})
 }
 
-func (c *wikimediaCorpus) ScanBodies(ctx context.Context, _ string, sink provider.RecordSink) error {
-	return wikiindex.ScanSourceBodies(ctx, wikiParts(c.path, c.manifest.PartCount), func(documents []wikiindex.SourceBody, cursor string, completed, total int64) error {
-		for _, source := range documents {
+func (c *wikimediaCorpus) ScanBodies(ctx context.Context, after string, sink provider.RecordSink) error {
+	return wikiindex.ScanSourceBodies(ctx, wikiParts(c.path, c.manifest.PartCount), after, func(documents []wikiindex.SourceBody, cursor string, completed, total int64) error {
+		for index, source := range documents {
 			body := ""
 			if !source.Redirect {
 				body = wikiindex.PlainText(source.Wikitext)
@@ -56,7 +56,7 @@ func (c *wikimediaCorpus) ScanBodies(ctx context.Context, _ string, sink provide
 			if err := sink(provider.Record{
 				ID: strconv.FormatUint(source.ID, 10), Title: source.Title, Body: body,
 				URL: wikiindex.URL(c.manifest.Site.OnlineSourceURL, source.Title), Namespace: source.Namespace, Primary: source.Namespace == 0,
-			}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total}); err != nil {
+			}, provider.ScanPosition{Cursor: cursor, Completed: completed, Total: total, Boundary: index == len(documents)-1}); err != nil {
 				return err
 			}
 		}
