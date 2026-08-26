@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
@@ -14,12 +15,18 @@ import (
 
 func TestEURLexLifecycleAndMarkdownLinks(t *testing.T) {
 	t.Parallel()
+	var documentAttempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/sparql" {
 			_ = json.NewEncoder(response).Encode(map[string]any{"results": map[string]any{"bindings": []any{map[string]any{"celex": map[string]string{"value": "http://publications.europa.eu/resource/celex/32016R0679"}, "expr": map[string]string{"value": "http://publications.europa.eu/resource/cellar/expression.0001"}, "format": map[string]string{"value": "html"}, "title": map[string]string{"value": "Data protection regulation"}, "date": map[string]string{"value": "2016-04-27"}}}}})
 			return
 		}
 		if request.URL.Path == "/celex/expression.0001" {
+			if documentAttempts.Add(1) == 1 {
+				response.Header().Set("Retry-After", "0")
+				http.Error(response, "temporary failure", http.StatusServiceUnavailable)
+				return
+			}
 			if accept := request.Header.Get("Accept"); accept != "text/html" {
 				t.Errorf("Accept=%q, want text/html", accept)
 			}
@@ -43,6 +50,9 @@ func TestEURLexLifecycleAndMarkdownLinks(t *testing.T) {
 	manifest, err := backend.Acquire(context.Background(), datasetID, "en", release, stage, "", func(string, int64, int64, string, float64, string) {})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if documentAttempts.Load() != 2 {
+		t.Fatalf("document attempts=%d, want 2", documentAttempts.Load())
 	}
 	corpus, err := backend.OpenCorpus(stage, manifest)
 	if err != nil {

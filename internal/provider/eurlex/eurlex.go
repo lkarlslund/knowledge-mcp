@@ -351,6 +351,39 @@ send:
 }
 
 func (p *EURLEX) download(ctx context.Context, item entry, destination string) error {
+	const attempts = 5
+	for attempt := range attempts {
+		retryAfter, err := p.downloadOnce(ctx, item, destination)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var statusErr *documentStatusError
+		if errors.As(err, &statusErr) && statusErr.code != http.StatusTooManyRequests && statusErr.code < http.StatusInternalServerError {
+			return err
+		}
+		if attempt+1 == attempts {
+			return err
+		}
+		if err := waitForRetry(ctx, retryAfter, attempt); err != nil {
+			return err
+		}
+	}
+	return errors.New("EUR-Lex document retries exhausted")
+}
+
+type documentStatusError struct {
+	celex, status string
+	code          int
+}
+
+func (e *documentStatusError) Error() string {
+	return fmt.Sprintf("download CELEX %s: %s", e.celex, e.status)
+}
+
+func (p *EURLEX) downloadOnce(ctx context.Context, item entry, destination string) (string, error) {
 	partial := destination + ".part"
 	var offset int64
 	if info, err := os.Stat(partial); err == nil {
@@ -367,7 +400,7 @@ func (p *EURLEX) download(ctx context.Context, item entry, destination string) e
 	}
 	response, err := p.http.Do(request)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("download CELEX %s: %w", item.CELEX, err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	flags := os.O_CREATE | os.O_WRONLY
@@ -376,21 +409,21 @@ func (p *EURLEX) download(ctx context.Context, item entry, destination string) e
 	} else if response.StatusCode == http.StatusOK {
 		flags |= os.O_TRUNC
 	} else {
-		return fmt.Errorf("download CELEX %s: %s", item.CELEX, response.Status)
+		return response.Header.Get("Retry-After"), &documentStatusError{celex: item.CELEX, status: response.Status, code: response.StatusCode}
 	}
 	file, err := os.OpenFile(partial, flags, 0o644)
 	if err != nil {
-		return err
+		return "", err
 	}
 	_, copyErr := io.Copy(file, response.Body)
 	closeErr := file.Close()
 	if copyErr != nil {
-		return copyErr
+		return "", fmt.Errorf("download CELEX %s: %w", item.CELEX, copyErr)
 	}
 	if closeErr != nil {
-		return closeErr
+		return "", closeErr
 	}
-	return os.Rename(partial, destination)
+	return "", os.Rename(partial, destination)
 }
 
 func linkOrCopy(source, destination string) error {
