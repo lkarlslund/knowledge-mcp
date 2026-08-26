@@ -10,6 +10,8 @@ Included providers:
 - `wikimedia`: Wikimedia article multistream snapshots, with one `multistream` variant.
 - `rfc`: the complete RFC Series from the RFC Editor, with a `text` variant.
 - `kiwix`: the complete Kiwix OPDS catalog, grouped into datasets and archive flavours.
+- `ncbi`: the PubMed annual baseline, including citations, abstracts, identifiers, and MeSH terms.
+- `eurlex`: official EU legal acts currently in force, in any of the 24 official EU languages.
 
 Provider URLs and local paths are not part of the agent contract. Search returns
 a temporary opaque `ref`; agents pass only that value to `knowledge_read`, without
@@ -65,9 +67,12 @@ All non-server commands call the running MCP backend once.
 ./wikipedia-multistream-mcp dataset available
 ./wikipedia-multistream-mcp dataset available rfc
 ./wikipedia-multistream-mcp dataset available devdocs
+./wikipedia-multistream-mcp dataset available pubmed
 
 # Download the RFC text variant, then poll/control its jobs.
 ./wikipedia-multistream-mcp dataset download rfc --variant text
+./wikipedia-multistream-mcp dataset download pubmed --variant baseline
+./wikipedia-multistream-mcp dataset download eurlex-in-force --variant en
 ./wikipedia-multistream-mcp dataset status JOB_ID
 ./wikipedia-multistream-mcp dataset status --dataset rfc
 ./wikipedia-multistream-mcp dataset job JOB_ID --action pause
@@ -113,6 +118,9 @@ citations, redirects, outlines, and bounded references. RFC reads add lifecycle
 status and structured relationships and convert RFC references into followable
 Markdown links. Kiwix reads ZIM files natively and converts stored HTML,
 including tables and internal links, to Markdown.
+PubMed reads preserve citation metadata, abstracts, publication types, identifiers,
+and MeSH terms. EUR-Lex reads convert official XHTML and tables to Markdown and
+turn CELEX cross-references into followable knowledge links.
 
 ## Provider architecture
 
@@ -121,7 +129,9 @@ The core contract is in `internal/provider`. Implementations are isolated:
 ```text
 internal/provider/
 ├── provider.go          discovery, acquisition, and common corpus boundary
+├── eurlex/              CELLAR discovery, EU legal XHTML, and Markdown
 ├── kiwix/               OPDS catalog, native ZIM reader, HTML-to-Markdown
+├── ncbi/                PubMed baseline discovery, XML, and Markdown
 ├── rfc/                 RFC Editor catalog, raw text, and Markdown
 └── wikimedia/           Wikimedia discovery and multistream adapter
 ```
@@ -159,6 +169,13 @@ Metalink mirrors, resumes partial ZIM downloads with byte ranges, verifies
 SHA-256, and supports uncompressed, zlib, bzip2, XZ, and Zstandard clusters.
 Zstandard decoding uses Klaus Post's optimized Go implementation.
 
+The NCBI provider discovers the official annual PubMed baseline, resumes its
+compressed XML parts with HTTP ranges, and verifies NCBI's published MD5 for
+each completed part. The EUR-Lex provider discovers in-force sector 3 legal acts
+through the Publications Office CELLAR endpoint and stores the selected official
+language as resumable XHTML documents. Updates for both providers are built as
+new staging generations and reuse unchanged local source files.
+
 ## Dashboard
 
 The embedded Bootstrap/Alpine.js dashboard shows local datasets, provider and
@@ -168,7 +185,10 @@ and installed-state filters. Dataset variants are selected before download.
 Updates arrive over a WebSocket; no CDN is required. The gear menu changes
 download/index worker limits at runtime, controls per-index decompression
 parallelism, configures periodic update checks and optional automatic updates,
-and reports provider catalog health. Settings persist in `data/settings.json`.
+and reports provider catalog health. Provider catalogs persist as atomic snapshots
+under `data/catalogs`, refresh automatically when the configured update interval
+expires, can be refreshed immediately from Settings, and remain usable while an
+upstream catalog is temporarily unavailable. Settings persist in `data/settings.json`.
 
 ## User service
 
@@ -210,7 +230,8 @@ documents from every provider feed one logical shared BM25 corpus, uniformly
 striped across physical Bleve shards. Body text is indexed but not duplicated as
 a stored field. Wikimedia reads seek directly to indexed bzip2 stream boundaries;
 RFC reads open the canonical local Markdown source; Kiwix reads only the referenced
-ZIM cluster.
+ZIM cluster; PubMed reads one compressed baseline part; and EUR-Lex reads one local
+XHTML document.
 
 An initial install exposes title lookup while shared indexing continues. An
 update builds a hidden shared generation and atomically publishes its provider

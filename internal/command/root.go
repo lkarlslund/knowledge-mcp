@@ -16,7 +16,9 @@ import (
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/mcpserver"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+	eurlexprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/eurlex"
 	kiwixprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/kiwix"
+	ncbiprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/ncbi"
 	rfcprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/rfc"
 	wikimediaprovider "github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider/wikimedia"
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/store"
@@ -61,7 +63,7 @@ func newServeCommand() *cobra.Command {
 			if err := requireLoopback(listen); err != nil {
 				return err
 			}
-			providers, err := provider.NewRegistry(wikimediaprovider.New(wikimedia.NewClient(downloadConnections)), rfcprovider.New(), kiwixprovider.New())
+			providers, err := provider.NewRegistry(wikimediaprovider.New(wikimedia.NewClient(downloadConnections)), rfcprovider.New(), kiwixprovider.New(), ncbiprovider.New(), eurlexprovider.New())
 			if err != nil {
 				return err
 			}

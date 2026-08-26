@@ -81,6 +81,7 @@ func (s *Store) UpdateSettings(settings model.Settings) (model.Settings, error) 
 	s.settings = settings
 	s.notifyLocked()
 	s.mu.Unlock()
+	s.providers.ConfigureCatalogCache(filepath.Join(s.root, "catalogs"), time.Duration(settings.UpdateCheckHours)*time.Hour)
 	for _, changed := range []chan struct{}{s.downloadSettings, s.indexSettings, s.scheduleSettings} {
 		select {
 		case changed <- struct{}{}:
@@ -151,6 +152,8 @@ func (s *Store) scheduleUpdates(ctx context.Context) {
 }
 
 func (s *Store) performUpdateCheck(ctx context.Context) {
+	_, reports, _ := s.providers.DiscoverReport(ctx, "", true)
+	s.recordDiscovery(reports, true)
 	upgrades, _ := s.ListUpgrades(ctx)
 	s.mu.Lock()
 	s.lastUpdateCheck = time.Now().UTC()

@@ -6,11 +6,16 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
@@ -83,8 +88,12 @@ type Provider interface {
 }
 
 type Registry struct {
-	providers []Provider
-	byID      map[string]Provider
+	providers     []Provider
+	byID          map[string]Provider
+	catalogMu     sync.RWMutex
+	catalogDir    string
+	catalogMaxAge time.Duration
+	catalogLocks  map[string]*sync.Mutex
 }
 
 type DiscoveryReport struct {
@@ -94,7 +103,7 @@ type DiscoveryReport struct {
 }
 
 func NewRegistry(providers ...Provider) (*Registry, error) {
-	registry := &Registry{byID: make(map[string]Provider, len(providers))}
+	registry := &Registry{byID: make(map[string]Provider, len(providers)), catalogLocks: make(map[string]*sync.Mutex, len(providers))}
 	for _, provider := range providers {
 		if provider == nil || !stableIDPattern.MatchString(provider.ID()) {
 			return nil, errors.New("source provider must have an ID")
@@ -104,8 +113,19 @@ func NewRegistry(providers ...Provider) (*Registry, error) {
 		}
 		registry.providers = append(registry.providers, provider)
 		registry.byID[provider.ID()] = provider
+		registry.catalogLocks[provider.ID()] = &sync.Mutex{}
 	}
 	return registry, nil
+}
+
+// ConfigureCatalogCache enables durable provider catalogs. A positive maxAge
+// controls when ordinary discovery refreshes upstream; refresh=true always
+// forces a refresh. The last successful catalog remains usable when upstream
+// is unavailable.
+func (r *Registry) ConfigureCatalogCache(path string, maxAge time.Duration) {
+	r.catalogMu.Lock()
+	r.catalogDir, r.catalogMaxAge = path, maxAge
+	r.catalogMu.Unlock()
 }
 
 func (r *Registry) Providers() []Provider { return append([]Provider(nil), r.providers...) }
@@ -146,10 +166,11 @@ func (r *Registry) DiscoverReport(ctx context.Context, filter string, refresh bo
 		err      error
 	}
 	results := make(chan result, len(r.providers))
-	for _, provider := range r.providers {
+	for _, backend := range r.providers {
+		backend := backend
 		go func() {
-			items, err := provider.Discover(ctx, filter, refresh)
-			results <- result{provider: provider.ID(), items: items, err: err}
+			items, err := r.discoverProvider(ctx, backend, filter, refresh)
+			results <- result{provider: backend.ID(), items: items, err: err}
 		}()
 	}
 	var items []model.AvailableDataset
@@ -203,4 +224,92 @@ func (r *Registry) DiscoverReport(ctx context.Context, filter string, refresh bo
 	}
 	sort.Slice(reports, func(i, j int) bool { return reports[i].Provider < reports[j].Provider })
 	return items, reports, nil
+}
+
+type diskCatalog struct {
+	Provider  string                   `json:"provider"`
+	FetchedAt time.Time                `json:"fetched_at"`
+	Datasets  []model.AvailableDataset `json:"datasets"`
+}
+
+func (r *Registry) discoverProvider(ctx context.Context, backend Provider, filter string, refresh bool) ([]model.AvailableDataset, error) {
+	r.catalogMu.RLock()
+	directory, maxAge := r.catalogDir, r.catalogMaxAge
+	lock := r.catalogLocks[backend.ID()]
+	r.catalogMu.RUnlock()
+	if directory == "" || maxAge <= 0 {
+		return backend.Discover(ctx, filter, refresh)
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	path := filepath.Join(directory, backend.ID()+".json")
+	cached, cacheErr := readDiskCatalog(path, backend.ID())
+	if cacheErr == nil && !refresh && time.Since(cached.FetchedAt) < maxAge {
+		return filterAvailable(cached.Datasets, filter), nil
+	}
+	items, err := backend.Discover(ctx, "", true)
+	if err == nil {
+		catalog := diskCatalog{Provider: backend.ID(), FetchedAt: time.Now().UTC(), Datasets: items}
+		if writeErr := writeDiskCatalog(path, catalog); writeErr != nil {
+			return nil, fmt.Errorf("cache %s catalog: %w", backend.ID(), writeErr)
+		}
+		return filterAvailable(items, filter), nil
+	}
+	if cacheErr == nil {
+		return filterAvailable(cached.Datasets, filter), fmt.Errorf("refresh %s catalog (using stale disk cache): %w", backend.ID(), err)
+	}
+	return nil, err
+}
+
+func readDiskCatalog(path, providerID string) (diskCatalog, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return diskCatalog{}, err
+	}
+	var catalog diskCatalog
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return diskCatalog{}, err
+	}
+	if catalog.Provider != providerID || catalog.FetchedAt.IsZero() || catalog.Datasets == nil {
+		return diskCatalog{}, errors.New("catalog cache metadata is invalid")
+	}
+	return catalog, nil
+}
+
+func writeDiskCatalog(path string, catalog diskCatalog) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(catalog, "", "  ")
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+func filterAvailable(items []model.AvailableDataset, filter string) []model.AvailableDataset {
+	filter = strings.ToLower(strings.TrimSpace(filter))
+	if filter == "" {
+		return append([]model.AvailableDataset(nil), items...)
+	}
+	result := make([]model.AvailableDataset, 0, len(items))
+	for _, item := range items {
+		parts := []string{item.ID, item.DisplayName, item.Description, item.Project, item.ContentType, item.Language.Code, item.Language.Name, item.Language.LocalName}
+		parts = append(parts, item.Profile.Topics...)
+		parts = append(parts, item.Profile.DocumentTypes...)
+		for _, language := range item.Languages {
+			parts = append(parts, language.Code, language.Name, language.LocalName)
+		}
+		for _, variant := range item.Variants {
+			parts = append(parts, variant.ID, variant.Name, variant.Description, variant.Format)
+		}
+		if strings.Contains(strings.ToLower(strings.Join(parts, " ")), filter) {
+			result = append(result, item)
+		}
+	}
+	return result
 }

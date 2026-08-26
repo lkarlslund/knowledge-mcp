@@ -94,6 +94,7 @@ func Open(root string, registry *provider.Registry, options ...Options) (*Store,
 	if err != nil {
 		return nil, err
 	}
+	registry.ConfigureCatalogCache(filepath.Join(root, "catalogs"), time.Duration(settings.UpdateCheckHours)*time.Hour)
 	referenceStore, err := documentrefs.Open(filepath.Join(root, "references.db"))
 	if err != nil {
 		return nil, err

@@ -1,0 +1,63 @@
+package eurlex
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
+	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/provider"
+)
+
+func TestEURLexLifecycleAndMarkdownLinks(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/sparql" {
+			_ = json.NewEncoder(response).Encode(map[string]any{"results": map[string]any{"bindings": []any{map[string]any{"celex": map[string]string{"value": "http://publications.europa.eu/resource/celex/32016R0679"}, "title": map[string]string{"value": "Data protection regulation"}, "date": map[string]string{"value": "2016-04-27"}}}}})
+			return
+		}
+		if request.URL.Path == "/celex/32016R0679" {
+			response.Header().Set("Content-Type", "application/xhtml+xml")
+			_, _ = response.Write([]byte(`<html><body><h1>Data protection regulation</h1><p>Protects personal data; see <a href="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32002L0058">Directive</a>.</p><table><tr><th>Article</th><th>Subject</th></tr><tr><td>1</td><td>Purpose</td></tr></table></body></html>`))
+			return
+		}
+		http.NotFound(response, request)
+	}))
+	defer server.Close()
+	backend := NewWithURLs(server.URL+"/sparql", server.URL+"/celex")
+	available, err := backend.Discover(context.Background(), "EU law", false)
+	if err != nil || len(available) != 1 || len(available[0].Variants) != 24 {
+		t.Fatalf("discover: %+v %v", available, err)
+	}
+	release, err := backend.Latest(context.Background(), datasetID, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := t.TempDir()
+	manifest, err := backend.Acquire(context.Background(), datasetID, "en", release, stage, "", func(string, int64, int64, string, float64, string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	corpus, err := backend.OpenCorpus(stage, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = corpus.Close() }()
+	var record provider.Record
+	if err := corpus.ScanBodies(context.Background(), "", provider.ScanOptions{}, func(item provider.Record, _ provider.ScanPosition) error { record = item; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(record.Body, "| Article | Subject |") || !strings.Contains(record.Body, "knowledge-read://read?dataset=eurlex-in-force&id=32002L0058") {
+		t.Fatalf("markdown=%s", record.Body)
+	}
+	document, err := corpus.Read(context.Background(), record, model.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Format != "markdown" {
+		t.Fatalf("format=%q", document.Format)
+	}
+}

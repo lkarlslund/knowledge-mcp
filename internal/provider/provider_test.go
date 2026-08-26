@@ -2,8 +2,11 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lkarlslund/wikipedia-multistream-mcp/internal/model"
 )
@@ -12,6 +15,8 @@ type contractProvider struct {
 	id          string
 	collections map[string]bool
 	datasets    []model.AvailableDataset
+	discoveries int
+	discoverErr error
 }
 
 func (p *contractProvider) ID() string          { return p.id }
@@ -29,7 +34,50 @@ func (p *contractProvider) Backfill(context.Context, string, *model.Manifest) bo
 	return false
 }
 func (p *contractProvider) Discover(context.Context, string, bool) ([]model.AvailableDataset, error) {
-	return append([]model.AvailableDataset(nil), p.datasets...), nil
+	p.discoveries++
+	return append([]model.AvailableDataset(nil), p.datasets...), p.discoverErr
+}
+
+func TestRegistryCatalogPersistsAcrossProcesses(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	first := &contractProvider{id: "test", datasets: []model.AvailableDataset{validDataset("test", "dataset")}}
+	registry, err := NewRegistry(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.ConfigureCatalogCache(directory, 24*time.Hour)
+	if _, err := registry.Discover(context.Background(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	if first.discoveries != 1 {
+		t.Fatalf("upstream discoveries = %d, want 1", first.discoveries)
+	}
+	if _, err := os.Stat(directory + "/test.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	second := &contractProvider{id: "test", discoverErr: errors.New("offline")}
+	reopened, err := NewRegistry(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened.ConfigureCatalogCache(directory, 24*time.Hour)
+	items, reports, err := reopened.DiscoverReport(context.Background(), "data", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.discoveries != 0 || len(items) != 1 || len(reports) != 1 || reports[0].Error != "" {
+		t.Fatalf("disk cache result: calls=%d items=%d reports=%+v", second.discoveries, len(items), reports)
+	}
+
+	_, reports, err = reopened.DiscoverReport(context.Background(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.discoveries != 1 || len(reports) != 1 || !strings.Contains(reports[0].Error, "using stale disk cache") {
+		t.Fatalf("forced stale fallback: calls=%d reports=%+v", second.discoveries, reports)
+	}
 }
 
 type contractCorpus struct{}
