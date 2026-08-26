@@ -61,3 +61,31 @@ func TestEURLexLifecycleAndMarkdownLinks(t *testing.T) {
 		t.Fatalf("format=%q", document.Format)
 	}
 }
+
+func TestEURLexRetriesTransientCatalogFailure(t *testing.T) {
+	t.Parallel()
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		attempts++
+		if request.Method != http.MethodPost {
+			t.Errorf("method=%s, want POST", request.Method)
+		}
+		if attempts == 1 {
+			response.Header().Set("Retry-After", "0")
+			http.Error(response, "temporary failure", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"results": map[string]any{"bindings": []any{map[string]any{"celex": map[string]string{"value": "http://publications.europa.eu/resource/celex/32016R0679"}, "title": map[string]string{"value": "Data protection regulation"}}}}})
+	}))
+	defer server.Close()
+
+	backend := NewWithURLs(server.URL, server.URL)
+	latest, err := backend.Latest(context.Background(), datasetID, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, ok := latest.Value.(*release)
+	if !ok || len(resolved.Entries) != 1 || attempts != 2 {
+		t.Fatalf("release=%+v attempts=%d", latest, attempts)
+	}
+}

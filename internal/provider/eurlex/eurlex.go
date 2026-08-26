@@ -122,21 +122,6 @@ SELECT DISTINCT ?celex ?title ?date WHERE {
  ?expr cdm:expression_belongs_to_work ?work ; cdm:expression_uses_language <http://publications.europa.eu/resource/authority/language/%s> ; cdm:expression_title ?title .
  OPTIONAL { ?work cdm:work_date_document ?date }
 } ORDER BY ?celex LIMIT %d OFFSET %d`, lang.Cellar, pageSize, offset)
-		endpoint, _ := url.Parse(p.sparqlURL)
-		values := endpoint.Query()
-		values.Set("query", query)
-		values.Set("format", "application/sparql-results+json")
-		endpoint.RawQuery = values.Encode()
-		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-		request.Header.Set("Accept", "application/sparql-results+json")
-		response, err := p.http.Do(request)
-		if err != nil {
-			return nil, err
-		}
-		if response.StatusCode != http.StatusOK {
-			_ = response.Body.Close()
-			return nil, fmt.Errorf("EUR-Lex catalog: %s", response.Status)
-		}
 		var result struct {
 			Results struct {
 				Bindings []map[string]struct {
@@ -144,9 +129,7 @@ SELECT DISTINCT ?celex ?title ?date WHERE {
 				} `json:"bindings"`
 			} `json:"results"`
 		}
-		err = json.NewDecoder(response.Body).Decode(&result)
-		_ = response.Body.Close()
-		if err != nil {
+		if err := p.querySPARQL(ctx, query, &result); err != nil {
 			return nil, err
 		}
 		for _, binding := range result.Results.Bindings {
@@ -172,6 +155,62 @@ SELECT DISTINCT ?celex ?title ?date WHERE {
 	}
 	resolved.Entries = unique
 	return resolved, nil
+}
+
+func (p *EURLEX) querySPARQL(ctx context.Context, query string, target any) error {
+	form := url.Values{"query": {query}, "format": {"application/sparql-results+json"}}.Encode()
+	const attempts = 5
+	for attempt := range attempts {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, p.sparqlURL, strings.NewReader(form))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Accept", "application/sparql-results+json")
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response, err := p.http.Do(request)
+		if err != nil {
+			if attempt+1 == attempts {
+				return fmt.Errorf("EUR-Lex catalog request: %w", err)
+			}
+			if err := waitForRetry(ctx, "", attempt); err != nil {
+				return err
+			}
+			continue
+		}
+		if response.StatusCode == http.StatusOK {
+			decodeErr := json.NewDecoder(response.Body).Decode(target)
+			_ = response.Body.Close()
+			if decodeErr != nil {
+				return fmt.Errorf("decode EUR-Lex catalog: %w", decodeErr)
+			}
+			return nil
+		}
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
+		_ = response.Body.Close()
+		retryable := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError
+		if !retryable || attempt+1 == attempts {
+			return fmt.Errorf("EUR-Lex catalog: %s: %s", response.Status, strings.TrimSpace(string(message)))
+		}
+		if err := waitForRetry(ctx, response.Header.Get("Retry-After"), attempt); err != nil {
+			return err
+		}
+	}
+	return errors.New("EUR-Lex catalog retries exhausted")
+}
+
+func waitForRetry(ctx context.Context, retryAfter string, attempt int) error {
+	delay := time.Duration(1<<attempt) * 500 * time.Millisecond
+	if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds >= 0 {
+		delay = time.Duration(seconds) * time.Second
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (p *EURLEX) Acquire(ctx context.Context, collection, variant string, value provider.Release, stage, current string, progress provider.Progress) (model.Manifest, error) {
