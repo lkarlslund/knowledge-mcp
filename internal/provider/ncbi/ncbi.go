@@ -30,10 +30,11 @@ import (
 )
 
 const (
-	ProviderID = "ncbi"
-	datasetID  = "pubmed"
-	variantID  = "baseline"
-	defaultURL = "https://ftp.ncbi.nlm.nih.gov/pubmed/baseline"
+	ProviderID           = "ncbi"
+	datasetID            = "pubmed"
+	variantID            = "baseline"
+	defaultURL           = "https://ftp.ncbi.nlm.nih.gov/pubmed/baseline"
+	pubmedRecordsPerPart = 30_000
 )
 
 var partRE = regexp.MustCompile(`href="(pubmed(\d{2})n\d{4}\.xml\.gz)"[^>]*>[^<]*</a>\s+([0-9-]+\s+[0-9:]+)\s+([0-9.]+[KMGT]?)`) // NCBI Apache listing.
@@ -330,31 +331,12 @@ func (p *NCBI) OpenCorpus(path string, _ model.Manifest) (provider.Corpus, error
 	if err := json.Unmarshal(data, &resolved); err != nil {
 		return nil, err
 	}
-	var total int64
-	for index := range resolved.Parts {
-		if info, statErr := os.Stat(filepath.Join(path, "raw", resolved.Parts[index].Name)); statErr == nil {
-			resolved.Parts[index].Size = info.Size()
-		}
-		total += resolved.Parts[index].Size
-	}
-	return &corpus{path: path, parts: resolved.Parts, total: total}, nil
+	return &corpus{path: path, parts: resolved.Parts}, nil
 }
 
 type corpus struct {
 	path  string
 	parts []part
-	total int64
-}
-
-type countingReader struct {
-	reader io.Reader
-	read   int64
-}
-
-func (r *countingReader) Read(buffer []byte) (int, error) {
-	read, err := r.reader.Read(buffer)
-	r.read += int64(read)
-	return read, err
 }
 
 func (c *corpus) ScanTitles(ctx context.Context, after string, _ provider.ScanOptions, sink provider.RecordSink) error {
@@ -369,17 +351,13 @@ func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provi
 	if err != nil {
 		return err
 	}
-	var compressedBefore int64
-	for index := 0; index < min(partIndex, len(c.parts)); index++ {
-		compressedBefore += c.parts[index].Size
-	}
+	estimatedDocuments := int64(len(c.parts) * pubmedRecordsPerPart)
 	for pi := partIndex; pi < len(c.parts); pi++ {
 		file, err := os.Open(filepath.Join(c.path, "raw", c.parts[pi].Name))
 		if err != nil {
 			return err
 		}
-		compressed := &countingReader{reader: file}
-		gz, err := gzip.NewReader(compressed)
+		gz, err := gzip.NewReader(file)
 		if err != nil {
 			_ = file.Close()
 			return err
@@ -417,8 +395,7 @@ func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provi
 			}
 			documents++
 			cursor := fmt.Sprintf("%d:%d:%d", pi, current+1, documents)
-			compressedDone := min(c.total, compressedBefore+compressed.read)
-			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: compressedDone, Total: c.total, Units: "bytes", Boundary: true}); err != nil {
+			if err := sink(record, provider.ScanPosition{Cursor: cursor, Completed: documents, Total: estimatedDocuments, Units: "documents", Boundary: true}); err != nil {
 				_ = gz.Close()
 				_ = file.Close()
 				return err
@@ -432,7 +409,6 @@ func (c *corpus) scan(ctx context.Context, after string, bodies bool, sink provi
 		}
 		_ = gz.Close()
 		_ = file.Close()
-		compressedBefore += c.parts[pi].Size
 		recordIndex = 0
 	}
 	return nil

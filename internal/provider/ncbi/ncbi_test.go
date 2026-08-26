@@ -73,8 +73,8 @@ func TestPubMedLifecycle(t *testing.T) {
 	if indexed.ID != "123" || !strings.Contains(indexed.Body, "Evidence text") || !strings.Contains(strings.Join(indexed.Keywords, " "), "Evidence-Based Medicine") {
 		t.Fatalf("record=%+v", indexed)
 	}
-	if progress.Completed != int64(compressed.Len()) || progress.Total != int64(compressed.Len()) || progress.Units != "bytes" {
-		t.Fatalf("progress=%+v, compressed bytes=%d", progress, compressed.Len())
+	if progress.Completed != 1 || progress.Total != pubmedRecordsPerPart || progress.Units != "documents" {
+		t.Fatalf("progress=%+v", progress)
 	}
 	document, err := corpus.Read(context.Background(), indexed, model.ReadOptions{})
 	if err != nil {
