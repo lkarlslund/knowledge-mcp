@@ -358,7 +358,7 @@ func (s *Store) ListLocalSummary() ([]model.LocalDatasetSummary, error) {
 		}
 		result = append(result, model.LocalDatasetSummary{
 			Provider: local.Provider, Variant: local.Variant, Dataset: local.Dataset, Name: name, Description: local.Site.Description, Project: local.Site.Project, ContentType: local.Site.ContentType,
-			Language: local.Site.Language, OnlineSourceURL: local.Site.OnlineSourceURL,
+			Language: local.Site.Language, OnlineSourceURL: local.Site.OnlineSourceURL, Profile: local.Site.Profile,
 			SourceDocuments: local.Site.SourceDocuments, IndexedDocuments: local.DocumentCount,
 			ReleaseDate: local.ReleaseDate, SearchMode: local.SearchMode, Closed: local.Site.Closed,
 		})

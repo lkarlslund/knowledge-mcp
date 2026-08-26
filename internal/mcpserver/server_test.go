@@ -28,7 +28,7 @@ func (fakeService) ListAvailable(context.Context, string, int, int, bool) (model
 	return model.AvailableResult{}, nil
 }
 func (fakeService) ListLocalSummary() ([]model.LocalDatasetSummary, error) {
-	return []model.LocalDatasetSummary{{Dataset: "testwiki", Name: "Test Wikipedia", Description: "A test-language general-purpose encyclopedia.", Project: "wikipedia", ContentType: "general-purpose encyclopedia", OnlineSourceURL: "https://test.wikipedia.org", Language: model.Language{Code: "test", Name: "Test"}, SourceDocuments: 40, IndexedDocuments: 42, SearchMode: "title"}}, nil
+	return []model.LocalDatasetSummary{{Dataset: "testwiki", Name: "Test Wikipedia", Description: "A test-language general-purpose encyclopedia.", Project: "wikipedia", ContentType: "general-purpose encyclopedia", Profile: model.DatasetProfile{Topics: []string{"encyclopedia"}, GeographicScope: []string{"global"}, TimeCoverage: "current snapshot", DocumentTypes: []string{"articles"}, UpdateCadence: "monthly", SourceFeatures: []string{"links"}}, OnlineSourceURL: "https://test.wikipedia.org", Language: model.Language{Code: "test", Name: "Test"}, SourceDocuments: 40, IndexedDocuments: 42, SearchMode: "title"}}, nil
 }
 
 func TestLocalDatasetSummariesExposeSelectionMetadata(t *testing.T) {
@@ -154,7 +154,7 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(payload)
-	for _, field := range []string{`"description"`, `"content_type"`, `"language"`, `"online_source_url"`, `"source_documents"`, `"indexed_documents"`, `"search_mode"`} {
+	for _, field := range []string{`"description"`, `"content_type"`, `"language"`, `"online_source_url"`, `"source_documents"`, `"indexed_documents"`, `"search_mode"`, `"topics"`, `"geographic_scope"`, `"time_coverage"`, `"document_types"`, `"update_cadence"`, `"source_features"`} {
 		if !strings.Contains(text, field) {
 			t.Errorf("knowledge_list_local response lacks %s: %s", field, text)
 		}

@@ -189,6 +189,7 @@ func (p *RFC) Discover(ctx context.Context, filter string, refresh bool) ([]mode
 		Provider: p.ID(), Variant: rfcVariant, ID: rfcCollection, DisplayName: "RFC Series",
 		Description: "Authoritative technical specifications, standards, protocols, operational guidance, and historical records published in the RFC Series by the RFC Editor.",
 		Project:     "RFC Editor", ContentType: "Internet standards and technical references",
+		Profile:         rfcProfile(),
 		Language:        model.Language{Code: "en", Name: "English", LocalName: "English", Direction: "ltr"},
 		OnlineSourceURL: p.baseURL + "/", ReleaseDate: time.Now().UTC().Format("20060102"),
 		Available: true, PartCount: len(release.Entries), Fingerprint: hashBytes(release.Catalog),
@@ -300,6 +301,7 @@ sendLoop:
 		Fingerprint: release.Fingerprint, PartCount: len(resolved.Entries), RawSize: bytes,
 		PublishedAt: time.Now().UTC(), Site: model.DatasetMetadata{
 			Name: "RFC Series", Description: "Authoritative technical specifications, standards, protocols, operational guidance, and historical records published in the RFC Series by the RFC Editor.", Project: "RFC Editor", ContentType: "Internet standards and technical references",
+			Profile:         rfcProfile(),
 			Language:        model.Language{Code: "en", Name: "English", LocalName: "English", Direction: "ltr"},
 			OnlineSourceURL: p.baseURL + "/", SourceDocuments: uint64(len(resolved.Entries)),
 			MetadataUpdatedAt: time.Now().UTC(),
@@ -307,11 +309,19 @@ sendLoop:
 	}, nil
 }
 
+func rfcProfile() model.DatasetProfile {
+	return model.DatasetProfile{Topics: []string{"Internet protocols", "networking", "security", "standards", "operations"}, GeographicScope: []string{"global Internet"}, TimeCoverage: "1969 to present", DocumentTypes: []string{"standards", "protocol specifications", "best current practices", "informational RFCs", "experimental RFCs", "historic RFCs"}, UpdateCadence: "Continuous as RFCs are published", CoverageNotes: "Complete RFC Series entries with canonical text where the RFC Editor supplies it.", SourceFeatures: []string{"canonical text", "RFC cross-references", "status metadata", "author metadata"}}
+}
+
 func (*RFC) Backfill(_ context.Context, _ string, manifest *model.Manifest) bool {
-	if manifest.Provider != "" {
-		return false
+	changed := false
+	if manifest.Provider == "" && manifest.Dataset == rfcCollection {
+		manifest.Provider, manifest.Variant, changed = RFCProviderID, rfcVariant, true
 	}
-	return false
+	if manifest.Provider == RFCProviderID && len(manifest.Site.Profile.Topics) == 0 {
+		manifest.Site.Profile, changed = rfcProfile(), true
+	}
+	return changed
 }
 
 func (p *RFC) loadRelease(ctx context.Context, refresh bool) (*rfcRelease, error) {

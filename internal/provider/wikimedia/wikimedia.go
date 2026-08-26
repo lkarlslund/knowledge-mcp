@@ -112,6 +112,7 @@ func (p *Wikimedia) Discover(ctx context.Context, filter string, refresh bool) (
 	for i := range result.Datasets {
 		result.Datasets[i].Provider = p.ID()
 		result.Datasets[i].Description = wikimediaDatasetDescription(result.Datasets[i].DisplayName, result.Datasets[i].ContentType, result.Datasets[i].Language)
+		result.Datasets[i].Profile = wikimediaProfile(result.Datasets[i].ContentType, result.Datasets[i].Project, result.Datasets[i].Language, result.Datasets[i].ReleaseDate)
 		result.Datasets[i].Variant = "multistream"
 		result.Datasets[i].Variants = []model.Variant{{ID: "multistream", Name: "Articles", Description: "Wikimedia article multistream dump", Format: "XML/bzip2"}}
 	}
@@ -176,6 +177,7 @@ func (p *Wikimedia) Acquire(ctx context.Context, collection, _ string, release p
 	dumpSite := wikimedia.ReadDumpSiteMetadata(ctx, collection, filepath.Join(partsDir, "000.dump.bz2"))
 	site := mergeWikiSite(dumpSite, p.client.SiteMetadata(ctx, collection))
 	site.Description = wikimediaDatasetDescription(site.Name, site.ContentType, site.Language)
+	site.Profile = wikimediaProfile(site.ContentType, site.Project, site.Language, metadata.ReleaseDate)
 	manifest := model.Manifest{Provider: p.ID(), Variant: "multistream", Dataset: collection, ReleaseDate: metadata.ReleaseDate, Fingerprint: metadata.Fingerprint, PartCount: len(metadata.Parts), PublishedAt: time.Now().UTC(), Site: site}
 	for _, part := range metadata.Parts {
 		manifest.RawSize += part.Raw.Size
@@ -224,12 +226,13 @@ func (p *Wikimedia) Backfill(ctx context.Context, path string, manifest *model.M
 			changed = true
 		}
 	}
-	if manifest.Site.Description != "" && !manifest.Site.MetadataUpdatedAt.IsZero() && time.Since(manifest.Site.MetadataUpdatedAt) < 24*time.Hour {
+	if manifest.Site.Description != "" && len(manifest.Site.Profile.Topics) > 0 && !manifest.Site.MetadataUpdatedAt.IsZero() && time.Since(manifest.Site.MetadataUpdatedAt) < 24*time.Hour {
 		return changed
 	}
 	dump := wikimedia.ReadDumpSiteMetadata(ctx, manifest.Dataset, filepath.Join(path, "parts", "000.dump.bz2"))
 	manifest.Site = mergeWikiSite(dump, p.client.SiteMetadata(ctx, manifest.Dataset))
 	manifest.Site.Description = wikimediaDatasetDescription(manifest.Site.Name, manifest.Site.ContentType, manifest.Site.Language)
+	manifest.Site.Profile = wikimediaProfile(manifest.Site.ContentType, manifest.Site.Project, manifest.Site.Language, manifest.ReleaseDate)
 	return true
 }
 
@@ -253,6 +256,9 @@ func mergeWikiSite(primary, fallback model.DatasetMetadata) model.DatasetMetadat
 	}
 	if primary.ContentType == "" {
 		primary.ContentType = fallback.ContentType
+	}
+	if len(primary.Profile.Topics) == 0 {
+		primary.Profile = fallback.Profile
 	}
 	if primary.Language.Code == "" {
 		primary.Language = fallback.Language
@@ -294,4 +300,25 @@ func wikimediaDatasetDescription(name, contentType string, language model.Langua
 		description += " in " + languageName
 	}
 	return description + ". Use it for locally searchable article text and references from that project."
+}
+
+func wikimediaProfile(contentType, project string, language model.Language, releaseDate string) model.DatasetProfile {
+	topics := []string{"Wikimedia"}
+	if project != "" {
+		topics = append(topics, project)
+	}
+	if contentType != "" {
+		topics = append(topics, contentType)
+	}
+	scope := []string{"global"}
+	if language.Name != "" {
+		scope = append(scope, language.Name+"-language coverage")
+	} else if language.Code != "" {
+		scope = append(scope, language.Code+"-language coverage")
+	}
+	coverage := "Snapshot of the source project"
+	if releaseDate != "" {
+		coverage += " released " + releaseDate
+	}
+	return model.DatasetProfile{Topics: topics, GeographicScope: scope, TimeCoverage: coverage, DocumentTypes: []string{"wiki articles", "reference pages"}, UpdateCadence: "Wikimedia snapshot cadence, commonly monthly", CoverageNotes: "Coverage follows the selected Wikimedia project and includes its locally stored snapshot.", SourceFeatures: []string{"article text", "tables", "references", "internal links", "redirect resolution"}}
 }

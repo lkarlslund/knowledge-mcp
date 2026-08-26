@@ -19,27 +19,28 @@ const (
 )
 
 type AvailableDataset struct {
-	Provider             string    `json:"provider"`
-	Variant              string    `json:"variant,omitempty"`
-	Variants             []Variant `json:"variants,omitempty"`
-	ID                   string    `json:"id"`
-	DisplayName          string    `json:"display_name,omitempty"`
-	Description          string    `json:"description,omitempty"`
-	Project              string    `json:"project,omitempty"`
-	ContentType          string    `json:"content_type,omitempty"`
-	Language             Language  `json:"language,omitempty"`
-	OnlineSourceURL      string    `json:"online_source_url,omitempty"`
-	ReleaseDate          string    `json:"release_date"`
-	Closed               bool      `json:"closed"`
-	Available            bool      `json:"available"`
-	RawSize              int64     `json:"raw_size,omitempty"`
-	ProviderMetadataSize int64     `json:"provider_metadata_size,omitempty"`
-	RawHash              string    `json:"raw_hash,omitempty"`
-	ProviderMetadataHash string    `json:"provider_metadata_hash,omitempty"`
-	Fingerprint          string    `json:"fingerprint,omitempty"`
-	PartCount            int       `json:"part_count"`
-	Installed            bool      `json:"installed"`
-	UpdateAvailable      bool      `json:"update_available"`
+	Provider             string         `json:"provider"`
+	Variant              string         `json:"variant,omitempty"`
+	Variants             []Variant      `json:"variants,omitempty"`
+	ID                   string         `json:"id"`
+	DisplayName          string         `json:"display_name,omitempty"`
+	Description          string         `json:"description,omitempty"`
+	Project              string         `json:"project,omitempty"`
+	ContentType          string         `json:"content_type,omitempty"`
+	Profile              DatasetProfile `json:"profile,omitempty"`
+	Language             Language       `json:"language,omitempty"`
+	OnlineSourceURL      string         `json:"online_source_url,omitempty"`
+	ReleaseDate          string         `json:"release_date"`
+	Closed               bool           `json:"closed"`
+	Available            bool           `json:"available"`
+	RawSize              int64          `json:"raw_size,omitempty"`
+	ProviderMetadataSize int64          `json:"provider_metadata_size,omitempty"`
+	RawHash              string         `json:"raw_hash,omitempty"`
+	ProviderMetadataHash string         `json:"provider_metadata_hash,omitempty"`
+	Fingerprint          string         `json:"fingerprint,omitempty"`
+	PartCount            int            `json:"part_count"`
+	Installed            bool           `json:"installed"`
+	UpdateAvailable      bool           `json:"update_available"`
 }
 
 // Variant is a provider-defined representation of an installable collection.
@@ -86,17 +87,30 @@ type Language struct {
 }
 
 type DatasetMetadata struct {
-	Name              string    `json:"name"`
-	Description       string    `json:"description,omitempty"`
-	Project           string    `json:"project"`
-	ContentType       string    `json:"content_type"`
-	Language          Language  `json:"language"`
-	OnlineSourceURL   string    `json:"online_source_url"`
-	SourceDocuments   uint64    `json:"source_documents"`
-	Closed            bool      `json:"closed"`
-	License           string    `json:"license,omitempty"`
-	LicenseURL        string    `json:"license_url,omitempty"`
-	MetadataUpdatedAt time.Time `json:"metadata_updated_at,omitempty"`
+	Name              string         `json:"name"`
+	Description       string         `json:"description,omitempty"`
+	Project           string         `json:"project"`
+	ContentType       string         `json:"content_type"`
+	Profile           DatasetProfile `json:"profile,omitempty"`
+	Language          Language       `json:"language"`
+	OnlineSourceURL   string         `json:"online_source_url"`
+	SourceDocuments   uint64         `json:"source_documents"`
+	Closed            bool           `json:"closed"`
+	License           string         `json:"license,omitempty"`
+	LicenseURL        string         `json:"license_url,omitempty"`
+	MetadataUpdatedAt time.Time      `json:"metadata_updated_at,omitempty"`
+}
+
+// DatasetProfile is provider-owned selection metadata. It describes what the
+// source contains rather than local implementation or index details.
+type DatasetProfile struct {
+	Topics          []string `json:"topics,omitempty"`
+	GeographicScope []string `json:"geographic_scope,omitempty"`
+	TimeCoverage    string   `json:"time_coverage,omitempty"`
+	DocumentTypes   []string `json:"document_types,omitempty"`
+	UpdateCadence   string   `json:"update_cadence,omitempty"`
+	CoverageNotes   string   `json:"coverage_notes,omitempty"`
+	SourceFeatures  []string `json:"source_features,omitempty"`
 }
 
 type Manifest struct {
@@ -133,20 +147,21 @@ type LocalDataset struct {
 }
 
 type LocalDatasetSummary struct {
-	Provider         string   `json:"provider"`
-	Variant          string   `json:"variant,omitempty"`
-	Dataset          string   `json:"dataset"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description,omitempty"`
-	Project          string   `json:"project"`
-	ContentType      string   `json:"content_type"`
-	Language         Language `json:"language"`
-	OnlineSourceURL  string   `json:"online_source_url"`
-	SourceDocuments  uint64   `json:"source_documents"`
-	IndexedDocuments uint64   `json:"indexed_documents"`
-	ReleaseDate      string   `json:"release_date"`
-	SearchMode       string   `json:"search_mode"`
-	Closed           bool     `json:"closed"`
+	Provider         string         `json:"provider"`
+	Variant          string         `json:"variant,omitempty"`
+	Dataset          string         `json:"dataset"`
+	Name             string         `json:"name"`
+	Description      string         `json:"description,omitempty"`
+	Project          string         `json:"project"`
+	ContentType      string         `json:"content_type"`
+	Profile          DatasetProfile `json:"profile,omitempty"`
+	Language         Language       `json:"language"`
+	OnlineSourceURL  string         `json:"online_source_url"`
+	SourceDocuments  uint64         `json:"source_documents"`
+	IndexedDocuments uint64         `json:"indexed_documents"`
+	ReleaseDate      string         `json:"release_date"`
+	SearchMode       string         `json:"search_mode"`
+	Closed           bool           `json:"closed"`
 }
 
 type Job struct {
