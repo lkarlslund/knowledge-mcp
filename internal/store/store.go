@@ -648,6 +648,19 @@ func (s *Store) Search(ctx context.Context, dataset, query string, options model
 		return model.SearchResult{}, fmt.Errorf("dataset %s is not title-ready", dataset)
 	}
 	_, fullText := knowledgeindex.Current(manifest)
+	switch options.Mode {
+	case "", "auto":
+	case "title":
+		fullText = false
+	case "full_text":
+		if !fullText {
+			s.mu.RUnlock()
+			return model.SearchResult{}, fmt.Errorf("dataset %s is not full-text ready", dataset)
+		}
+	default:
+		s.mu.RUnlock()
+		return model.SearchResult{}, errors.New("search mode must be auto, title, or full_text")
+	}
 	reader, err := s.reader(owner, path, manifest, fullText)
 	if err != nil {
 		s.mu.RUnlock()

@@ -22,17 +22,22 @@ var stableIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 type Progress func(phase string, completed, total int64, units string, rate float64, message string)
 
 type Record struct {
-	ID        string
-	Title     string
-	Body      string
-	URL       string
-	Locator   string
-	Part      int
-	Offset    int64
-	End       int64
-	Namespace int
-	Primary   bool
-	Metadata  map[string]string
+	ID          string
+	Title       string
+	Body        string
+	URL         string
+	Locator     string
+	Part        int
+	Offset      int64
+	End         int64
+	Namespace   int
+	Primary     bool
+	Identifiers []string
+	Aliases     []string
+	Keywords    []string
+	Status      string
+	RankWeight  float64
+	Metadata    map[string]string
 }
 
 type ScanPosition struct {

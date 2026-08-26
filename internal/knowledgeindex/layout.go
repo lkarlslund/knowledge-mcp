@@ -8,8 +8,8 @@ import "github.com/blevesearch/bleve/v2"
 const (
 	TitleDirectory        = "titles.bleve"
 	BodyDirectory         = "bodies.bleve"
-	TitleVersion          = 7
-	BodyVersion           = 10
+	TitleVersion          = 8
+	BodyVersion           = 11
 	DefaultReadCharacters = 100_000
 )
 

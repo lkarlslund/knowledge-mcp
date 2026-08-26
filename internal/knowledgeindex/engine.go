@@ -33,16 +33,22 @@ type TitleProgress func(documents uint64, completed, total int64)
 type BodyProgress func(completed, total int64)
 
 type indexDocument struct {
-	Title      string `json:"title"`
-	TitleExact string `json:"title_exact"`
-	Body       string `json:"body,omitempty"`
-	URL        string `json:"url,omitempty"`
-	Locator    string `json:"locator,omitempty"`
-	Part       int    `json:"part"`
-	Offset     int64  `json:"offset"`
-	End        int64  `json:"end"`
-	Namespace  int    `json:"namespace"`
-	Primary    int    `json:"primary"`
+	Title           string   `json:"title"`
+	TitleExact      string   `json:"title_exact"`
+	Body            string   `json:"body,omitempty"`
+	URL             string   `json:"url,omitempty"`
+	Locator         string   `json:"locator,omitempty"`
+	Part            int      `json:"part"`
+	Offset          int64    `json:"offset"`
+	End             int64    `json:"end"`
+	Namespace       int      `json:"namespace"`
+	Primary         int      `json:"primary"`
+	Identifiers     []string `json:"identifiers,omitempty"`
+	IdentifierExact []string `json:"identifier_exact,omitempty"`
+	Aliases         []string `json:"aliases,omitempty"`
+	Keywords        []string `json:"keywords,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	RankWeight      float64  `json:"rank_weight"`
 }
 
 type buildCheckpoint struct {
@@ -278,7 +284,17 @@ func toIndexDocument(record provider.Record, body bool) indexDocument {
 	if record.Primary {
 		primary = 1
 	}
-	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Part: record.Part, Offset: record.Offset, End: record.End, Namespace: record.Namespace, Primary: primary}
+	rankWeight := record.RankWeight
+	if rankWeight <= 0 {
+		rankWeight = 1
+	}
+	identifiers := make([]string, 0, len(record.Identifiers))
+	for _, identifier := range record.Identifiers {
+		if normalized := normalizeIdentifier(identifier); normalized != "" {
+			identifiers = append(identifiers, normalized)
+		}
+	}
+	document := indexDocument{Title: record.Title, TitleExact: normalize(record.Title), URL: record.URL, Locator: record.Locator, Part: record.Part, Offset: record.Offset, End: record.End, Namespace: record.Namespace, Primary: primary, Identifiers: record.Identifiers, IdentifierExact: identifiers, Aliases: record.Aliases, Keywords: record.Keywords, Status: record.Status, RankWeight: rankWeight}
 	if body {
 		document.Body = record.Body
 	}
@@ -376,7 +392,7 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 		searchQuery = bleve.NewConjunctionQuery(searchQuery, primary)
 	}
 	request := bleve.NewSearchRequestOptions(searchQuery, 500, 0, false)
-	request.Fields = []string{"title", "url", "namespace", "primary"}
+	request.Fields = []string{"title", "url", "namespace", "primary", "identifiers", "status", "rank_weight"}
 	response, err := idx.SearchInContext(ctx, request)
 	if err != nil {
 		return model.SearchResult{}, err
@@ -386,7 +402,12 @@ func (r *Reader) Search(ctx context.Context, query string, options model.SearchO
 		title, _ := hit.Fields["title"].(string)
 		url, _ := hit.Fields["url"].(string)
 		namespace, _ := numberField(hit.Fields["namespace"])
-		hits = append(hits, model.SearchHit{ID: hit.ID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score, MatchMode: mode})
+		rankWeight, ok := numberField(hit.Fields["rank_weight"])
+		if !ok || rankWeight <= 0 {
+			rankWeight = 1
+		}
+		status, _ := hit.Fields["status"].(string)
+		hits = append(hits, model.SearchHit{ID: hit.ID, Title: title, URL: url, Namespace: int(namespace), Score: hit.Score * rankWeight, MatchMode: mode, Identifiers: stringSliceField(hit.Fields["identifiers"]), Status: status})
 	}
 	sort.SliceStable(hits, func(i, j int) bool {
 		iExact, jExact := normalize(hits[i].Title) == normalize(query), normalize(hits[j].Title) == normalize(query)
@@ -450,7 +471,7 @@ func (r *Reader) lookup(ctx context.Context, title, id string) (provider.Record,
 }
 
 func rankedQuery(text string, fullText bool) blevequery.Query {
-	queries := make([]blevequery.Query, 0, 4)
+	queries := make([]blevequery.Query, 0, 7)
 	title := bleve.NewMatchQuery(text)
 	title.SetField("title")
 	title.SetBoost(6)
@@ -459,6 +480,20 @@ func rankedQuery(text string, fullText bool) blevequery.Query {
 	exact.SetField("title_exact")
 	exact.SetBoost(20)
 	queries = append(queries, exact)
+	if normalizedIdentifier := normalizeIdentifier(text); normalizedIdentifier != "" {
+		identifier := bleve.NewTermQuery(normalizedIdentifier)
+		identifier.SetField("identifier_exact")
+		identifier.SetBoost(30)
+		queries = append(queries, identifier)
+	}
+	aliases := bleve.NewMatchQuery(text)
+	aliases.SetField("aliases")
+	aliases.SetBoost(5)
+	queries = append(queries, aliases)
+	keywords := bleve.NewMatchQuery(text)
+	keywords.SetField("keywords")
+	keywords.SetBoost(2.5)
+	queries = append(queries, keywords)
 	if fullText {
 		body := bleve.NewMatchQuery(text)
 		body.SetField("body")
@@ -496,7 +531,20 @@ func indexMapping(body bool) mapping.IndexMapping {
 	exact.Analyzer = "keyword"
 	exact.Store, exact.IncludeTermVectors, exact.IncludeInAll, exact.DocValues = false, false, false, false
 	doc.AddFieldMappingsAt("title_exact", exact)
-	for _, fieldName := range []string{"part", "offset", "end", "namespace", "primary"} {
+	identifier := bleve.NewTextFieldMapping()
+	identifier.Analyzer = "keyword"
+	identifier.Store, identifier.Index, identifier.IncludeTermVectors, identifier.IncludeInAll, identifier.DocValues = true, false, false, false, false
+	doc.AddFieldMappingsAt("identifiers", identifier)
+	identifierExact := bleve.NewTextFieldMapping()
+	identifierExact.Analyzer = "keyword"
+	identifierExact.Store, identifierExact.IncludeTermVectors, identifierExact.IncludeInAll, identifierExact.DocValues = false, false, false, false
+	doc.AddFieldMappingsAt("identifier_exact", identifierExact)
+	for _, fieldName := range []string{"aliases", "keywords", "status"} {
+		field := bleve.NewTextFieldMapping()
+		field.Store, field.IncludeTermVectors, field.IncludeInAll, field.DocValues = fieldName == "status", false, false, false
+		doc.AddFieldMappingsAt(fieldName, field)
+	}
+	for _, fieldName := range []string{"part", "offset", "end", "namespace", "primary", "rank_weight"} {
 		field := bleve.NewNumericFieldMapping()
 		field.Store, field.Index, field.IncludeInAll, field.DocValues = true, true, false, false
 		doc.AddFieldMappingsAt(fieldName, field)
@@ -566,6 +614,35 @@ func recordShard(id string) int {
 
 func normalize(value string) string {
 	return strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "_", " ")))
+}
+
+func normalizeIdentifier(value string) string {
+	var output strings.Builder
+	for _, character := range strings.ToLower(value) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			output.WriteRune(character)
+		}
+	}
+	return output.String()
+}
+
+func stringSliceField(value any) []string {
+	switch values := value.(type) {
+	case string:
+		return []string{values}
+	case []string:
+		return values
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
 }
 func boolPointer(value bool) *bool        { return &value }
 func floatPointer(value float64) *float64 { return &value }

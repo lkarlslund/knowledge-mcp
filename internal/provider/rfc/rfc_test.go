@@ -15,8 +15,8 @@ import (
 )
 
 const testRFCIndex = `<?xml version="1.0"?><rfc-index>
-<rfc-entry><doc-id>RFC0001</doc-id><title>Host Software</title><author><name>S. Crocker</name></author><date><month>April</month><year>1969</year></date><format><file-format>TXT</file-format></format><current-status>UNKNOWN</current-status><stream>Legacy</stream></rfc-entry>
-<rfc-entry><doc-id>RFC9110</doc-id><title>HTTP Semantics</title><author><name>R. Fielding</name></author><date><month>June</month><year>2022</year></date><format><file-format>TXT</file-format></format><current-status>INTERNET STANDARD</current-status><stream>IETF</stream></rfc-entry>
+<rfc-entry><doc-id>RFC0001</doc-id><title>Host Software</title><author><name>S. Crocker</name></author><date><month>April</month><year>1969</year></date><format><file-format>TXT</file-format></format><obsoleted-by><doc-id>RFC9110</doc-id></obsoleted-by><current-status>UNKNOWN</current-status><stream>Legacy</stream></rfc-entry>
+<rfc-entry><doc-id>RFC9110</doc-id><title>HTTP Semantics</title><author><name>R. Fielding</name></author><date><month>June</month><year>2022</year></date><format><file-format>TXT</file-format></format><keywords><kw>Hypertext Transfer Protocol</kw></keywords><obsoletes><doc-id>RFC0001</doc-id></obsoletes><is-also><doc-id>STD0097</doc-id></is-also><current-status>INTERNET STANDARD</current-status><stream>IETF</stream></rfc-entry>
 </rfc-index>`
 
 type rfcTransport struct {
@@ -95,11 +95,18 @@ func TestRFCProviderLifecycleAndOpaqueIDs(t *testing.T) {
 	if len(result.Hits) == 0 || result.Hits[0].ID != "9110" || result.Hits[0].NumericID != 0 {
 		t.Fatalf("search = %#v", result)
 	}
+	identifierResult, err := reader.Search(ctx, "RFC 9110", model.SearchOptions{Limit: 5}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identifierResult.Hits) == 0 || identifierResult.Hits[0].ID != "9110" || identifierResult.Hits[0].Status != "internet standard" || len(identifierResult.Hits[0].Identifiers) < 2 {
+		t.Fatalf("identifier search = %#v", identifierResult)
+	}
 	document, err := reader.Read(ctx, "", "1", model.ReadOptions{Format: "markdown", MaxChars: 10_000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.ID != "1" || !strings.Contains(document.Content, "knowledge-read://read?dataset=rfc&id=9110") || !strings.Contains(document.Content, "# RFC 1: Host Software") {
+	if document.ID != "1" || !strings.Contains(document.Content, "knowledge-read://read?dataset=rfc&id=9110") || !strings.Contains(document.Content, "# RFC 1: Host Software") || !strings.Contains(document.Content, "**Lifecycle:** obsoleted") || len(document.Relationships) != 1 || document.Relationships[0].ID != "9110" {
 		t.Fatalf("document = %#v", document)
 	}
 }

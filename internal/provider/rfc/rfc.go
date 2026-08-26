@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,12 +51,19 @@ type rfcRelease struct {
 }
 
 type rfcEntry struct {
-	ID      string   `json:"id"`
-	Title   string   `json:"title"`
-	Authors []string `json:"authors,omitempty"`
-	Date    string   `json:"date,omitempty"`
-	Status  string   `json:"status,omitempty"`
-	Stream  string   `json:"stream,omitempty"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Authors     []string `json:"authors,omitempty"`
+	Date        string   `json:"date,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	Stream      string   `json:"stream,omitempty"`
+	Keywords    []string `json:"keywords,omitempty"`
+	Obsoletes   []string `json:"obsoletes,omitempty"`
+	ObsoletedBy []string `json:"obsoleted_by,omitempty"`
+	Updates     []string `json:"updates,omitempty"`
+	UpdatedBy   []string `json:"updated_by,omitempty"`
+	Also        []string `json:"also,omitempty"`
+	SeeAlso     []string `json:"see_also,omitempty"`
 }
 
 type rfcXMLIndex struct {
@@ -69,9 +77,16 @@ type rfcXMLIndex struct {
 			Month string `xml:"month"`
 			Year  string `xml:"year"`
 		} `xml:"date"`
-		Formats []string `xml:"format>file-format"`
-		Status  string   `xml:"current-status"`
-		Stream  string   `xml:"stream"`
+		Formats     []string `xml:"format>file-format"`
+		Status      string   `xml:"current-status"`
+		Stream      string   `xml:"stream"`
+		Keywords    []string `xml:"keywords>kw"`
+		Obsoletes   []string `xml:"obsoletes>doc-id"`
+		ObsoletedBy []string `xml:"obsoleted-by>doc-id"`
+		Updates     []string `xml:"updates>doc-id"`
+		UpdatedBy   []string `xml:"updated-by>doc-id"`
+		Also        []string `xml:"is-also>doc-id"`
+		SeeAlso     []string `xml:"see-also>doc-id"`
 	} `xml:"rfc-entry"`
 }
 
@@ -125,7 +140,13 @@ func (c *rfcCorpus) scan(ctx context.Context, after string, body bool, sink prov
 			return err
 		}
 		entry := c.entries[index]
-		record := provider.Record{ID: entry.ID, Title: entry.Title, URL: fmt.Sprintf(c.baseURL+"/info/rfc%s", entry.ID), Locator: entry.ID, Primary: true, Metadata: map[string]string{"status": entry.Status, "authors": strings.Join(entry.Authors, " "), "date": entry.Date, "stream": entry.Stream}}
+		rankWeight := 1.0
+		if len(entry.ObsoletedBy) > 0 {
+			rankWeight = 0.65
+		} else if strings.EqualFold(entry.Status, "HISTORIC") {
+			rankWeight = 0.8
+		}
+		record := provider.Record{ID: entry.ID, Title: entry.Title, URL: fmt.Sprintf(c.baseURL+"/info/rfc%s", entry.ID), Locator: entry.ID, Primary: true, Identifiers: append([]string{"RFC " + entry.ID}, entry.Also...), Aliases: []string{"RFC " + entry.ID, "RFC" + entry.ID}, Keywords: append(append([]string(nil), entry.Keywords...), entry.Stream, entry.Status), Status: rfcLifecycleStatus(entry), RankWeight: rankWeight, Metadata: map[string]string{"status": entry.Status, "authors": strings.Join(entry.Authors, " "), "date": entry.Date, "stream": entry.Stream}}
 		if body {
 			data, err := os.ReadFile(filepath.Join(c.path, "raw", entry.ID+".txt"))
 			if err != nil {
@@ -165,6 +186,7 @@ func (c *rfcCorpus) Read(_ context.Context, record provider.Record, options mode
 	start := min(max(options.Offset, 0), len(content))
 	end := min(start+maximum, len(content))
 	document := model.Document{ID: record.ID, Title: entry.Title, URL: record.URL, Format: format, Content: content[start:end], Offset: start, ReturnedChars: end - start, TotalChars: len(content), Truncated: end < len(content)}
+	document.Relationships = rfcRelationships(entry, c.baseURL)
 	if document.Title == "" {
 		document.Title = record.Title
 	}
@@ -313,13 +335,29 @@ func rfcProfile() model.DatasetProfile {
 	return model.DatasetProfile{Topics: []string{"Internet protocols", "networking", "security", "standards", "operations"}, GeographicScope: []string{"global Internet"}, TimeCoverage: "1969 to present", DocumentTypes: []string{"standards", "protocol specifications", "best current practices", "informational RFCs", "experimental RFCs", "historic RFCs"}, UpdateCadence: "Continuous as RFCs are published", CoverageNotes: "Complete RFC Series entries with canonical text where the RFC Editor supplies it.", SourceFeatures: []string{"canonical text", "RFC cross-references", "status metadata", "author metadata"}}
 }
 
-func (*RFC) Backfill(_ context.Context, _ string, manifest *model.Manifest) bool {
+func (*RFC) Backfill(_ context.Context, path string, manifest *model.Manifest) bool {
 	changed := false
 	if manifest.Provider == "" && manifest.Dataset == rfcCollection {
 		manifest.Provider, manifest.Variant, changed = RFCProviderID, rfcVariant, true
 	}
 	if manifest.Provider == RFCProviderID && len(manifest.Site.Profile.Topics) == 0 {
 		manifest.Site.Profile, changed = rfcProfile(), true
+	}
+	if manifest.Provider == RFCProviderID {
+		if catalog, err := os.ReadFile(filepath.Join(path, "rfc-index.xml")); err == nil {
+			if entries, parseErr := parseRFCIndex(catalog); parseErr == nil {
+				if metadata, marshalErr := json.MarshalIndent(entries, "", "  "); marshalErr == nil {
+					metadata = append(metadata, '\n')
+					existing, _ := os.ReadFile(filepath.Join(path, "documents.json"))
+					if string(existing) != string(metadata) {
+						writeErr := os.WriteFile(filepath.Join(path, "documents.json"), metadata, 0o644)
+						if writeErr == nil {
+							changed = true
+						}
+					}
+				}
+			}
+		}
 	}
 	return changed
 }
@@ -389,7 +427,7 @@ func parseRFCIndex(data []byte) ([]rfcEntry, error) {
 				authors = append(authors, name)
 			}
 		}
-		entries = append(entries, rfcEntry{ID: id, Title: strings.TrimSpace(raw.Title), Authors: authors, Date: strings.TrimSpace(raw.Date.Month + " " + raw.Date.Year), Status: strings.TrimSpace(raw.Status), Stream: strings.TrimSpace(raw.Stream)})
+		entries = append(entries, rfcEntry{ID: id, Title: strings.TrimSpace(raw.Title), Authors: authors, Date: strings.TrimSpace(raw.Date.Month + " " + raw.Date.Year), Status: strings.TrimSpace(raw.Status), Stream: strings.TrimSpace(raw.Stream), Keywords: cleanValues(raw.Keywords), Obsoletes: normalizeDocumentRefs(raw.Obsoletes), ObsoletedBy: normalizeDocumentRefs(raw.ObsoletedBy), Updates: normalizeDocumentRefs(raw.Updates), UpdatedBy: normalizeDocumentRefs(raw.UpdatedBy), Also: normalizeDocumentRefs(raw.Also), SeeAlso: normalizeDocumentRefs(raw.SeeAlso)})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		a, _ := strconv.Atoi(entries[i].ID)
@@ -397,6 +435,76 @@ func parseRFCIndex(data []byte) ([]rfcEntry, error) {
 		return a < b
 	})
 	return entries, nil
+}
+
+func cleanValues(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func normalizeDocumentRefs(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToUpper(strings.TrimSpace(value))
+		for _, prefix := range []string{"RFC", "STD", "BCP", "FYI"} {
+			if strings.HasPrefix(value, prefix) {
+				number := strings.TrimLeft(strings.TrimSpace(strings.TrimPrefix(value, prefix)), "0")
+				if number == "" {
+					number = "0"
+				}
+				value = prefix + " " + number
+				break
+			}
+		}
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func rfcLifecycleStatus(entry rfcEntry) string {
+	if len(entry.ObsoletedBy) > 0 {
+		return "obsoleted"
+	}
+	if entry.Status != "" {
+		return strings.ToLower(entry.Status)
+	}
+	return "current"
+}
+
+func rfcRelationships(entry rfcEntry, baseURL string) []model.DocumentRelationship {
+	types := []struct {
+		name   string
+		values []string
+	}{{"Obsoletes", entry.Obsoletes}, {"Obsoleted by", entry.ObsoletedBy}, {"Updates", entry.Updates}, {"Updated by", entry.UpdatedBy}, {"Also published as", entry.Also}, {"See also", entry.SeeAlso}}
+	var relationships []model.DocumentRelationship
+	for _, group := range types {
+		for _, label := range group.values {
+			relationship := model.DocumentRelationship{Type: group.name, Label: label}
+			upper := strings.ToUpper(label)
+			if strings.HasPrefix(upper, "RFC ") {
+				relationship.ID = strings.TrimSpace(strings.TrimPrefix(upper, "RFC "))
+				relationship.URL = strings.TrimRight(baseURL, "/") + "/info/rfc" + relationship.ID
+			} else {
+				relationship.URL = strings.TrimRight(baseURL, "/") + "/search/rfc_search_detail.php?title=" + url.QueryEscape(label)
+			}
+			relationships = append(relationships, relationship)
+		}
+	}
+	return relationships
+}
+
+func relationshipLink(relationship model.DocumentRelationship) string {
+	if relationship.ID != "" {
+		return "knowledge-read://read?dataset=rfc&id=" + relationship.ID + ` "Call knowledge_read with dataset=rfc and id=` + relationship.ID + `"`
+	}
+	return relationship.URL
 }
 
 func (p *RFC) download(ctx context.Context, id, destination string) error {
@@ -454,6 +562,12 @@ func rfcMarkdown(id string, entry rfcEntry, raw string) string {
 	}
 	if len(entry.Authors) > 0 {
 		fmt.Fprintf(&output, "**Authors:** %s  \n", strings.Join(entry.Authors, ", "))
+	}
+	if lifecycle := rfcLifecycleStatus(entry); lifecycle != "current" {
+		fmt.Fprintf(&output, "**Lifecycle:** %s  \n", lifecycle)
+	}
+	for _, relationship := range rfcRelationships(entry, "https://www.rfc-editor.org") {
+		fmt.Fprintf(&output, "**%s:** [%s](%s)  \n", relationship.Type, relationship.Label, relationshipLink(relationship))
 	}
 	output.WriteString("\n")
 	scanner := bufio.NewScanner(strings.NewReader(raw))

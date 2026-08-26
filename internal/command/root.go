@@ -190,6 +190,7 @@ func newDatasetCommand(opts *options) *cobra.Command {
 
 func newSearchCommand(opts *options) *cobra.Command {
 	var offset, limit int
+	var mode string
 	var includeSecondary, noSnippets bool
 	command := &cobra.Command{
 		Use:   "search DATASET QUERY",
@@ -197,13 +198,14 @@ func newSearchCommand(opts *options) *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withClient(cmd.Context(), opts.server, func(client *mcpclient.Client) error {
-				result, err := client.Search(cmd.Context(), args[0], args[1], model.SearchOptions{Offset: offset, Limit: limit, IncludeSecondary: includeSecondary, Snippets: !noSnippets})
+				result, err := client.Search(cmd.Context(), args[0], args[1], model.SearchOptions{Mode: mode, Offset: offset, Limit: limit, IncludeSecondary: includeSecondary, Snippets: !noSnippets})
 				return printResult(result, err)
 			})
 		},
 	}
 	command.Flags().IntVar(&offset, "offset", 0, "result offset")
 	command.Flags().IntVar(&limit, "limit", 10, "maximum results (up to 50)")
+	command.Flags().StringVar(&mode, "mode", "auto", "auto, title, or full_text")
 	command.Flags().BoolVar(&includeSecondary, "include-secondary", false, "include provider-defined secondary records")
 	command.Flags().BoolVar(&noSnippets, "no-snippets", false, "omit query-centered result snippets")
 	return command
@@ -219,8 +221,8 @@ func newReadCommand(opts *options) *cobra.Command {
 		Short: "Read a document from a local dataset",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if maxChars < 1 || maxChars > 50_000 {
-				return errors.New("max-chars must be between 1 and 50000 for MCP reads")
+			if maxChars < 1 || maxChars > 500_000 {
+				return errors.New("max-chars must be between 1 and 500000 for MCP reads")
 			}
 			title := ""
 			if len(args) == 2 {
@@ -239,7 +241,7 @@ func newReadCommand(opts *options) *cobra.Command {
 	command.Flags().StringVar(&format, "format", "markdown", "markdown, text, or provider-native source")
 	command.Flags().StringVar(&section, "section", "", "read one article section by heading or anchor")
 	command.Flags().IntVar(&offset, "offset", 0, "character offset")
-	command.Flags().IntVar(&maxChars, "max-chars", 12_000, "maximum returned characters (up to 50000)")
+	command.Flags().IntVar(&maxChars, "max-chars", 50_000, "maximum returned characters (up to 500000)")
 	command.Flags().BoolVar(&followRedirects, "follow-redirects", true, "follow redirects and extract targeted sections")
 	command.Flags().BoolVar(&outline, "outline", false, "include the article section outline")
 	return command

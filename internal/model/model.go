@@ -187,15 +187,17 @@ type Job struct {
 }
 
 type SearchHit struct {
-	ID           string  `json:"id"`
-	NumericID    uint64  `json:"-"`
-	Title        string  `json:"title"`
-	MatchedTitle string  `json:"matched_title,omitempty"`
-	URL          string  `json:"url,omitempty"`
-	Namespace    int     `json:"namespace"`
-	Score        float64 `json:"score"`
-	MatchMode    string  `json:"match_mode"`
-	Snippet      string  `json:"snippet,omitempty"`
+	ID           string   `json:"id"`
+	NumericID    uint64   `json:"-"`
+	Title        string   `json:"title"`
+	MatchedTitle string   `json:"matched_title,omitempty"`
+	URL          string   `json:"url,omitempty"`
+	Namespace    int      `json:"namespace"`
+	Score        float64  `json:"score"`
+	MatchMode    string   `json:"match_mode"`
+	Snippet      string   `json:"snippet,omitempty"`
+	Identifiers  []string `json:"identifiers,omitempty"`
+	Status       string   `json:"status,omitempty"`
 }
 
 type SearchResult struct {
@@ -213,6 +215,7 @@ type SearchResult struct {
 }
 
 type SearchOptions struct {
+	Mode             string
 	Offset           int
 	Limit            int
 	IncludeSecondary bool
@@ -220,31 +223,39 @@ type SearchOptions struct {
 }
 
 type Document struct {
-	ID                  string              `json:"id"`
-	Dataset             string              `json:"dataset"`
-	NumericID           uint64              `json:"-"`
-	RevisionID          uint64              `json:"revision_id"`
-	Title               string              `json:"title"`
-	Timestamp           string              `json:"timestamp,omitempty"`
-	URL                 string              `json:"url,omitempty"`
-	RequestedTitle      string              `json:"requested_title,omitempty"`
-	RequestedNumericID  uint64              `json:"-"`
-	Redirected          bool                `json:"redirected,omitempty"`
-	RedirectChain       []RedirectHop       `json:"redirect_chain,omitempty"`
-	Section             string              `json:"section,omitempty"`
-	SectionFound        *bool               `json:"section_found,omitempty"`
-	Format              string              `json:"format"`
-	Content             string              `json:"content"`
-	Offset              int                 `json:"offset"`
-	ReturnedChars       int                 `json:"returned_chars"`
-	TotalChars          int                 `json:"total_chars"`
-	Sections            []DocumentSection   `json:"sections,omitempty"`
-	OutlineTruncated    bool                `json:"outline_truncated,omitempty"`
-	References          []DocumentReference `json:"references,omitempty"`
-	ReferencesTruncated bool                `json:"references_truncated,omitempty"`
-	OmittedReferenceIDs []int               `json:"omitted_reference_ids,omitempty"`
-	Truncated           bool                `json:"truncated"`
-	NextOffset          int                 `json:"next_offset,omitempty"`
+	ID                  string                 `json:"id"`
+	Dataset             string                 `json:"dataset"`
+	NumericID           uint64                 `json:"-"`
+	RevisionID          uint64                 `json:"revision_id"`
+	Title               string                 `json:"title"`
+	Timestamp           string                 `json:"timestamp,omitempty"`
+	URL                 string                 `json:"url,omitempty"`
+	RequestedTitle      string                 `json:"requested_title,omitempty"`
+	RequestedNumericID  uint64                 `json:"-"`
+	Redirected          bool                   `json:"redirected,omitempty"`
+	RedirectChain       []RedirectHop          `json:"redirect_chain,omitempty"`
+	Section             string                 `json:"section,omitempty"`
+	SectionFound        *bool                  `json:"section_found,omitempty"`
+	Format              string                 `json:"format"`
+	Content             string                 `json:"content"`
+	Offset              int                    `json:"offset"`
+	ReturnedChars       int                    `json:"returned_chars"`
+	TotalChars          int                    `json:"total_chars"`
+	Sections            []DocumentSection      `json:"sections,omitempty"`
+	OutlineTruncated    bool                   `json:"outline_truncated,omitempty"`
+	References          []DocumentReference    `json:"references,omitempty"`
+	Relationships       []DocumentRelationship `json:"relationships,omitempty"`
+	ReferencesTruncated bool                   `json:"references_truncated,omitempty"`
+	OmittedReferenceIDs []int                  `json:"omitted_reference_ids,omitempty"`
+	Truncated           bool                   `json:"truncated"`
+	NextOffset          int                    `json:"next_offset,omitempty"`
+}
+
+type DocumentRelationship struct {
+	Type  string `json:"type"`
+	ID    string `json:"id,omitempty"`
+	Label string `json:"label"`
+	URL   string `json:"url,omitempty"`
 }
 
 type RedirectHop struct {

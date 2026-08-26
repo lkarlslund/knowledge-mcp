@@ -59,6 +59,7 @@ type jobInput struct {
 type searchInput struct {
 	Dataset          string `json:"dataset" jsonschema:"installed dataset ID"`
 	Query            string `json:"query" jsonschema:"plain text search query"`
+	Mode             string `json:"mode,omitempty" jsonschema:"auto (default), title, or full_text"`
 	Offset           int    `json:"offset,omitempty" jsonschema:"zero-based result offset"`
 	Limit            int    `json:"limit,omitempty" jsonschema:"result count; defaults to 10 and is capped at 50"`
 	IncludeSecondary bool   `json:"include_secondary,omitempty" jsonschema:"include provider-defined secondary records; for Wikimedia this includes project, category, draft, talk, and other namespaces"`
@@ -72,7 +73,7 @@ type readInput struct {
 	Format          string `json:"format,omitempty" jsonschema:"markdown (default), text, or provider-native source"`
 	Section         string `json:"section,omitempty" jsonschema:"article section heading or anchor; offsets apply within the selected section"`
 	Offset          int    `json:"offset,omitempty" jsonschema:"character offset into rendered content"`
-	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum article-content characters; defaults to 12000 and is capped at 50000"`
+	MaxChars        int    `json:"max_chars,omitempty" jsonschema:"maximum article-content characters; defaults to 50000 and is capped at 500000"`
 	FollowRedirects *bool  `json:"follow_redirects,omitempty" jsonschema:"follow redirect chains and extract a targeted section; defaults to true"`
 	IncludeOutline  *bool  `json:"include_outline,omitempty" jsonschema:"include up to 200 section headings; defaults to true on the first whole-article chunk and when a requested section is missing"`
 }
@@ -87,13 +88,14 @@ func New(service Service) *mcp.Server {
 	jobSchema := mustSchemaFor[jobInput]()
 	jobSchema.Properties["action"].Enum = []any{"pause", "resume", "cancel", "retry"}
 	searchSchema := mustSchemaFor[searchInput]()
+	searchSchema.Properties["mode"].Enum = []any{"auto", "title", "full_text"}
 	setIntegerBounds(searchSchema, "offset", 0, nil)
 	setIntegerBounds(searchSchema, "limit", 1, intPointer(50))
 	readSchema := mustSchemaFor[readInput]()
 	readSchema.OneOf = []*jsonschema.Schema{{Required: []string{"title"}}, {Required: []string{"id"}}}
 	readSchema.Properties["format"].Enum = []any{"markdown", "text", "source"}
 	setIntegerBounds(readSchema, "offset", 0, nil)
-	setIntegerBounds(readSchema, "max_chars", 1, intPointer(50_000))
+	setIntegerBounds(readSchema, "max_chars", 1, intPointer(500_000))
 	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_list_available", Description: "Discover downloadable knowledge datasets with provider-defined descriptions, selection metadata, and variants.", InputSchema: listAvailableSchema, Annotations: readOnlyAnnotations(true)}, func(ctx context.Context, _ *mcp.CallToolRequest, in listAvailableInput) (*mcp.CallToolResult, model.AvailableResult, error) {
 		out, err := service.ListAvailable(ctx, in.Filter, in.Offset, in.Limit, in.Refresh)
 		return nil, out, err
@@ -127,24 +129,24 @@ func New(service Service) *mcp.Server {
 		out, err := service.JobAction(in.JobID, in.Action)
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_search", Description: "Search an installed dataset using local indexes. Results contain an opaque stable id; follow a result with knowledge_read using dataset and id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_search", Description: "Search an installed dataset using local indexes. Exact provider identifiers such as RFC 9110 receive strong ranking; results may include identifiers and lifecycle status. Use mode=title for name lookup or full_text for body retrieval. Follow a result with knowledge_read using dataset and id.", InputSchema: searchSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, model.SearchResult, error) {
 		if strings.TrimSpace(in.Dataset) == "" || strings.TrimSpace(in.Query) == "" {
 			return nil, model.SearchResult{}, errors.New("provide dataset and a non-empty query")
 		}
 		snippets := in.Snippets == nil || *in.Snippets
-		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets})
+		out, err := service.Search(ctx, in.Dataset, in.Query, model.SearchOptions{Mode: in.Mode, Offset: in.Offset, Limit: in.Limit, IncludeSecondary: in.IncludeSecondary, Snippets: snippets})
 		return nil, out, err
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a document by its opaque stable id from knowledge_search or by exact title. Markdown is the default; provider-generated knowledge-read links identify related documents. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "knowledge_read", Description: "Read a document by its opaque stable id from knowledge_search or by exact title. Markdown is the default; provider-generated knowledge-read links and structured relationships identify related documents. Continue large documents with next_offset.", InputSchema: readSchema, Annotations: readOnlyAnnotations(false)}, func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, model.Document, error) {
 		if (strings.TrimSpace(in.Title) == "") == (strings.TrimSpace(in.ID) == "") {
 			return nil, model.Document{}, errors.New("provide exactly one of title or id")
 		}
 		followRedirects := in.FollowRedirects == nil || *in.FollowRedirects
 		maxChars := in.MaxChars
 		if maxChars <= 0 {
-			maxChars = 12_000
-		} else if maxChars > 50_000 {
 			maxChars = 50_000
+		} else if maxChars > 500_000 {
+			maxChars = 500_000
 		}
 		includeOutline := in.IncludeOutline != nil && *in.IncludeOutline || in.IncludeOutline == nil && in.Offset == 0 && in.Section == ""
 		out, err := service.Read(ctx, in.Dataset, in.Title, in.ID, model.ReadOptions{Format: in.Format, Section: in.Section, Offset: in.Offset, MaxChars: maxChars, FollowRedirects: followRedirects, IncludeOutline: includeOutline, AlignBoundaries: true, ReferenceBudgetChars: 10_000, ReferenceMaxChars: 4_000})

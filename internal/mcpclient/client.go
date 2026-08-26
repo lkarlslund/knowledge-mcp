@@ -86,7 +86,11 @@ func (c *Client) JobAction(id, action string) (model.Job, error) {
 
 func (c *Client) Search(ctx context.Context, dataset, query string, options model.SearchOptions) (model.SearchResult, error) {
 	var out model.SearchResult
-	err := c.Call(ctx, "knowledge_search", map[string]any{"dataset": dataset, "query": query, "offset": options.Offset, "limit": options.Limit, "include_secondary": options.IncludeSecondary, "snippets": options.Snippets}, &out)
+	arguments := map[string]any{"dataset": dataset, "query": query, "offset": options.Offset, "limit": options.Limit, "include_secondary": options.IncludeSecondary, "snippets": options.Snippets}
+	if options.Mode != "" {
+		arguments["mode"] = options.Mode
+	}
+	err := c.Call(ctx, "knowledge_search", arguments, &out)
 	return out, err
 }
 

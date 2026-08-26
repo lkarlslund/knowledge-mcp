@@ -109,7 +109,7 @@ func TestToolsAndStructuredCall(t *testing.T) {
 		}
 		if tool.Name == "knowledge_read" {
 			schemaJSON, marshalErr := json.Marshal(tool.InputSchema)
-			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":50000`) {
+			if marshalErr != nil || !strings.Contains(string(schemaJSON), `"oneOf"`) || !strings.Contains(string(schemaJSON), `"maximum":500000`) {
 				t.Errorf("knowledge_read schema lacks conditional/bound constraints: %s, %v", schemaJSON, marshalErr)
 			}
 			if !strings.Contains(tool.Description, "opaque stable id") || !strings.Contains(tool.Description, " id") {
@@ -184,7 +184,7 @@ func TestWikiReadAppliesAgentSizedDefaults(t *testing.T) {
 	if err != nil || result.IsError {
 		t.Fatalf("knowledge_read = %#v, %v", result, err)
 	}
-	if service.readOptions.MaxChars != 12_000 || !service.readOptions.AlignBoundaries || service.readOptions.ReferenceBudgetChars != 10_000 || service.readOptions.ReferenceMaxChars != 4_000 || !service.readOptions.IncludeOutline {
+	if service.readOptions.MaxChars != 50_000 || !service.readOptions.AlignBoundaries || service.readOptions.ReferenceBudgetChars != 10_000 || service.readOptions.ReferenceMaxChars != 4_000 || !service.readOptions.IncludeOutline {
 		t.Fatalf("read options = %#v", service.readOptions)
 	}
 }
